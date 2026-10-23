@@ -1,0 +1,43 @@
+name: Build Meta Muse Firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      board:
+        description: 'Target Board (e.g., sticks3, waveshare-s3-175c, devkit)'
+        required: true
+        default: 'sticks3'
+
+jobs:
+  build:
+    name: Build ESP32 Firmware
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.1
+    steps:
+      - name: Checkout Meta Muse Gadget SDK
+        uses: actions/checkout@v4
+        with:
+          repository: facebookincubator/muse-gadget-sdk
+          submodules: recursive
+
+      - name: Build Board Firmware
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          cd esp32
+          if [ -f tools/board.sh ]; then
+            ./tools/board.sh ${{ github.event.inputs.board }} build
+          elif [ -f tools/muse/board.sh ]; then
+            ./tools/muse/board.sh build ${{ github.event.inputs.board }}
+          else
+            idf.py set-target esp32s3
+            idf.py build
+          fi
+
+      - name: Archive Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: muse-firmware-${{ github.event.inputs.board }}
+          path: |
+            esp32/build*/**/*.bin
+            esp32/build*/**/flasher_args.json
