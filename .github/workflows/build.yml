@@ -4,40 +4,53 @@ on:
   workflow_dispatch:
     inputs:
       board:
-        description: 'Target Board (e.g., sticks3, waveshare-s3-175c, devkit)'
+        description: 'Target Board'
         required: true
-        default: 'sticks3'
+        default: 'waveshare-s3-349'
 
 jobs:
   build:
-    name: Build ESP32 Firmware
+    name: Build Waveshare 3.49 Firmware
     runs-on: ubuntu-latest
-    container: espressif/idf:v6.0.1
+    container:
+      image: espressif/idf:v6.0.1
     steps:
+      - name: Safe Git Directory
+        run: git config --global --add safe.directory '*'
+
       - name: Checkout Meta Muse Gadget SDK
         uses: actions/checkout@v4
         with:
           repository: facebookincubator/muse-gadget-sdk
           submodules: recursive
 
-      - name: Build Board Firmware
+      - name: Add Waveshare 3.49 Board Overlay
+        shell: bash
+        run: |
+          cat << 'EOF' > esp32/devices/sdkconfig.muse-waveshare-s3-349
+          # Waveshare ESP32-S3-Touch-LCD-3.49 V2
+          CONFIG_IDF_TARGET="esp32s3"
+          CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+          CONFIG_SPIRAM_MODE_OCT=y
+          CONFIG_SPIRAM_SPEED_80M=y
+          CONFIG_HOMEHUB_BUTTON_GPIO=0
+          CONFIG_HOMEHUB_LED_BACKEND_NONE=y
+          EOF
+
+      - name: Build Firmware
         shell: bash
         run: |
           . $IDF_PATH/export.sh
           cd esp32
-          if [ -f tools/board.sh ]; then
-            ./tools/board.sh ${{ github.event.inputs.board }} build
-          elif [ -f tools/muse/board.sh ]; then
-            ./tools/muse/board.sh build ${{ github.event.inputs.board }}
-          else
-            idf.py set-target esp32s3
-            idf.py build
-          fi
+          idf.py -B build-waveshare-349 \
+            -DIDF_TARGET=esp32s3 \
+            -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;devices/sdkconfig.muse;devices/sdkconfig.muse-waveshare-s3-349" \
+            build
 
-      - name: Archive Binaries
+      - name: Upload Binaries
         uses: actions/upload-artifact@v4
         with:
-          name: muse-firmware-${{ github.event.inputs.board }}
+          name: muse-waveshare-349-binaries
           path: |
-            esp32/build*/**/*.bin
-            esp32/build*/**/flasher_args.json
+            esp32/build-waveshare-349/**/*.bin
+            esp32/build-waveshare-349/**/flasher_args.json
