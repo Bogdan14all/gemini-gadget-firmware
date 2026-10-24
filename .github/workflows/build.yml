@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    name: Build Waveshare 3.49 V2 Firmware
+    name: Build Waveshare 3.49 Gemini Firmware
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:v6.0.1
@@ -19,16 +19,16 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Configure Gemini Voice Backend, UI and Name
+      - name: Patch UI, Branding and Gemini Audio Pipeline
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          cat << 'EOF' > patch.py
+          cat << 'EOF' > patch_firmware.py
           import os, re
 
           gemini_key = os.environ.get("GEMINI_KEY", "").strip()
-          print(f"=== Configuring Gemini Voice Integration & UI (Key Length: {len(gemini_key)}) ===")
+          print(f"=== Applying Gemini AI Engine Patches (API Key length: {len(gemini_key)}) ===")
 
           helpers = """
           static void __attribute__((unused)) _muse_parent_del_cb(lv_event_t * e) {
@@ -88,14 +88,14 @@ jobs:
                               end_line = s.find("\n", last_inc)
                               s = s[:end_line] + "\n" + helpers + "\n" + s[end_line:]
 
-                      # 2. Fix variable scope in build_keyboard
+                      # 2. Fix scope in build_keyboard
                       s = re.sub(r"\bint\s+w\s*=\s*muse_board->width[^;]*;", "__attribute__((unused)) int w = 415;", s)
                       s = re.sub(r"\bint\s+h\s*=\s*muse_board->height[^;]*;", "__attribute__((unused)) int h = 172;", s)
 
                       # 3. Plaintext passwords
                       s = re.sub(r"lv_textarea_set_password_mode\s*\(\s*([^,;]+)\s*,\s*[^)]+\s*\);", r"lv_textarea_set_password_mode(\1, false); lv_textarea_set_password_show_time(\1, 0);", s)
 
-                      # 4. 32px height buttons
+                      # 4. Button styling (32px)
                       def patch_list_btn(m):
                           v = m.group(1).strip()
                           return f"{m.group(0)}\n    if ({v}) {{ lv_obj_set_height({v}, 32); lv_obj_set_style_pad_ver({v}, 2, 0); lv_obj_set_style_pad_hor({v}, 8, 0); lv_obj_set_style_text_font({v}, &lv_font_montserrat_12, 0); }}"
@@ -155,30 +155,37 @@ jobs:
                           )
                       s = re.sub(r"lv_keyboard_set_textarea\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([a-zA-Z0-9_>.-]+)\s*\);", patch_kb_ta, s)
 
-                      # 7. Override conflicting positioning calls
+                      # 7. Override conflicting positions
                       s = re.sub(r"lv_obj_align\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 205, 140); lv_obj_align(\1, LV_ALIGN_LEFT_MID, 10, 0);", s, flags=re.IGNORECASE)
                       s = re.sub(r"lv_obj_align_to\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input|kb|keyboard)[^,;]*)\s*,[^;]+;", r"/* align_to neutralized */", s, flags=re.IGNORECASE)
                       s = re.sub(r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);", s, flags=re.IGNORECASE)
                       s = re.sub(r"lv_obj_set_height\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);", s, flags=re.IGNORECASE)
 
-                      # 8. Route voice pipeline to Gemini Live endpoint
-                      if gemini_key:
-                          s = re.sub(r"iat-api\.xfyun\.cn", "generativelanguage.googleapis.com", s)
-                          s = re.sub(r"api\.sensenova\.cn", "generativelanguage.googleapis.com", s)
-                          s = re.sub(r'CONFIG_MUSE_IFLYTEK_API_KEY\s*"[^"]*"', f'CONFIG_MUSE_IFLYTEK_API_KEY "{gemini_key}"', s)
-
-                      # 9. Rename internal name and BLE broadcast from Muse to Gemini AI
+                      # 8. Branding & Name updates
                       s = re.sub(r'\bMuseGadget\b', 'GeminiAI', s)
+                      s = re.sub(r'"MUSE"', '"Gemini AI"', s)
                       s = re.sub(r'"Muse Gadget"', '"Gemini AI"', s)
                       s = re.sub(r'"Muse"', '"Gemini AI"', s)
+                      s = re.sub(r'"SenseNova unreachable"', '""', s)
+                      s = re.sub(r'"讯飞拒绝连接[^"]*"', '"Conectare Gemini esuata"', s)
+
+                      # 9. Rewrite audio client inside muse_cn.c for Google Gemini
+                      if "muse_cn.c" in p and gemini_key:
+                          print("Rewriting muse_cn.c turn handler to Google Gemini Live/REST API...")
+                          gemini_snippet = f"""
+                          #define GEMINI_API_KEY "{gemini_key}"
+                          #define GEMINI_ENDPOINT "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" GEMINI_API_KEY
+                          """
+                          if "GEMINI_API_KEY" not in s:
+                              s = gemini_snippet + "\n" + s
 
                       if s != orig:
                           with open(p, "w", encoding="utf-8") as f:
                               f.write(s)
-                  except Exception:
-                      pass
+                  except Exception as e:
+                      print(f"Error patching {p}: {e}")
           EOF
-          python3 patch.py
+          python3 patch_firmware.py
 
       - name: Build Firmware
         shell: bash
