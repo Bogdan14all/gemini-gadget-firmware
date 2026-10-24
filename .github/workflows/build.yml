@@ -111,9 +111,9 @@ static void LV_ATTRIBUTE_UNUSED _muse_kb_unhide_cb(lv_event_t * e) {
                       )
 
                       # 5. Compress padding and row gaps to 2px
-                      s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]\vert{}2[0-9]\vert{}[7-9])(\s*\))", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*\))", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_obj_set_style_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*,)", r"\g<1>2\2", s)
-                      s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:1[0-9]\vert{}2[0-9]\vert{}[7-9])(\s*\))", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*\))", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*,)", r"\g<1>2\2", s)
                       s = re.sub(r"&lv_font_montserrat_(?:14|16|18|20|22|24|28)", r"&lv_font_montserrat_12", s)
 
@@ -235,4 +235,12 @@ static void LV_ATTRIBUTE_UNUSED _muse_kb_unhide_cb(lv_event_t * e) {
           python3 patch_ui.py
 
           # 4. Build final binaries
-          idf.py -B build-waveshare -DIDF_TARGET
+          idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" build
+
+      - name: Upload Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: muse-waveshare-v2-binaries
+          path: |
+            esp32/build-waveshare/**/*.bin
+            esp32/build-waveshare/**/flasher_args.json
