@@ -19,7 +19,7 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Fetch Components & Patch UI Layout
+      - name: Patch Layout and Build Firmware
         shell: bash
         run: |
           . $IDF_PATH/export.sh
@@ -28,16 +28,10 @@ jobs:
           echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> sdkconfig.defaults
           echo "CONFIG_LV_FONT_MONTSERRAT_12=y" >> sdkconfig.defaults
           
-          idf.py -B build-waveshare reconfigure || true
+          OVERLAY=$(find devices/ -type f -name "*349*" | head -n 1)
+          DEFAULTS="sdkconfig.defaults"
+          [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
+          [ -n "$OVERLAY" ] && DEFAULTS="$DEFAULTS;$OVERLAY"
           
-          cat << 'EOF' > patch.py
-          import os, re
-          for root, _, files in os.walk("."):
-              for file in files:
-                  if file.endswith((".c", ".cpp", ".h")):
-                      p = os.path.join(root, file)
-                      try:
-                          with open(p, "r", encoding="utf-8", errors="ignore") as f: s = f.read()
-                          orig = s
-                          if "lv_keyboard.c" in file:
-                              s = re.sub(r"lv_obj_set_size\(\s*obj\s*,\s*
+          # Fetch UI components before patching
+          idf.py -B build-waveshare -DIDF_
