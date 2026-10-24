@@ -19,6 +19,29 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
+      - name: Patch Keyboard Sizing
+        shell: bash
+        run: |
+          python3 -c '
+          import os, re
+
+          for root, _, files in os.walk("esp32"):
+              for file in files:
+                  if file.endswith((".c", ".cpp")):
+                      p = os.path.join(root, file)
+                      with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                          s = f.read()
+                      if "lv_keyboard_create" in s:
+                          print("Patching keyboard in:", p)
+                          s = re.sub(
+                              r"(lv_obj_t\s*\*\s*(\w+)\s*=\s*lv_keyboard_create\([^;]+;\s*)",
+                              r"\1lv_obj_set_height(\2, lv_pct(60));\n    lv_obj_align(\2, LV_ALIGN_BOTTOM_MID, 0, 0);\n",
+                              s
+                          )
+                          with open(p, "w", encoding="utf-8") as f:
+                              f.write(s)
+          '
+
       - name: Build Firmware
         shell: bash
         run: |
@@ -28,7 +51,6 @@ jobs:
           DEFAULTS="sdkconfig.defaults"
           [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
           [ -n "$OVERLAY" ] && DEFAULTS="$DEFAULTS;$OVERLAY"
-          echo "Building with: $DEFAULTS"
           idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" build
 
       - name: Upload Binaries
