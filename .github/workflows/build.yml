@@ -19,27 +19,27 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Patch UI Scaling & Keyboard Height
+      - name: Deep Patch UI Scale & Keyboard
         shell: bash
         run: |
-          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=y" >> esp32/sdkconfig.defaults
-          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=n" >> esp32/sdkconfig.defaults
-          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_16=n" >> esp32/sdkconfig.defaults
-          
           python3 -c '
           import os, re
           for root, _, files in os.walk("esp32"):
               for file in files:
-                  if file.endswith((".c", ".cpp")):
+                  if file.endswith((".c", ".cpp", ".h")):
                       p = os.path.join(root, file)
-                      with open(p, "r", encoding="utf-8", errors="ignore") as f: s = f.read()
-                      if "lv_keyboard_create" in s:
+                      try:
+                          with open(p, "r", encoding="utf-8") as f: s = f.read()
+                          # Reduce DPI by ~30% for buttons and padding
+                          s = re.sub(r"#define LV_DPI_DEF\s+\d+", "#define LV_DPI_DEF 90", s)
+                          # Catch any keyboard assignment and force height to 85px
                           s = re.sub(
-                              r"(lv_obj_t\s*\*\s*(\w+)\s*=\s*lv_keyboard_create\([^;]+;\s*)",
-                              r"\1lv_obj_set_height(\2, lv_pct(50));\n    lv_obj_align(\2, LV_ALIGN_BOTTOM_MID, 0, 0);\n",
+                              r"([a-zA-Z0-9_>.-]+)\s*=\s*lv_keyboard_create\(([^)]+)\);",
+                              r"\1 = lv_keyboard_create(\2);\n    lv_obj_set_height(\1, 85);\n    lv_obj_align(\1, LV_ALIGN_BOTTOM_MID, 0, 0);",
                               s
                           )
                           with open(p, "w", encoding="utf-8") as f: f.write(s)
+                      except: pass
           '
 
       - name: Build Firmware
@@ -51,6 +51,12 @@ jobs:
           DEFAULTS="sdkconfig.defaults"
           [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
           [ -n "$OVERLAY" ] && DEFAULTS="$DEFAULTS;$OVERLAY"
+          
+          # Force smaller base fonts directly into config
+          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_10=y" >> "$DEFAULTS"
+          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=n" >> "$DEFAULTS"
+          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_16=n" >> "$DEFAULTS"
+          
           idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" build
 
       - name: Upload Binaries
