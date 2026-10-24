@@ -42,8 +42,8 @@ jobs:
           # 2. Fetch dependencies and download LVGL component
           idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" reconfigure
 
-          # 3. Directly refactor UI source code and LVGL keyboard widget
-          python3 -c '
+          # 3. Create and run the Python patch script safely using a Heredoc
+          cat << 'EOF' > patch.py
           import os, re
 
           print("Executing direct source code layout optimizations...")
@@ -51,83 +51,4 @@ jobs:
           for root, _, files in os.walk("."):
               for file in files:
                   if file.endswith((".c", ".cpp", ".h")):
-                      p = os.path.join(root, file)
-                      try:
-                          with open(p, "r", encoding="utf-8", errors="ignore") as f:
-                              s = f.read()
-                          orig = s
-
-                          # A. Patch the underlying LVGL keyboard constructor directly
-                          if "lv_keyboard.c" in file:
-                              # Force default keyboard size to 78px height, bottom aligned
-                              s = re.sub(
-                                  r"lv_obj_set_size\(\s*obj\s*,\s*LV_PCT\(100\)\s*,\s*LV_PCT\(50\)\s*\);",
-                                  "lv_obj_set_size(obj, 640, 78);\n    lv_obj_align(obj, LV_ALIGN_BOTTOM_MID, 0, 0);",
-                                  s
-                              )
-                              # Inject individual button item container padding and font styles
-                              items_style = (
-                                  "\n    lv_obj_set_style_pad_all(obj, 1, LV_PART_MAIN);\n"
-                                  "    lv_obj_set_style_pad_row(obj, 1, LV_PART_MAIN);\n"
-                                  "    lv_obj_set_style_pad_column(obj, 1, LV_PART_MAIN);\n"
-                                  "    lv_obj_set_style_pad_all(obj, 1, LV_PART_ITEMS);\n"
-                                  "    lv_obj_set_style_pad_ver(obj, 1, LV_PART_ITEMS);\n"
-                                  "    lv_obj_set_style_pad_hor(obj, 1, LV_PART_ITEMS);\n"
-                                  "    lv_obj_set_style_text_font(obj, &lv_font_montserrat_10, LV_PART_ITEMS);\n"
-                              )
-                              s = re.sub(
-                                  r"(static\s+void\s+lv_keyboard_constructor\([^{]+{)",
-                                  r"\1" + items_style,
-                                  s
-                              )
-
-                          # B. Refactor all application-level keyboard instances
-                          def patch_kb(m):
-                              var = m.group(1)
-                              return (
-                                  f"{m.group(0)}\n"
-                                  f"    if ({var}) {{\n"
-                                  f"        lv_obj_set_size({var}, 640, 78);\n"
-                                  f"        lv_obj_align({var}, LV_ALIGN_BOTTOM_MID, 0, 0);\n"
-                                  f"        lv_obj_set_style_pad_all({var}, 1, LV_PART_MAIN);\n"
-                                  f"        lv_obj_set_style_pad_row({var}, 1, LV_PART_MAIN);\n"
-                                  f"        lv_obj_set_style_pad_column({var}, 1, LV_PART_MAIN);\n"
-                                  f"        lv_obj_set_style_pad_all({var}, 1, LV_PART_ITEMS);\n"
-                                  f"        lv_obj_set_style_pad_ver({var}, 1, LV_PART_ITEMS);\n"
-                                  f"        lv_obj_set_style_pad_hor({var}, 1, LV_PART_ITEMS);\n"
-                                  f"        lv_obj_set_style_text_font({var}, &lv_font_montserrat_10, LV_PART_ITEMS);\n"
-                                  f"    }}"
-                              )
-                          s = re.sub(
-                              r"(?:lv_obj_t\s*\*\s*)?(\b[a-zA-Z0-9_>.-]+\b)\s*=\s*lv_keyboard_create\([^;]+\);",
-                              patch_kb,
-                              s
-                          )
-
-                          # Overwrite any hardcoded keyboard resizing calls
-                          s = re.sub(
-                              r"lv_obj_set_size\(\s*([a-zA-Z0-9_>.-]*kb[a-zA-Z0-9_>.-]*)\s*,\s*[^,]+,\s*[^)]+\);",
-                              r"lv_obj_set_size(\1, 640, 78); lv_obj_align(\1, LV_ALIGN_BOTTOM_MID, 0, 0);",
-                              s
-                          )
-                          s = re.sub(
-                              r"lv_obj_set_height\(\s*([a-zA-Z0-9_>.-]*kb[a-zA-Z0-9_>.-]*)\s*,\s*[^)]+\);",
-                              r"lv_obj_set_height(\1, 78); lv_obj_align(\1, LV_ALIGN_BOTTOM_MID, 0, 0);",
-                              s
-                          )
-
-                          # C. Refactor Textarea: Pin to top and unmask typed characters so text is visible
-                          def patch_ta(m):
-                              var = m.group(1)
-                              return (
-                                  f"{m.group(0)}\n"
-                                  f"    if ({var}) {{\n"
-                                  f"        lv_obj_set_height({var}, 32);\n"
-                                  f"        lv_obj_align({var}, LV_ALIGN_TOP_MID, 0, 4);\n"
-                                  f"        lv_obj_set_style_pad_ver({var}, 2, 0);\n"
-                                  f"        lv_obj_set_style_text_font({var}, &lv_font_montserrat_12, 0);\n"
-                                  f"        lv_textarea_set_password_mode({var}, false);\n"
-                                  f"    }}"
-                              )
-                          s = re.sub(
-                              r"(?:lv_obj_t\s*\*\s*)?(\b[a-zA-Z0-9_>.-]+\b)\s*=\s*lv_textarea_create\([^;]+\);
+                      p = os.path
