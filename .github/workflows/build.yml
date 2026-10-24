@@ -49,7 +49,7 @@ jobs:
           print("=== Applying Layout, Password Visibility & Retract Patches ===")
           patched_count = 0
 
-          # Part A: Patch LVGL core components directly
+          # Part A: Patch LVGL core components
           for root, dirs, files in os.walk("."):
               for file in files:
                   p = os.path.join(root, file)
@@ -60,7 +60,14 @@ jobs:
                           with open(p, "r", encoding="utf-8", errors="ignore") as f:
                               c = f.read()
                           orig = c
+
+                          c = re.sub(
+                              r"(void\s+lv_textarea_set_password_mode\s*\(\s*lv_obj_t\s*\*\s*[a-zA-Z0-9_]+\s*,\s*bool\s*([a-zA-Z0-9_]+)\s*\)\s*\{)",
+                              r"\1\n    \2 = false;\n",
+                              c
+                          )
                           c = re.sub(r"ta->pwd_mode\s*=\s*[^;]+;", "ta->pwd_mode = 0;", c)
+
                           if c != orig:
                               with open(p, "w", encoding="utf-8") as f:
                                   f.write(c)
@@ -78,7 +85,7 @@ jobs:
 
                           retract_handler = (
                               "if(strcmp(txt, LV_SYMBOL_KEYBOARD) == 0) {\n"
-                              "        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);\n"
+                              "        lv_obj_add_flag(lv_event_get_target(e), LV_OBJ_FLAG_HIDDEN);\n"
                               "        return;\n"
                               "    }"
                           )
@@ -90,10 +97,10 @@ jobs:
 
                           unhide_cb = (
                               "\nstatic void _kb_ta_unhide_cb(lv_event_t * e) {\n"
-                              "    lv_obj_t * kb = (lv_obj_t *)lv_event_get_user_data(e);\n"
-                              "    if(kb && lv_obj_has_flag(kb, LV_OBJ_FLAG_HIDDEN)) {\n"
-                              "        lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);\n"
-                              "        lv_obj_move_foreground(kb);\n"
+                              "    lv_obj_t * target_kb = (lv_obj_t *)lv_event_get_user_data(e);\n"
+                              "    if(target_kb) {\n"
+                              "        lv_obj_clear_flag(target_kb, LV_OBJ_FLAG_HIDDEN);\n"
+                              "        lv_obj_move_foreground(target_kb);\n"
                               "    }\n"
                               "}\n"
                           )
@@ -101,8 +108,8 @@ jobs:
                               c = unhide_cb + c
 
                           c = re.sub(
-                              r"(void\s+lv_keyboard_set_textarea\s*\([^{]+{\s*)",
-                              r"\1if(ta) { lv_obj_add_event_cb(ta, _kb_ta_unhide_cb, LV_EVENT_CLICKED, obj); }\n    ",
+                              r"(void\s+lv_keyboard_set_textarea\s*\(\s*lv_obj_t\s*\*\s*([a-zA-Z0-9_]+)\s*,\s*lv_obj_t\s*\*\s*([a-zA-Z0-9_]+)\s*\)\s*\{)",
+                              r"\1\n    if(\3) { lv_obj_add_event_cb(\3, _kb_ta_unhide_cb, LV_EVENT_CLICKED, \2); }\n",
                               c
                           )
 
@@ -127,6 +134,13 @@ jobs:
                       with open(p, "r", encoding="utf-8", errors="ignore") as f:
                           s = f.read()
                       orig = s
+
+                      # Prevent reboots: hide keyboard if parent is the active screen
+                      s = re.sub(
+                          r"lv_obj_del\s*\(\s*lv_obj_get_parent\s*\(([^)]+)\)\s*\);",
+                          r"{ lv_obj_t *__p = lv_obj_get_parent(\1); if(__p && __p != lv_scr_act()) lv_obj_del(__p); else lv_obj_add_flag(\1, LV_OBJ_FLAG_HIDDEN); }",
+                          s
+                      )
 
                       # Clamp list buttons
                       def patch_list_btn(m):
@@ -240,7 +254,7 @@ jobs:
                           flags=re.IGNORECASE
                       )
 
-                      # Disable password masking globally across any calls
+                      # Disable password masking globally
                       s = re.sub(
                           r"lv_textarea_set_password_mode\s*\(\s*([^,]+)\s*,[^)]+\);",
                           r"lv_textarea_set_password_mode(\1, false);",
