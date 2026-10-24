@@ -25,6 +25,8 @@ jobs:
           python3 -c '
           import os, re
 
+          print("Applying layout constraints: 35px Textarea (shifted down 15px) + 120px Keyboard...")
+
           for root, _, files in os.walk("esp32"):
               for file in files:
                   if file.endswith((".c", ".cpp", ".h")):
@@ -34,6 +36,7 @@ jobs:
 
                       orig = s
 
+                      # 1. Neutralize any hardcoded full-screen sizing on keyboard objects
                       s = re.sub(
                           r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
                           r"lv_obj_set_size(\1, 640, 120);\n    lv_obj_align(\1, LV_ALIGN_BOTTOM_MID, 0, 0);",
@@ -47,6 +50,7 @@ jobs:
                           flags=re.IGNORECASE
                       )
 
+                      # 2. Hook lv_keyboard_set_textarea to lock both the input field and the keyboard simultaneously
                       def patch_kb_ta(m):
                           kb = m.group(1).strip()
                           ta = m.group(2).strip()
@@ -64,12 +68,12 @@ jobs:
                               f"        lv_obj_set_style_text_font({kb}, &lv_font_montserrat_12, LV_PART_ITEMS);\n"
                               f"    }}\n"
                               f"    if ({ta}) {{\n"
-                              f"        lv_obj_set_size({ta}, 550, 30);\n"
-                              f"        lv_obj_align({ta}, LV_ALIGN_BOTTOM_MID, 0, -130);\n"
-                              f"        lv_obj_set_style_pad_all({ta}, 4, 0);\n"
+                              f"        lv_obj_set_size({ta}, 640, 35);\n"
+                              f"        lv_obj_align({ta}, LV_ALIGN_TOP_MID, 0, 15);\n"
+                              f"        lv_obj_set_style_pad_all({ta}, 2, 0);\n"
                               f"        lv_obj_set_style_text_font({ta}, &lv_font_montserrat_12, 0);\n"
                               f"        lv_textarea_set_password_mode({ta}, false);\n"
-                              f"        lv_textarea_set_one_line({ta}, true);\n"
+                              f"        lv_textarea_set_one_line({ta}, false);\n"
                               f"        lv_obj_move_foreground({ta});\n"
                               f"    }}"
                           )
@@ -79,6 +83,7 @@ jobs:
                           s
                       )
 
+                      # 3. Refactor standalone keyboard creations
                       def patch_kb_create(m):
                           var = m.group(1).strip()
                           return (
@@ -101,17 +106,18 @@ jobs:
                           s
                       )
 
+                      # 4. Refactor standalone text area creations
                       def patch_ta_create(m):
                           var = m.group(1).strip()
                           return (
                               f"{m.group(0)}\n"
                               f"    if ({var}) {{\n"
-                              f"        lv_obj_set_size({var}, 550, 30);\n"
-                              f"        lv_obj_align({var}, LV_ALIGN_BOTTOM_MID, 0, -130);\n"
-                              f"        lv_obj_set_style_pad_all({var}, 4, 0);\n"
+                              f"        lv_obj_set_size({var}, 640, 35);\n"
+                              f"        lv_obj_align({var}, LV_ALIGN_TOP_MID, 0, 15);\n"
+                              f"        lv_obj_set_style_pad_all({var}, 2, 0);\n"
                               f"        lv_obj_set_style_text_font({var}, &lv_font_montserrat_12, 0);\n"
                               f"        lv_textarea_set_password_mode({var}, false);\n"
-                              f"        lv_textarea_set_one_line({var}, true);\n"
+                              f"        lv_textarea_set_one_line({var}, false);\n"
                               f"        lv_obj_move_foreground({var});\n"
                               f"    }}"
                           )
@@ -121,9 +127,10 @@ jobs:
                           s
                       )
 
+                      # 5. Disable password masking explicitly
                       s = re.sub(r"lv_textarea_set_password_mode\s*\(\s*([^,]+)\s*,\s*true\s*\);", r"lv_textarea_set_password_mode(\1, false);", s)
-                      s = re.sub(r"lv_textarea_set_one_line\s*\(\s*([^,]+)\s*,\s*false\s*\);", r"lv_textarea_set_one_line(\1, true);", s)
 
+                      # 6. Compact menu & settings buttons to 32px height to prevent accidental taps
                       def patch_list_btn(m):
                           var = m.group(1).strip()
                           return (
@@ -141,16 +148,19 @@ jobs:
                           s
                       )
 
+                      # 7. Compress container padding and row gaps to fit 172px screen height
                       s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*\))", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_obj_set_style_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*,)", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*\))", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*,)", r"\g<1>2\2", s)
 
+                      # 8. Remap oversized header fonts
                       s = re.sub(r"&lv_font_montserrat_(?:16|18|20|22|24|28)", r"&lv_font_montserrat_12", s)
 
                       if s != orig:
                           with open(p, "w", encoding="utf-8") as f:
                               f.write(s)
+                          print("Refactored layout in:", p)
           '
 
       - name: Build Firmware
