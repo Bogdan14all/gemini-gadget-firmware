@@ -19,21 +19,17 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Inspect Port Instructions
-        shell: bash
-        run: |
-          echo "=== README.waveshare-s3-lcd-349.md ==="
-          cat README.waveshare-s3-lcd-349.md || true
-          echo "=== Available device configurations ==="
-          ls -la esp32/devices/ || true
-
       - name: Build Firmware
         shell: bash
         run: |
           . $IDF_PATH/export.sh
           cd esp32
-          # Build target using repository defaults
-          idf.py -B build-waveshare build
+          OVERLAY=$(find devices/ -type f -name "*349*" | head -n 1)
+          DEFAULTS="sdkconfig.defaults"
+          [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
+          [ -n "$OVERLAY" ] && DEFAULTS="$DEFAULTS;$OVERLAY"
+          echo "Building with: $DEFAULTS"
+          idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" build
 
       - name: Upload Binaries
         uses: actions/upload-artifact@v4
