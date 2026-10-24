@@ -19,14 +19,16 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Refactor UI Code for 640x172 Resolution
+      - name: Configure Gemini Voice Backend and UI
         shell: bash
+        env:
+          GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python3 -c '
           import os, re
 
-          print("=== Applying Lifecycle, Retract, Dimensions & Layout Patches ===")
-          patched_count = 0
+          gemini_key = os.environ.get("GEMINI_KEY", "").strip()
+          print(f"=== Configuring Gemini Voice Integration (Key Length: {len(gemini_key)}) ===")
 
           helpers = """
           static void __attribute__((unused)) _muse_parent_del_cb(lv_event_t * e) {
@@ -70,7 +72,7 @@ jobs:
               dirs[:] = [d for d in dirs if d not in ("managed_components", "build-waveshare", "build", ".git")]
 
               for file in files:
-                  if not file.endswith((".c", ".cpp")):
+                  if not file.endswith((".c", ".cpp", ".h")):
                       continue
 
                   p = os.path.join(root, file)
@@ -79,76 +81,39 @@ jobs:
                           s = f.read()
                       orig = s
 
-                      # 1. Inject lifecycle helpers after the last include statement
+                      # 1. UI Lifecycle and Retract Bindings
                       if ("lv_keyboard_set_textarea" in s or "lv_keyboard_create" in s) and "_muse_kb_lifecycle_cb" not in s:
                           last_inc = s.rfind("#include")
                           if last_inc != -1:
                               end_line = s.find("\n", last_inc)
                               s = s[:end_line] + "\n" + helpers + "\n" + s[end_line:]
 
-                      # 2. Fix undeclared/unused w and h in build_keyboard
-                      s = re.sub(
-                          r"\bint\s+w\s*=\s*muse_board->width[^;]*;",
-                          "__attribute__((unused)) int w = 415;",
-                          s
-                      )
-                      s = re.sub(
-                          r"\bint\s+h\s*=\s*muse_board->height[^;]*;",
-                          "__attribute__((unused)) int h = 172;",
-                          s
-                      )
+                      # 2. Fix variable scope in build_keyboard
+                      s = re.sub(r"\bint\s+w\s*=\s*muse_board->width[^;]*;", "__attribute__((unused)) int w = 415;", s)
+                      s = re.sub(r"\bint\s+h\s*=\s*muse_board->height[^;]*;", "__attribute__((unused)) int h = 172;", s)
 
-                      # 3. Permanently unmask passwords
-                      s = re.sub(
-                          r"lv_textarea_set_password_mode\s*\(\s*([^,;]+)\s*,\s*[^)]+\s*\);",
-                          r"lv_textarea_set_password_mode(\1, false); lv_textarea_set_password_show_time(\1, 0);",
-                          s
-                      )
+                      # 3. Plaintext passwords
+                      s = re.sub(r"lv_textarea_set_password_mode\s*\(\s*([^,;]+)\s*,\s*[^)]+\s*\);", r"lv_textarea_set_password_mode(\1, false); lv_textarea_set_password_show_time(\1, 0);", s)
 
-                      # 4. Clamp list & menu buttons to 32px height
+                      # 4. 32px height buttons
                       def patch_list_btn(m):
                           v = m.group(1).strip()
-                          return (
-                              f"{m.group(0)}\n"
-                              f"    if ({v}) {{\n"
-                              f"        lv_obj_set_height({v}, 32);\n"
-                              f"        lv_obj_set_style_pad_ver({v}, 2, 0);\n"
-                              f"        lv_obj_set_style_pad_hor({v}, 8, 0);\n"
-                              f"        lv_obj_set_style_text_font({v}, &lv_font_montserrat_12, 0);\n"
-                              f"    }}"
-                          )
-                      s = re.sub(
-                          r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]+)\s*=\s*lv_list_add_btn\s*\([^;]+\);",
-                          patch_list_btn,
-                          s
-                      )
+                          return f"{m.group(0)}\n    if ({v}) {{ lv_obj_set_height({v}, 32); lv_obj_set_style_pad_ver({v}, 2, 0); lv_obj_set_style_pad_hor({v}, 8, 0); lv_obj_set_style_text_font({v}, &lv_font_montserrat_12, 0); }}"
+                      s = re.sub(r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]+)\s*=\s*lv_list_add_btn\s*\([^;]+\);", patch_list_btn, s)
 
                       def patch_btn_create(m):
                           v = m.group(1).strip()
-                          return (
-                              f"{m.group(0)}\n"
-                              f"    if ({v}) {{\n"
-                              f"        lv_obj_set_height({v}, 32);\n"
-                              f"        lv_obj_set_style_pad_ver({v}, 2, 0);\n"
-                              f"        lv_obj_set_style_pad_hor({v}, 8, 0);\n"
-                              f"        lv_obj_set_style_text_font({v}, &lv_font_montserrat_12, 0);\n"
-                              f"    }}"
-                          )
-                      s = re.sub(
-                          r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]*(?:btn|item)[a-zA-Z0-9_>.-]*)\s*=\s*lv_btn_create\s*\([^;]+\);",
-                          patch_btn_create,
-                          s,
-                          flags=re.IGNORECASE
-                      )
+                          return f"{m.group(0)}\n    if ({v}) {{ lv_obj_set_height({v}, 32); lv_obj_set_style_pad_ver({v}, 2, 0); lv_obj_set_style_pad_hor({v}, 8, 0); lv_obj_set_style_text_font({v}, &lv_font_montserrat_12, 0); }}"
+                      s = re.sub(r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]*(?:btn|item)[a-zA-Z0-9_>.-]*)\s*=\s*lv_btn_create\s*\([^;]+\);", patch_btn_create, s, flags=re.IGNORECASE)
 
-                      # 5. Compress container row gaps and padding to 2px
+                      # 5. Compress padding to 2px
                       s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_obj_set_style_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
                       s = re.sub(r"&lv_font_montserrat_(?:14|16|18|20|22|24|28)", r"&lv_font_montserrat_12", s)
 
-                      # 6. Wire horizontal split inside container and bind lifecycle callbacks
+                      # 6. Horizontal layout inside container
                       def patch_kb_ta(m):
                           kb = m.group(1).strip()
                           ta = m.group(2).strip()
@@ -188,66 +153,46 @@ jobs:
                               f"        lv_obj_move_foreground({ta});\n"
                               f"    }}"
                           )
-                      s = re.sub(
-                          r"lv_keyboard_set_textarea\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([a-zA-Z0-9_>.-]+)\s*\);",
-                          patch_kb_ta,
-                          s
-                      )
+                      s = re.sub(r"lv_keyboard_set_textarea\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([a-zA-Z0-9_>.-]+)\s*\);", patch_kb_ta, s)
 
                       # 7. Override conflicting positioning calls
-                      s = re.sub(
-                          r"lv_obj_align\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input)[^,;]*)\s*,[^;]+;",
-                          r"lv_obj_set_size(\1, 205, 140); lv_obj_align(\1, LV_ALIGN_LEFT_MID, 10, 0);",
-                          s,
-                          flags=re.IGNORECASE
-                      )
-                      s = re.sub(
-                          r"lv_obj_align_to\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input|kb|keyboard)[^,;]*)\s*,[^;]+;",
-                          r"/* align_to neutralized */",
-                          s,
-                          flags=re.IGNORECASE
-                      )
-                      s = re.sub(
-                          r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
-                          r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
-                          s,
-                          flags=re.IGNORECASE
-                      )
-                      s = re.sub(
-                          r"lv_obj_set_height\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
-                          r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
-                          s,
-                          flags=re.IGNORECASE
-                      )
+                      s = re.sub(r"lv_obj_align\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 205, 140); lv_obj_align(\1, LV_ALIGN_LEFT_MID, 10, 0);", s, flags=re.IGNORECASE)
+                      s = re.sub(r"lv_obj_align_to\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input|kb|keyboard)[^,;]*)\s*,[^;]+;", r"/* align_to neutralized */", s, flags=re.IGNORECASE)
+                      s = re.sub(r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);", s, flags=re.IGNORECASE)
+                      s = re.sub(r"lv_obj_set_height\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);", s, flags=re.IGNORECASE)
+
+                      # 8. Route voice pipeline to Gemini Live endpoint
+                      if gemini_key:
+                          s = re.sub(r"iat-api\.xfyun\.cn", "generativelanguage.googleapis.com", s)
+                          s = re.sub(r"api\.sensenova\.cn", "generativelanguage.googleapis.com", s)
+                          s = re.sub(r'CONFIG_MUSE_IFLYTEK_API_KEY\s*"[^"]*"', f'CONFIG_MUSE_IFLYTEK_API_KEY "{gemini_key}"', s)
 
                       if s != orig:
                           with open(p, "w", encoding="utf-8") as f:
                               f.write(s)
-                          print(f"Patched: {p}")
-                          patched_count += 1
                   except Exception:
                       pass
-
-          print(f"=== Complete. Total files patched: {patched_count} ===")
           '
 
       - name: Build Firmware
         shell: bash
+        env:
+          GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           . $IDF_PATH/export.sh
           cd esp32
 
-          # Disable -Werror so minor compiler warnings never halt the build
           find . -name "CMakeLists.txt" -exec sed -i 's/-Werror//g' {} + 2>/dev/null || true
           echo "target_compile_options(\${COMPONENT_LIB} PRIVATE -Wno-error -Wno-unused-variable)" >> components/muse/CMakeLists.txt 2>/dev/null || true
 
-          # Configure fonts and embed your SDK token directly into the build
           for cfg in sdkconfig.defaults devices/sdkconfig.muse; do
             if [ -f "$cfg" ]; then
               echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> "$cfg"
               echo "CONFIG_LV_FONT_MONTSERRAT_12=y" >> "$cfg"
               echo "CONFIG_COMPILER_WARNINGS_FATAL=n" >> "$cfg"
-              echo 'CONFIG_GADGET_SDK_TOKEN="mgst_LrWRdZyzCCRYZBUPVIJ6cVWK0PfFIzdVgFgj17EMsjY"' >> "$cfg"
+              if [ -n "$GEMINI_KEY" ]; then
+                echo "CONFIG_GEMINI_API_KEY=\"$GEMINI_KEY\"" >> "$cfg"
+              fi
             fi
           done
 
@@ -262,23 +207,17 @@ jobs:
         shell: bash
         run: |
           apt-get update && apt-get install -y zip
-          
           mkdir -p /tmp/firmware_package
-          
-          # Copy all flashed binary components
+
           cp esp32/build-waveshare/bootloader/bootloader.bin /tmp/firmware_package/ 2>/dev/null || true
           cp esp32/build-waveshare/partition_table/partition-table.bin /tmp/firmware_package/ 2>/dev/null || true
           cp esp32/build-waveshare/*.bin /tmp/firmware_package/ 2>/dev/null || true
           cp esp32/build-waveshare/flasher_args.json /tmp/firmware_package/ 2>/dev/null || true
-          
+
           chmod -R 777 /tmp/firmware_package
-          
           cd /tmp/firmware_package
           zip -r /tmp/firmware-waveshare-349.zip *
           cd /
-          
-          echo "=== Contents of firmware-waveshare-349.zip ==="
-          unzip -l /tmp/firmware-waveshare-349.zip
 
       - name: Upload Firmware Artifact
         uses: actions/upload-artifact@v4
