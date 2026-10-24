@@ -19,16 +19,20 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Overhaul UI and Native Gemini Engine
+      - name: Overhaul UI, Gemini Engine and Auto-WiFi
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+          WIFI_SSID: ${{ secrets.WIFI_SSID || 'TP-Link_2.4G_9318_Guest' }}
+          WIFI_PASSWORD: ${{ secrets.WIFI_PASSWORD || 'revelion' }}
         run: |
           cat << 'EOF' > patch_gemini.py
           import os, re
 
           gemini_key = os.environ.get("GEMINI_KEY", "").strip()
-          print(f"=== Purging Meta/Chinese Stacks and Wiring Gemini AI (Key length: {len(gemini_key)}) ===")
+          wifi_ssid = os.environ.get("WIFI_SSID", "TP-Link_2.4G_9318_Guest").strip()
+          wifi_pass = os.environ.get("WIFI_PASSWORD", "revelion").strip()
+          print(f"=== Injecting Gemini AI & Auto-WiFi ({wifi_ssid}) ===")
 
           helpers = """
           static void __attribute__((unused)) _muse_parent_del_cb(lv_event_t * e) {
@@ -159,7 +163,7 @@ jobs:
                       s = s.replace("unreachable", "Gemini AI Ready")
                       s = s.replace("SenseNova", "Google Gemini")
                       s = s.replace("iFlytek", "Google Gemini")
-                      s = re.sub(r'Pair with the Muse app[^"]*', 'Dispozitiv autonom configurat pentru Google Gemini AI. Tine apasat butonul BOOT.', s)
+                      s = re.sub(r'Pair with the Muse app[^"]*', 'Dispozitiv autonom configurat pentru Google Gemini AI.', s)
                       s = re.sub(r'"Server"', '"Backend"', s)
                       s = re.sub(r'"VM ID"', '"Model"', s)
                       s = re.sub(r'"Device token"', '"Gemini Key"', s)
@@ -170,12 +174,28 @@ jobs:
                       s = re.sub(r'\bMuseGadget\b', 'GeminiAI', s)
                       s = re.sub(r'讯飞[^"]*', 'Gemini AI', s)
 
-                      # 3. Native Gemini 2.0 Flash URL & Secret Routing
+                      # 3. Native Gemini 2.0 Flash URL & Routing
                       if gemini_key:
                           s = re.sub(r'https?://(?:iat-api\.xfyun\.cn|api\.sensenova\.cn)[^"]*', f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}', s)
                           s = re.sub(r'iat-api\.xfyun\.cn', 'generativelanguage.googleapis.com', s)
                           s = re.sub(r'api\.sensenova\.cn', 'generativelanguage.googleapis.com', s)
                           s = re.sub(r'CONFIG_MUSE_IFLYTEK_API_KEY\s*"[^"]*"', f'CONFIG_MUSE_IFLYTEK_API_KEY "{gemini_key}"', s)
+
+                      # 4. Fallback Auto-Connect Wi-Fi Credentials
+                      if "esp_wifi_connect()" in s:
+                          wifi_inject = f"""
+                          {{
+                              wifi_config_t _wcfg;
+                              esp_wifi_get_config(WIFI_IF_STA, &_wcfg);
+                              if (strlen((char*)_wcfg.sta.ssid) == 0) {{
+                                  strncpy((char*)_wcfg.sta.ssid, "{wifi_ssid}", sizeof(_wcfg.sta.ssid));
+                                  strncpy((char*)_wcfg.sta.password, "{wifi_pass}", sizeof(_wcfg.sta.password));
+                                  esp_wifi_set_config(WIFI_IF_STA, &_wcfg);
+                              }}
+                              esp_wifi_connect();
+                          }}
+                          """
+                          s = s.replace("esp_wifi_connect();", wifi_inject, 1)
 
                       if s != orig:
                           with open(p, "w", encoding="utf-8") as f:
@@ -189,6 +209,8 @@ jobs:
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+          WIFI_SSID: ${{ secrets.WIFI_SSID || 'TP-Link_2.4G_9318_Guest' }}
+          WIFI_PASSWORD: ${{ secrets.WIFI_PASSWORD || 'revelion' }}
         run: |
           . $IDF_PATH/export.sh
           cd esp32
@@ -203,6 +225,10 @@ jobs:
               echo "CONFIG_COMPILER_WARNINGS_FATAL=n" >> "$cfg"
               if [ -n "$GEMINI_KEY" ]; then
                 echo "CONFIG_GEMINI_API_KEY=\"$GEMINI_KEY\"" >> "$cfg"
+              fi
+              if [ -n "$WIFI_SSID" ]; then
+                echo "CONFIG_ESP_WIFI_SSID=\"$WIFI_SSID\"" >> "$cfg"
+                echo "CONFIG_ESP_WIFI_PASSWORD=\"$WIFI_PASSWORD\"" >> "$cfg"
               fi
             fi
           done
