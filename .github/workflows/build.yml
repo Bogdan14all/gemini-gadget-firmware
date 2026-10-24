@@ -1,4 +1,4 @@
-name: Build Meta Muse Firmware
+name: Build Gemini AI Firmware
 
 on:
   workflow_dispatch:
@@ -19,16 +19,16 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Configure Gemini Voice Backend and UI
+      - name: Configure Gemini Voice Backend, UI and Name
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          python3 -c '
+          cat << 'EOF' > patch.py
           import os, re
 
           gemini_key = os.environ.get("GEMINI_KEY", "").strip()
-          print(f"=== Configuring Gemini Voice Integration (Key Length: {len(gemini_key)}) ===")
+          print(f"=== Configuring Gemini Voice Integration & UI (Key Length: {len(gemini_key)}) ===")
 
           helpers = """
           static void __attribute__((unused)) _muse_parent_del_cb(lv_event_t * e) {
@@ -167,12 +167,18 @@ jobs:
                           s = re.sub(r"api\.sensenova\.cn", "generativelanguage.googleapis.com", s)
                           s = re.sub(r'CONFIG_MUSE_IFLYTEK_API_KEY\s*"[^"]*"', f'CONFIG_MUSE_IFLYTEK_API_KEY "{gemini_key}"', s)
 
+                      # 9. Rename internal name and BLE broadcast from Muse to Gemini AI
+                      s = re.sub(r'\bMuseGadget\b', 'GeminiAI', s)
+                      s = re.sub(r'"Muse Gadget"', '"Gemini AI"', s)
+                      s = re.sub(r'"Muse"', '"Gemini AI"', s)
+
                       if s != orig:
                           with open(p, "w", encoding="utf-8") as f:
                               f.write(s)
                   except Exception:
                       pass
-          '
+          EOF
+          python3 patch.py
 
       - name: Build Firmware
         shell: bash
