@@ -19,46 +19,53 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Refactor UI Layout and Build Firmware
+      - name: Refactor UI Code for 640x172 Resolution
         shell: bash
         run: |
-          . $IDF_PATH/export.sh
-          cd esp32
-
-          # 1. Enable Montserrat 10 and 12 fonts
-          for cfg in sdkconfig.defaults devices/sdkconfig.muse; do
-            if [ -f "$cfg" ]; then
-              echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> "$cfg"
-              echo "CONFIG_LV_FONT_MONTSERRAT_12=y" >> "$cfg"
-            fi
-          done
-
-          # 2. Reconfigure project dependencies
-          OVERLAY=$(find devices/ -type f -name "*349*" | head -n 1)
-          DEFAULTS="sdkconfig.defaults"
-          [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
-          [ -n "$OVERLAY" ] && DEFAULTS="$DEFAULTS;$OVERLAY"
-
-          idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" reconfigure
-
-          # 3. Patch application sources
-          cat << 'EOF' > patch_ui.py
+          python3 -c '
           import os, re
 
-          print("=== Applying Retract Key, Visible Password & Layout Optimizations ===")
+          print("=== Applying Lifecycle, Retract, Password & Layout Optimizations ===")
           patched_count = 0
 
-          cb_code = """
-static void LV_ATTRIBUTE_UNUSED _muse_kb_unhide_cb(lv_event_t * e) {
-    lv_obj_t * kb = (lv_obj_t *)lv_event_get_user_data(e);
-    if (kb && lv_obj_has_flag(kb, LV_OBJ_FLAG_HIDDEN)) {
-        lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_move_foreground(kb);
-    }
-}
-"""
+          helpers = """
+          static void __attribute__((unused)) _muse_parent_del_cb(lv_event_t * e) {
+              lv_obj_t * target = (lv_obj_t *)lv_event_get_user_data(e);
+              if (target) {
+                  lv_obj_del_async(target);
+              }
+          }
 
-          for root, dirs, files in os.walk("."):
+          static void __attribute__((unused)) _muse_kb_lifecycle_cb(lv_event_t * e) {
+              lv_event_code_t code = lv_event_get_code(e);
+              lv_obj_t * kb = lv_event_get_target(e);
+              lv_obj_t * ta = (lv_obj_t *)lv_event_get_user_data(e);
+              if (code == LV_EVENT_CANCEL) {
+                  if (kb) {
+                      lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+                  }
+              } else if (code == LV_EVENT_READY) {
+                  if (ta) {
+                      lv_obj_add_flag(ta, LV_OBJ_FLAG_HIDDEN);
+                      lv_obj_del_async(ta);
+                  }
+                  if (kb) {
+                      lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+                      lv_obj_del_async(kb);
+                  }
+              }
+          }
+
+          static void __attribute__((unused)) _muse_ta_unhide_cb(lv_event_t * e) {
+              lv_obj_t * kb = (lv_obj_t *)lv_event_get_user_data(e);
+              if (kb && lv_obj_has_flag(kb, LV_OBJ_FLAG_HIDDEN)) {
+                  lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
+                  lv_obj_move_foreground(kb);
+              }
+          }
+          """
+
+          for root, dirs, files in os.walk("esp32"):
               dirs[:] = [d for d in dirs if d not in ("managed_components", "build-waveshare", "build", ".git")]
 
               for file in files:
@@ -71,28 +78,28 @@ static void LV_ATTRIBUTE_UNUSED _muse_kb_unhide_cb(lv_event_t * e) {
                           s = f.read()
                       orig = s
 
-                      # 1. Inject unhide callback after the last include statement
-                      if "lv_keyboard_set_textarea" in s and "_muse_kb_unhide_cb" not in s:
+                      # 1. Inject lifecycle helpers after the last include statement
+                      if ("lv_keyboard_set_textarea" in s or "lv_keyboard_create" in s) and "_muse_kb_lifecycle_cb" not in s:
                           last_inc = s.rfind("#include")
                           if last_inc != -1:
                               end_line = s.find("\n", last_inc)
-                              s = s[:end_line] + "\n" + cb_code + s[end_line:]
+                              s = s[:end_line] + "\n" + helpers + "\n" + s[end_line:]
 
-                      # 2. Fix Retract Key: Hide the keyboard instead of deleting parent container
+                      # 2. Prevent reboot if active screen deletion is attempted
                       s = re.sub(
                           r"lv_obj_del\s*\(\s*lv_obj_get_parent\s*\(\s*([^)]+)\s*\)\s*\);",
-                          r"do { if(\1) { lv_obj_add_flag(\1, LV_OBJ_FLAG_HIDDEN); } } while(0);",
+                          r"do { lv_obj_t *__p = lv_obj_get_parent(\1); if(__p && __p != lv_scr_act()) lv_obj_del(__p); else if(\1) lv_obj_add_flag(\1, LV_OBJ_FLAG_HIDDEN); } while(0);",
                           s
                       )
 
-                      # 3. Permanently disable password asterisks across all screens
+                      # 3. Permanently unmask passwords
                       s = re.sub(
                           r"lv_textarea_set_password_mode\s*\(\s*([^,;]+)\s*,\s*[^)]+\s*\);",
-                          r"lv_textarea_set_password_mode(\1, false);",
+                          r"lv_textarea_set_password_mode(\1, false); lv_textarea_set_password_show_time(\1, 0);",
                           s
                       )
 
-                      # 4. Clamp list and menu buttons to 32px height
+                      # 4. Clamp list & menu buttons to 32px height
                       def patch_list_btn(m):
                           v = m.group(1).strip()
                           return (
@@ -110,20 +117,44 @@ static void LV_ATTRIBUTE_UNUSED _muse_kb_unhide_cb(lv_event_t * e) {
                           s
                       )
 
-                      # 5. Compress padding and row gaps to 2px
-                      s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*\))", r"\g<1>2\2", s)
-                      s = re.sub(r"(lv_obj_set_style_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*,)", r"\g<1>2\2", s)
-                      s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*\))", r"\g<1>2\2", s)
-                      s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*,)", r"\g<1>2\2", s)
+                      # 5. Clamp standalone buttons to 32px height
+                      def patch_btn_create(m):
+                          v = m.group(1).strip()
+                          return (
+                              f"{m.group(0)}\n"
+                              f"    if ({v}) {{\n"
+                              f"        lv_obj_set_height({v}, 32);\n"
+                              f"        lv_obj_set_style_pad_ver({v}, 2, 0);\n"
+                              f"        lv_obj_set_style_pad_hor({v}, 8, 0);\n"
+                              f"        lv_obj_set_style_text_font({v}, &lv_font_montserrat_12, 0);\n"
+                              f"    }}"
+                          )
+                      s = re.sub(
+                          r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]*(?:btn|item)[a-zA-Z0-9_>.-]*)\s*=\s*lv_btn_create\s*\([^;]+\);",
+                          patch_btn_create,
+                          s,
+                          flags=re.IGNORECASE
+                      )
+
+                      # 6. Compress container row gaps and padding to 2px
+                      s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_obj_set_style_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
                       s = re.sub(r"&lv_font_montserrat_(?:14|16|18|20|22|24|28)", r"&lv_font_montserrat_12", s)
 
-                      # 6. Reparent & align: 205x140 left (Text Area), 415x172 right (Keyboard)
+                      # 7. Wire horizontal split with full lifecycle listeners
                       def patch_kb_ta(m):
                           kb = m.group(1).strip()
                           ta = m.group(2).strip()
                           return (
                               f"lv_keyboard_set_textarea({kb}, {ta});\n"
-                              f"    if ({kb}) {{\n"
+                              f"    if ({kb} && {ta}) {{\n"
+                              f"        lv_obj_t *__p = lv_obj_get_parent({ta});\n"
+                              f"        if (__p && __p != lv_scr_act()) {{\n"
+                              f"            lv_obj_add_event_cb(__p, _muse_parent_del_cb, LV_EVENT_DELETE, {ta});\n"
+                              f"            lv_obj_add_event_cb(__p, _muse_parent_del_cb, LV_EVENT_DELETE, {kb});\n"
+                              f"        }}\n"
                               f"        lv_obj_set_parent({kb}, lv_scr_act());\n"
                               f"        lv_obj_set_size({kb}, 415, 172);\n"
                               f"        lv_obj_align({kb}, LV_ALIGN_RIGHT_MID, 0, 0);\n"
@@ -134,17 +165,18 @@ static void LV_ATTRIBUTE_UNUSED _muse_kb_unhide_cb(lv_event_t * e) {
                               f"        lv_obj_set_style_pad_row({kb}, 1, LV_PART_ITEMS);\n"
                               f"        lv_obj_set_style_pad_column({kb}, 1, LV_PART_ITEMS);\n"
                               f"        lv_obj_set_style_text_font({kb}, &lv_font_montserrat_12, LV_PART_ITEMS);\n"
+                              f"        lv_obj_add_event_cb({kb}, _muse_kb_lifecycle_cb, LV_EVENT_ALL, {ta});\n"
                               f"        lv_obj_move_foreground({kb});\n"
-                              f"    }}\n"
-                              f"    if ({ta}) {{\n"
                               f"        lv_obj_set_parent({ta}, lv_scr_act());\n"
                               f"        lv_obj_set_size({ta}, 205, 140);\n"
                               f"        lv_obj_align({ta}, LV_ALIGN_LEFT_MID, 10, 0);\n"
                               f"        lv_obj_set_style_pad_all({ta}, 4, 0);\n"
                               f"        lv_obj_set_style_text_font({ta}, &lv_font_montserrat_12, 0);\n"
                               f"        lv_textarea_set_password_mode({ta}, false);\n"
+                              f"        lv_textarea_set_password_show_time({ta}, 0);\n"
                               f"        lv_textarea_set_one_line({ta}, false);\n"
-                              f"        lv_obj_add_event_cb({ta}, _muse_kb_unhide_cb, LV_EVENT_CLICKED, {kb});\n"
+                              f"        lv_obj_add_event_cb({ta}, _muse_ta_unhide_cb, LV_EVENT_CLICKED, {kb});\n"
+                              f"        lv_obj_add_event_cb({ta}, _muse_ta_unhide_cb, LV_EVENT_FOCUSED, {kb});\n"
                               f"        lv_obj_move_foreground({ta});\n"
                               f"    }}"
                           )
@@ -154,29 +186,7 @@ static void LV_ATTRIBUTE_UNUSED _muse_kb_unhide_cb(lv_event_t * e) {
                           s
                       )
 
-                      # 7. Standalone Text Area initialization
-                      def patch_ta_create(m):
-                          var = m.group(1).strip()
-                          return (
-                              f"{m.group(0)}\n"
-                              f"    if ({var}) {{\n"
-                              f"        lv_obj_set_parent({var}, lv_scr_act());\n"
-                              f"        lv_obj_set_size({var}, 205, 140);\n"
-                              f"        lv_obj_align({var}, LV_ALIGN_LEFT_MID, 10, 0);\n"
-                              f"        lv_obj_set_style_pad_all({var}, 4, 0);\n"
-                              f"        lv_obj_set_style_text_font({var}, &lv_font_montserrat_12, 0);\n"
-                              f"        lv_textarea_set_password_mode({var}, false);\n"
-                              f"        lv_textarea_set_one_line({var}, false);\n"
-                              f"        lv_obj_move_foreground({var});\n"
-                              f"    }}"
-                          )
-                      s = re.sub(
-                          r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]+)\s*=\s*lv_textarea_create\s*\([^;]+\);",
-                          patch_ta_create,
-                          s
-                      )
-
-                      # 8. Standalone Keyboard initialization
+                      # 8. Standalone keyboard creation
                       def patch_kb_create(m):
                           var = m.group(1).strip()
                           return (
@@ -201,22 +211,34 @@ static void LV_ATTRIBUTE_UNUSED _muse_kb_unhide_cb(lv_event_t * e) {
                           s
                       )
 
-                      # 9. Override conflicting size and alignment calls
+                      # 9. Override conflicting size and position calls
+                      s = re.sub(
+                          r"lv_obj_align\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input)[^,;]*)\s*,[^;]+;",
+                          r"lv_obj_set_size(\1, 205, 140); lv_obj_align(\1, LV_ALIGN_LEFT_MID, 10, 0);",
+                          s,
+                          flags=re.IGNORECASE
+                      )
+                      s = re.sub(
+                          r"lv_obj_set_size\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input)[^,;]*)\s*,[^;]+;",
+                          r"lv_obj_set_size(\1, 205, 140); lv_obj_align(\1, LV_ALIGN_LEFT_MID, 10, 0);",
+                          s,
+                          flags=re.IGNORECASE
+                      )
+                      s = re.sub(
+                          r"lv_obj_align_to\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input|kb|keyboard)[^,;]*)\s*,[^;]+;",
+                          r"/* align_to neutralized */",
+                          s,
+                          flags=re.IGNORECASE
+                      )
                       s = re.sub(
                           r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
-                          r"lv_obj_set_size(\1, 415, 172);\n    lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
+                          r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
                           s,
                           flags=re.IGNORECASE
                       )
                       s = re.sub(
                           r"lv_obj_set_height\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
-                          r"lv_obj_set_size(\1, 415, 172);\n    lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
-                          s,
-                          flags=re.IGNORECASE
-                      )
-                      s = re.sub(
-                          r"lv_obj_align_to\s*\(\s*([^,;]*(?:ta|textarea)[^,;]*)\s*,\s*[^,;]*(?:kb|keyboard)[^,;]*\s*,[^;]+;",
-                          "",
+                          r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
                           s,
                           flags=re.IGNORECASE
                       )
@@ -230,11 +252,24 @@ static void LV_ATTRIBUTE_UNUSED _muse_kb_unhide_cb(lv_event_t * e) {
                       pass
 
           print(f"=== Complete. Total files patched: {patched_count} ===")
-          EOF
+          '
 
-          python3 patch_ui.py
+      - name: Build Firmware
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          cd esp32
 
-          # 4. Build final binaries
+          echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> sdkconfig.defaults
+          echo "CONFIG_LV_FONT_MONTSERRAT_12=y" >> sdkconfig.defaults
+          [ -f "devices/sdkconfig.muse" ] && echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> devices/sdkconfig.muse
+          [ -f "devices/sdkconfig.muse" ] && echo "CONFIG_LV_FONT_MONTSERRAT_12=y" >> devices/sdkconfig.muse
+
+          OVERLAY=$(find devices/ -type f -name "*349*" | head -n 1)
+          DEFAULTS="sdkconfig.defaults"
+          [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
+          [ -n "$OVERLAY" ] && DEFAULTS="$DEFAULTS;$OVERLAY"
+
           idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" build
 
       - name: Upload Binaries
