@@ -19,7 +19,7 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Deep Patch UI Scale & Keyboard
+      - name: Aggressive UI Scale & Keyboard Patch
         shell: bash
         run: |
           python3 -c '
@@ -30,12 +30,12 @@ jobs:
                       p = os.path.join(root, file)
                       try:
                           with open(p, "r", encoding="utf-8") as f: s = f.read()
-                          # Reduce DPI by ~30% for buttons and padding
-                          s = re.sub(r"#define LV_DPI_DEF\s+\d+", "#define LV_DPI_DEF 90", s)
-                          # Catch any keyboard assignment and force height to 85px
+                          # Force aggressive global UI scaling down to ~50%
+                          s = re.sub(r"#define LV_DPI_DEF\s+\d+", "#define LV_DPI_DEF 65", s)
+                          # Lock keyboard to 50% height and remove internal padding
                           s = re.sub(
                               r"([a-zA-Z0-9_>.-]+)\s*=\s*lv_keyboard_create\(([^)]+)\);",
-                              r"\1 = lv_keyboard_create(\2);\n    lv_obj_set_height(\1, 85);\n    lv_obj_align(\1, LV_ALIGN_BOTTOM_MID, 0, 0);",
+                              r"\1 = lv_keyboard_create(\2);\n    lv_obj_set_height(\1, lv_pct(50));\n    lv_obj_align(\1, LV_ALIGN_BOTTOM_MID, 0, 0);\n    lv_obj_set_style_pad_all(\1, 0, 0);",
                               s
                           )
                           with open(p, "w", encoding="utf-8") as f: f.write(s)
@@ -48,8 +48,9 @@ jobs:
           . $IDF_PATH/export.sh
           cd esp32
           
-          # Force smaller base fonts directly into the primary defaults file
+          # Force minimum font sizes in sdkconfig
           echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_10=y" >> sdkconfig.defaults
+          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=n" >> sdkconfig.defaults
           echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=n" >> sdkconfig.defaults
           echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_16=n" >> sdkconfig.defaults
           
