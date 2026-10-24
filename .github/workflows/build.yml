@@ -19,19 +19,13 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Modify Keyboard Size Only
+      - name: Directly Refactor UI Code for 640x172 Resolution
         shell: bash
         run: |
           python3 -c '
           import os, re
 
-          # Screen: 640 x 172
-          SCREEN_H = 172
-          TEXTAREA_RESERVED_H = 48
-          KB_H = SCREEN_H - TEXTAREA_RESERVED_H  # 124 px total
-          ROW_H = KB_H // 4                      # 31 px per row
-
-          print(f"Allocating keyboard height: {KB_H}px ({ROW_H}px per row, 4 rows)")
+          print("Applying layout constraints: 50px Textarea (top) + 120px Keyboard (bottom)...")
 
           for root, _, files in os.walk("esp32"):
               for file in files:
@@ -42,48 +36,131 @@ jobs:
 
                       orig = s
 
-                      # 1. Size keyboard to 124px and align to bottom of the display
-                      def patch_kb(m):
+                      # 1. Neutralize any hardcoded full-screen sizing on keyboard objects
+                      s = re.sub(
+                          r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
+                          r"lv_obj_set_size(\1, 640, 120);\n    lv_obj_align(\1, LV_ALIGN_BOTTOM_MID, 0, 0);",
+                          s,
+                          flags=re.IGNORECASE
+                      )
+                      s = re.sub(
+                          r"lv_obj_set_height\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
+                          r"lv_obj_set_height(\1, 120);\n    lv_obj_align(\1, LV_ALIGN_BOTTOM_MID, 0, 0);",
+                          s,
+                          flags=re.IGNORECASE
+                      )
+
+                      # 2. Hook lv_keyboard_set_textarea to lock both the input field and the keyboard simultaneously
+                      def patch_kb_ta(m):
+                          kb = m.group(1).strip()
+                          ta = m.group(2).strip()
+                          return (
+                              f"lv_keyboard_set_textarea({kb}, {ta});\n"
+                              f"    if ({kb}) {{\n"
+                              f"        lv_obj_set_size({kb}, 640, 120);\n"
+                              f"        lv_obj_align({kb}, LV_ALIGN_BOTTOM_MID, 0, 0);\n"
+                              f"        lv_obj_set_style_pad_all({kb}, 1, LV_PART_MAIN);\n"
+                              f"        lv_obj_set_style_pad_row({kb}, 2, LV_PART_MAIN);\n"
+                              f"        lv_obj_set_style_pad_column({kb}, 2, LV_PART_MAIN);\n"
+                              f"        lv_obj_set_style_pad_all({kb}, 2, LV_PART_ITEMS);\n"
+                              f"        lv_obj_set_style_pad_row({kb}, 1, LV_PART_ITEMS);\n"
+                              f"        lv_obj_set_style_pad_column({kb}, 1, LV_PART_ITEMS);\n"
+                              f"        lv_obj_set_style_text_font({kb}, &lv_font_montserrat_12, LV_PART_ITEMS);\n"
+                              f"    }}\n"
+                              f"    if ({ta}) {{\n"
+                              f"        lv_obj_set_size({ta}, 640, 50);\n"
+                              f"        lv_obj_align({ta}, LV_ALIGN_TOP_MID, 0, 0);\n"
+                              f"        lv_obj_set_style_pad_all({ta}, 4, 0);\n"
+                              f"        lv_obj_set_style_text_font({ta}, &lv_font_montserrat_12, 0);\n"
+                              f"        lv_textarea_set_password_mode({ta}, false);\n"
+                              f"        lv_textarea_set_one_line({ta}, false);\n"
+                              f"        lv_obj_move_foreground({ta});\n"
+                              f"    }}"
+                          )
+                      s = re.sub(
+                          r"lv_keyboard_set_textarea\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\);",
+                          patch_kb_ta,
+                          s
+                      )
+
+                      # 3. Refactor standalone keyboard creations
+                      def patch_kb_create(m):
                           var = m.group(1).strip()
                           return (
                               f"{m.group(0)}\n"
                               f"    if ({var}) {{\n"
-                              f"        lv_obj_set_size({var}, 640, {KB_H});\n"
+                              f"        lv_obj_set_size({var}, 640, 120);\n"
                               f"        lv_obj_align({var}, LV_ALIGN_BOTTOM_MID, 0, 0);\n"
                               f"        lv_obj_set_style_pad_all({var}, 1, LV_PART_MAIN);\n"
-                              f"        lv_obj_set_style_pad_row({var}, 1, LV_PART_MAIN);\n"
-                              f"        lv_obj_set_style_pad_column({var}, 1, LV_PART_MAIN);\n"
-                              f"        lv_obj_set_style_pad_all({var}, 1, LV_PART_ITEMS);\n"
+                              f"        lv_obj_set_style_pad_row({var}, 2, LV_PART_MAIN);\n"
+                              f"        lv_obj_set_style_pad_column({var}, 2, LV_PART_MAIN);\n"
+                              f"        lv_obj_set_style_pad_all({var}, 2, LV_PART_ITEMS);\n"
                               f"        lv_obj_set_style_pad_row({var}, 1, LV_PART_ITEMS);\n"
                               f"        lv_obj_set_style_pad_column({var}, 1, LV_PART_ITEMS);\n"
-                              f"        lv_obj_set_style_text_font({var}, &lv_font_montserrat_10, LV_PART_ITEMS);\n"
+                              f"        lv_obj_set_style_text_font({var}, &lv_font_montserrat_12, LV_PART_ITEMS);\n"
                               f"    }}"
                           )
-
                       s = re.sub(
-                          r"(?:lv_obj_t\s*\*\s*)?(\b[a-zA-Z0-9_>.-]+\b)\s*=\s*lv_keyboard_create\([^;]+\);",
-                          patch_kb,
+                          r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]+)\s*=\s*lv_keyboard_create\s*\([^;]+\);",
+                          patch_kb_create,
                           s
                       )
 
-                      # 2. Prevent subsequent layout calls from expanding the keyboard
+                      # 4. Refactor standalone text area creations
+                      def patch_ta_create(m):
+                          var = m.group(1).strip()
+                          return (
+                              f"{m.group(0)}\n"
+                              f"    if ({var}) {{\n"
+                              f"        lv_obj_set_size({var}, 640, 50);\n"
+                              f"        lv_obj_align({var}, LV_ALIGN_TOP_MID, 0, 0);\n"
+                              f"        lv_obj_set_style_pad_all({var}, 4, 0);\n"
+                              f"        lv_obj_set_style_text_font({var}, &lv_font_montserrat_12, 0);\n"
+                              f"        lv_textarea_set_password_mode({var}, false);\n"
+                              f"        lv_textarea_set_one_line({var}, false);\n"
+                              f"        lv_obj_move_foreground({var});\n"
+                              f"    }}"
+                          )
                       s = re.sub(
-                          r"lv_obj_set_size\(\s*([a-zA-Z0-9_>.-]*(?:kb|keyboard)[a-zA-Z0-9_>.-]*)\s*,\s*[^;]+;",
-                          f"lv_obj_set_size(\\1, 640, {KB_H}); lv_obj_align(\\1, LV_ALIGN_BOTTOM_MID, 0, 0);",
-                          s,
-                          flags=re.IGNORECASE
+                          r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]+)\s*=\s*lv_textarea_create\s*\([^;]+\);",
+                          patch_ta_create,
+                          s
                       )
+
+                      # 5. Disable password masking explicitly
+                      s = re.sub(r"lv_textarea_set_password_mode\s*\(\s*([^,]+)\s*,\s*true\s*\);", r"lv_textarea_set_password_mode(\1, false);", s)
+
+                      # 6. Compact menu & settings buttons to 32px height to prevent accidental taps
+                      def patch_list_btn(m):
+                          var = m.group(1).strip()
+                          return (
+                              f"{m.group(0)}\n"
+                              f"    if ({var}) {{\n"
+                              f"        lv_obj_set_height({var}, 32);\n"
+                              f"        lv_obj_set_style_pad_ver({var}, 2, 0);\n"
+                              f"        lv_obj_set_style_pad_hor({var}, 8, 0);\n"
+                              f"        lv_obj_set_style_text_font({var}, &lv_font_montserrat_12, 0);\n"
+                              f"    }}"
+                          )
                       s = re.sub(
-                          r"lv_obj_set_height\(\s*([a-zA-Z0-9_>.-]*(?:kb|keyboard)[a-zA-Z0-9_>.-]*)\s*,\s*[^;]+;",
-                          f"lv_obj_set_height(\\1, {KB_H}); lv_obj_align(\\1, LV_ALIGN_BOTTOM_MID, 0, 0);",
-                          s,
-                          flags=re.IGNORECASE
+                          r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]+)\s*=\s*lv_list_add_btn\s*\([^;]+\);",
+                          patch_list_btn,
+                          s
                       )
+
+                      # 7. Compress container padding and row gaps to fit 172px screen height
+                      s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*\))", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_obj_set_style_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*,)", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*\))", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*,)", r"\g<1>2\2", s)
+
+                      # 8. Remap oversized header fonts
+                      s = re.sub(r"&lv_font_montserrat_(?:16|18|20|22|24|28)", r"&lv_font_montserrat_12", s)
 
                       if s != orig:
                           with open(p, "w", encoding="utf-8") as f:
                               f.write(s)
-                          print("Updated keyboard dimensions in:", p)
+                          print("Refactored layout in:", p)
           '
 
       - name: Build Firmware
