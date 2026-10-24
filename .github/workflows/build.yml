@@ -19,13 +19,19 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Refactor Keyboard & Layout Geometry
+      - name: Modify Keyboard Size Only
         shell: bash
         run: |
           python3 -c '
           import os, re
 
-          print("Applying strict 640x172 geometry constraints...")
+          # Screen: 640 x 172
+          SCREEN_H = 172
+          TEXTAREA_RESERVED_H = 48
+          KB_H = SCREEN_H - TEXTAREA_RESERVED_H  # 124 px total
+          ROW_H = KB_H // 4                      # 31 px per row
+
+          print(f"Allocating keyboard height: {KB_H}px ({ROW_H}px per row, 4 rows)")
 
           for root, _, files in os.walk("esp32"):
               for file in files:
@@ -36,85 +42,48 @@ jobs:
 
                       orig = s
 
-                      # 1. Inject dynamic keyboard geometry at creation
+                      # 1. Size keyboard to 124px and align to bottom of the display
                       def patch_kb(m):
                           var = m.group(1).strip()
                           return (
                               f"{m.group(0)}\n"
                               f"    if ({var}) {{\n"
-                              f"        lv_obj_set_size({var}, 640, 130);\n"
+                              f"        lv_obj_set_size({var}, 640, {KB_H});\n"
                               f"        lv_obj_align({var}, LV_ALIGN_BOTTOM_MID, 0, 0);\n"
-                              f"        lv_obj_set_style_pad_all({var}, 0, LV_PART_MAIN);\n"
-                              f"        lv_obj_set_style_pad_top({var}, 2, LV_PART_MAIN);\n"
-                              f"        lv_obj_set_style_pad_bottom({var}, 2, LV_PART_MAIN);\n"
-                              f"        lv_obj_set_style_pad_row({var}, 2, LV_PART_MAIN);\n"
-                              f"        lv_obj_set_style_pad_column({var}, 2, LV_PART_MAIN);\n"
-                              f"        lv_obj_set_style_pad_ver({var}, 1, LV_PART_ITEMS);\n"
-                              f"        lv_obj_set_style_pad_hor({var}, 2, LV_PART_ITEMS);\n"
+                              f"        lv_obj_set_style_pad_all({var}, 1, LV_PART_MAIN);\n"
+                              f"        lv_obj_set_style_pad_row({var}, 1, LV_PART_MAIN);\n"
+                              f"        lv_obj_set_style_pad_column({var}, 1, LV_PART_MAIN);\n"
+                              f"        lv_obj_set_style_pad_all({var}, 1, LV_PART_ITEMS);\n"
+                              f"        lv_obj_set_style_pad_row({var}, 1, LV_PART_ITEMS);\n"
+                              f"        lv_obj_set_style_pad_column({var}, 1, LV_PART_ITEMS);\n"
                               f"        lv_obj_set_style_text_font({var}, &lv_font_montserrat_10, LV_PART_ITEMS);\n"
                               f"    }}"
                           )
+
                       s = re.sub(
                           r"(?:lv_obj_t\s*\*\s*)?(\b[a-zA-Z0-9_>.-]+\b)\s*=\s*lv_keyboard_create\([^;]+\);",
                           patch_kb,
                           s
                       )
 
-                      # 2. Neutralize secondary resizing calls that expand the keyboard
+                      # 2. Prevent subsequent layout calls from expanding the keyboard
                       s = re.sub(
-                          r"lv_obj_set_size\(\s*([a-zA-Z0-9_>.-]*(?:kb|keyboard)[a-zA-Z0-9_>.-]*)\s*,\s*[^;]+;\s*",
-                          r"lv_obj_set_size(\1, 640, 130);\n    lv_obj_align(\1, LV_ALIGN_BOTTOM_MID, 0, 0);\n",
+                          r"lv_obj_set_size\(\s*([a-zA-Z0-9_>.-]*(?:kb|keyboard)[a-zA-Z0-9_>.-]*)\s*,\s*[^;]+;",
+                          f"lv_obj_set_size(\\1, 640, {KB_H}); lv_obj_align(\\1, LV_ALIGN_BOTTOM_MID, 0, 0);",
                           s,
                           flags=re.IGNORECASE
                       )
                       s = re.sub(
-                          r"lv_obj_set_height\(\s*([a-zA-Z0-9_>.-]*(?:kb|keyboard)[a-zA-Z0-9_>.-]*)\s*,\s*[^;]+;\s*",
-                          r"lv_obj_set_height(\1, 130);\n    lv_obj_align(\1, LV_ALIGN_BOTTOM_MID, 0, 0);\n",
+                          r"lv_obj_set_height\(\s*([a-zA-Z0-9_>.-]*(?:kb|keyboard)[a-zA-Z0-9_>.-]*)\s*,\s*[^;]+;",
+                          f"lv_obj_set_height(\\1, {KB_H}); lv_obj_align(\\1, LV_ALIGN_BOTTOM_MID, 0, 0);",
                           s,
                           flags=re.IGNORECASE
-                      )
-
-                      # 3. Reserve text input area at the top & reveal password text
-                      def patch_ta(m):
-                          var = m.group(1).strip()
-                          return (
-                              f"{m.group(0)}\n"
-                              f"    if ({var}) {{\n"
-                              f"        lv_obj_set_size({var}, 608, 34);\n"
-                              f"        lv_obj_align({var}, LV_ALIGN_TOP_MID, 0, 4);\n"
-                              f"        lv_obj_set_style_pad_ver({var}, 2, 0);\n"
-                              f"        lv_obj_set_style_text_font({var}, &lv_font_montserrat_12, 0);\n"
-                              f"        lv_textarea_set_password_mode({var}, false);\n"
-                              f"    }}"
-                          )
-                      s = re.sub(
-                          r"(?:lv_obj_t\s*\*\s*)?(\b[a-zA-Z0-9_>.-]+\b)\s*=\s*lv_textarea_create\([^;]+\);",
-                          patch_ta,
-                          s
-                      )
-                      s = re.sub(r"lv_textarea_set_password_mode\s*\(\s*([^,]+)\s*,\s*true\s*\);", r"lv_textarea_set_password_mode(\1, false);", s)
-
-                      # 4. Limit list and settings buttons to 30px
-                      def patch_list_btn(m):
-                          var = m.group(1).strip()
-                          return (
-                              f"{m.group(0)}\n"
-                              f"    if ({var}) {{\n"
-                              f"        lv_obj_set_height({var}, 30);\n"
-                              f"        lv_obj_set_style_pad_ver({var}, 2, 0);\n"
-                              f"        lv_obj_set_style_text_font({var}, &lv_font_montserrat_12, 0);\n"
-                              f"    }}"
-                          )
-                      s = re.sub(
-                          r"(?:lv_obj_t\s*\*\s*)?(\b[a-zA-Z0-9_>.-]+\b)\s*=\s*lv_list_add_btn\([^;]+\);",
-                          patch_list_btn,
-                          s
                       )
 
                       if s != orig:
                           with open(p, "w", encoding="utf-8") as f:
                               f.write(s)
-                          print("Patched layout in:", p)
+                          print("Updated keyboard dimensions in:", p)
           '
 
       - name: Build Firmware
