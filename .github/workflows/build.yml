@@ -47,15 +47,16 @@ jobs:
         run: |
           . $IDF_PATH/export.sh
           cd esp32
+          
+          # Force smaller base fonts directly into the primary defaults file
+          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_10=y" >> sdkconfig.defaults
+          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=n" >> sdkconfig.defaults
+          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_16=n" >> sdkconfig.defaults
+          
           OVERLAY=$(find devices/ -type f -name "*349*" | head -n 1)
           DEFAULTS="sdkconfig.defaults"
           [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
           [ -n "$OVERLAY" ] && DEFAULTS="$DEFAULTS;$OVERLAY"
-          
-          # Force smaller base fonts directly into config
-          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_10=y" >> "$DEFAULTS"
-          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=n" >> "$DEFAULTS"
-          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_16=n" >> "$DEFAULTS"
           
           idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" build
 
