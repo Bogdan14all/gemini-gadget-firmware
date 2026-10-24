@@ -25,7 +25,7 @@ jobs:
           . $IDF_PATH/export.sh
           cd esp32
 
-          # 1. Enable compact fonts in build configurations
+          # 1. Enable compact fonts across build configurations
           for cfg in sdkconfig.defaults devices/sdkconfig.muse; do
             if [ -f "$cfg" ]; then
               echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> "$cfg"
@@ -33,7 +33,7 @@ jobs:
             fi
           done
 
-          # 2. Fetch components so all managed sources are present on disk
+          # 2. Fetch components so sources exist on disk
           OVERLAY=$(find devices/ -type f -name "*349*" | head -n 1)
           DEFAULTS="sdkconfig.defaults"
           [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
@@ -41,137 +41,142 @@ jobs:
 
           idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" reconfigure
 
-          # 3. Apply persistent AST/regex refactoring
+          # 3. Patch only application C files (skip managed_components and header files)
           cat << 'EOF' > patch_ui.py
           import os, re
 
           print("=== Starting UI Layout Optimization for Waveshare 3.49 (640x172) ===")
           patched_count = 0
 
-          for root, _, files in os.walk("."):
+          for root, dirs, files in os.walk("."):
+              # Skip external IDF components, build cache, and git folders
+              dirs[:] = [d for d in dirs if d not in ("managed_components", "build-waveshare", "build", ".git")]
+
               for file in files:
-                  if file.endswith((".c", ".cpp", ".cc", ".cxx", ".h", ".hpp")):
-                      p = os.path.join(root, file)
-                      try:
-                          with open(p, "r", encoding="utf-8", errors="ignore") as f:
-                              s = f.read()
-                          orig = s
+                  # Process only implementation files, never header prototypes
+                  if not file.endswith((".c", ".cpp")):
+                      continue
 
-                          # --- PART A: PRESERVE MENU & BUTTON OPTIMIZATIONS ---
-                          # 1. Clamp list & settings buttons to 32px height
-                          def patch_list_btn(m):
-                              v = m.group(1).strip()
-                              return (
-                                  f"{m.group(0)}\n"
-                                  f"    if ({v}) {{\n"
-                                  f"        lv_obj_set_height({v}, 32);\n"
-                                  f"        lv_obj_set_style_pad_ver({v}, 2, 0);\n"
-                                  f"        lv_obj_set_style_pad_hor({v}, 8, 0);\n"
-                                  f"        lv_obj_set_style_text_font({v}, &lv_font_montserrat_12, 0);\n"
-                                  f"    }}"
-                              )
-                          s = re.sub(
-                              r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]+)\s*=\s*lv_list_add_btn\s*\([^;]+\);",
-                              patch_list_btn,
-                              s
+                  p = os.path.join(root, file)
+                  try:
+                      with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                          s = f.read()
+                      orig = s
+
+                      # --- PART 1: PRESERVE MENU & BUTTON SIZING ---
+                      def patch_list_btn(m):
+                          v = m.group(1).strip()
+                          return (
+                              f"{m.group(0)}\n"
+                              f"    if ({v}) {{\n"
+                              f"        lv_obj_set_height({v}, 32);\n"
+                              f"        lv_obj_set_style_pad_ver({v}, 2, 0);\n"
+                              f"        lv_obj_set_style_pad_hor({v}, 8, 0);\n"
+                              f"        lv_obj_set_style_text_font({v}, &lv_font_montserrat_12, 0);\n"
+                              f"    }}"
                           )
+                      s = re.sub(
+                          r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]+)\s*=\s*lv_list_add_btn\s*\([^;]+\);",
+                          patch_list_btn,
+                          s
+                      )
 
-                          # 2. Compress general container padding and row gaps to 2px
-                          s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*\))", r"\g<1>2\2", s)
-                          s = re.sub(r"(lv_obj_set_style_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*,)", r"\g<1>2\2", s)
-                          s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*\))", r"\g<1>2\2", s)
-                          s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*,)", r"\g<1>2\2", s)
+                      # Compress generic container padding and row gaps to 2px
+                      s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*\))", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_obj_set_style_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*,)", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*\))", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*,)", r"\g<1>2\2", s)
 
-                          # 3. Remap oversized headers down to Montserrat 12
-                          s = re.sub(r"&lv_font_montserrat_(?:16|18|20|22|24|28)", r"&lv_font_montserrat_12", s)
+                      # Remap oversized headers down to Montserrat 12
+                      s = re.sub(r"&lv_font_montserrat_(?:16|18|20|22|24|28)", r"&lv_font_montserrat_12", s)
 
-                          # --- PART B: HORIZONTAL SPLIT (NO OVERLAP) ---
-                          # 4. Disable flex column on dialog containers so widgets can align horizontally
-                          s = re.sub(
-                              r"lv_obj_set_flex_flow\s*\(\s*([^,;]+)\s*,\s*LV_FLEX_FLOW_COLUMN\s*\);",
-                              r"lv_obj_set_flex_flow(\1, LV_FLEX_FLOW_NONE);",
-                              s
+                      # --- PART 2: HORIZONTAL SPLIT (LEFT TEXT BOX / RIGHT KEYBOARD) ---
+                      # Disable flex column on dialog containers
+                      s = re.sub(
+                          r"lv_obj_set_flex_flow\s*\(\s*([^,;]+)\s*,\s*LV_FLEX_FLOW_COLUMN\s*\);",
+                          r"lv_obj_set_flex_flow(\1, LV_FLEX_FLOW_NONE);",
+                          s
+                      )
+
+                      # Match only actual call-site variables (no types/prototypes)
+                      def patch_kb_ta(m):
+                          kb = m.group(1).strip()
+                          ta = m.group(2).strip()
+                          return (
+                              f"lv_keyboard_set_textarea({kb}, {ta});\n"
+                              f"    if ({kb}) {{\n"
+                              f"        lv_obj_set_parent({kb}, lv_scr_act());\n"
+                              f"        lv_obj_set_size({kb}, 415, 172);\n"
+                              f"        lv_obj_align({kb}, LV_ALIGN_RIGHT_MID, 0, 0);\n"
+                              f"        lv_obj_set_style_pad_all({kb}, 1, LV_PART_MAIN);\n"
+                              f"        lv_obj_set_style_pad_row({kb}, 1, LV_PART_MAIN);\n"
+                              f"        lv_obj_set_style_pad_column({kb}, 1, LV_PART_MAIN);\n"
+                              f"        lv_obj_set_style_pad_all({kb}, 2, LV_PART_ITEMS);\n"
+                              f"        lv_obj_set_style_pad_row({kb}, 1, LV_PART_ITEMS);\n"
+                              f"        lv_obj_set_style_pad_column({kb}, 1, LV_PART_ITEMS);\n"
+                              f"        lv_obj_set_style_text_font({kb}, &lv_font_montserrat_12, LV_PART_ITEMS);\n"
+                              f"        lv_obj_move_foreground({kb});\n"
+                              f"    }}\n"
+                              f"    if ({ta}) {{\n"
+                              f"        lv_obj_set_parent({ta}, lv_scr_act());\n"
+                              f"        lv_obj_set_pos({ta}, 10, 36);\n"
+                              f"        lv_obj_set_size({ta}, 205, 126);\n"
+                              f"        lv_obj_set_style_pad_all({ta}, 4, 0);\n"
+                              f"        lv_obj_set_style_text_font({ta}, &lv_font_montserrat_12, 0);\n"
+                              f"        lv_textarea_set_password_mode({ta}, false);\n"
+                              f"        lv_textarea_set_one_line({ta}, false);\n"
+                              f"        lv_obj_move_foreground({ta});\n"
+                              f"    }}"
                           )
+                      s = re.sub(
+                          r"lv_keyboard_set_textarea\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([a-zA-Z0-9_>.-]+)\s*\);",
+                          patch_kb_ta,
+                          s
+                      )
 
-                          # 5. Hook lv_keyboard_set_textarea: Left (Text Box) / Right (Keyboard)
-                          def patch_kb_ta(m):
-                              kb = m.group(1).strip()
-                              ta = m.group(2).strip()
-                              return (
-                                  f"lv_keyboard_set_textarea({kb}, {ta});\n"
-                                  f"    if ({kb}) {{\n"
-                                  f"        lv_obj_set_parent({kb}, lv_scr_act());\n"
-                                  f"        lv_obj_set_size({kb}, 415, 172);\n"
-                                  f"        lv_obj_align({kb}, LV_ALIGN_RIGHT_MID, 0, 0);\n"
-                                  f"        lv_obj_set_style_pad_all({kb}, 1, LV_PART_MAIN);\n"
-                                  f"        lv_obj_set_style_pad_row({kb}, 1, LV_PART_MAIN);\n"
-                                  f"        lv_obj_set_style_pad_column({kb}, 1, LV_PART_MAIN);\n"
-                                  f"        lv_obj_set_style_pad_all({kb}, 2, LV_PART_ITEMS);\n"
-                                  f"        lv_obj_set_style_pad_row({kb}, 1, LV_PART_ITEMS);\n"
-                                  f"        lv_obj_set_style_pad_column({kb}, 1, LV_PART_ITEMS);\n"
-                                  f"        lv_obj_set_style_text_font({kb}, &lv_font_montserrat_12, LV_PART_ITEMS);\n"
-                                  f"        lv_obj_move_foreground({kb});\n"
-                                  f"    }}\n"
-                                  f"    if ({ta}) {{\n"
-                                  f"        lv_obj_set_parent({ta}, lv_scr_act());\n"
-                                  f"        lv_obj_set_pos({ta}, 10, 42);\n"
-                                  f"        lv_obj_set_size({ta}, 205, 120);\n"
-                                  f"        lv_obj_set_style_pad_all({ta}, 4, 0);\n"
-                                  f"        lv_obj_set_style_text_font({ta}, &lv_font_montserrat_12, 0);\n"
-                                  f"        lv_textarea_set_password_mode({ta}, false);\n"
-                                  f"        lv_textarea_set_one_line({ta}, false);\n"
-                                  f"        lv_obj_move_foreground({ta});\n"
-                                  f"    }}"
-                              )
-                          s = re.sub(
-                              r"lv_keyboard_set_textarea\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\);",
-                              patch_kb_ta,
-                              s
-                          )
+                      # Override keyboard size resets
+                      s = re.sub(
+                          r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
+                          r"lv_obj_set_size(\1, 415, 172);\n    lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
+                          s,
+                          flags=re.IGNORECASE
+                      )
+                      s = re.sub(
+                          r"lv_obj_set_height\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
+                          r"lv_obj_set_size(\1, 415, 172);\n    lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
+                          s,
+                          flags=re.IGNORECASE
+                      )
 
-                          # 6. Override explicit keyboard resizing calls
-                          s = re.sub(
-                              r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
-                              r"lv_obj_set_size(\1, 415, 172);\n    lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
-                              s,
-                              flags=re.IGNORECASE
-                          )
-                          s = re.sub(
-                              r"lv_obj_set_height\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
-                              r"lv_obj_set_size(\1, 415, 172);\n    lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
-                              s,
-                              flags=re.IGNORECASE
-                          )
+                      # Remove relative alignments linking text area to keyboard
+                      s = re.sub(
+                          r"lv_obj_align_to\s*\(\s*([^,;]*(?:ta|textarea)[^,;]*)\s*,\s*[^,;]*(?:kb|keyboard)[^,;]*\s*,[^;]+;",
+                          "",
+                          s,
+                          flags=re.IGNORECASE
+                      )
 
-                          # 7. Delete relative alignments binding textarea to keyboard
-                          s = re.sub(
-                              r"lv_obj_align_to\s*\(\s*([^,;]*(?:ta|textarea)[^,;]*)\s*,\s*[^,;]*(?:kb|keyboard)[^,;]*\s*,[^;]+;",
-                              "",
-                              s,
-                              flags=re.IGNORECASE
-                          )
+                      # Unmask passwords globally
+                      s = re.sub(
+                          r"lv_textarea_set_password_mode\s*\(\s*([^,]+)\s*,\s*true\s*\);",
+                          r"lv_textarea_set_password_mode(\1, false);",
+                          s
+                      )
 
-                          # 8. Unmask passwords globally
-                          s = re.sub(
-                              r"lv_textarea_set_password_mode\s*\(\s*([^,]+)\s*,\s*true\s*\);",
-                              r"lv_textarea_set_password_mode(\1, false);",
-                              s
-                          )
+                      if s != orig:
+                          with open(p, "w", encoding="utf-8") as f:
+                              f.write(s)
+                          print(f"Patched: {p}")
+                          patched_count += 1
+                  except Exception as e:
+                      pass
 
-                          if s != orig:
-                              with open(p, "w", encoding="utf-8") as f:
-                                  f.write(s)
-                              print(f"Patched: {p}")
-                              patched_count += 1
-                      except Exception as e:
-                          pass
-
-          print(f"=== Complete. Total files patched: {patched_count} ===")
+          print(f"=== Complete. Total application files patched: {patched_count} ===")
           EOF
 
           python3 patch_ui.py
 
-          # 4. Build optimized firmware binaries
+          # 4. Compile optimized binaries
           idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" build
 
       - name: Upload Binaries
