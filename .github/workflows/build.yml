@@ -25,7 +25,7 @@ jobs:
           . $IDF_PATH/export.sh
           cd esp32
 
-          # 1. Enforce Montserrat 12 as the system-wide default font
+          # 1. Enforce Montserrat 12 font configuration
           for cfg in sdkconfig.defaults devices/sdkconfig.muse; do
             if [ -f "$cfg" ]; then
               echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> "$cfg"
@@ -34,7 +34,7 @@ jobs:
             fi
           done
 
-          # 2. Reconfigure project dependencies
+          # 2. Reconfigure dependencies so components exist on disk
           OVERLAY=$(find devices/ -type f -name "*349*" | head -n 1)
           DEFAULTS="sdkconfig.defaults"
           [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
@@ -42,13 +42,79 @@ jobs:
 
           idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" reconfigure
 
-          # 3. Patch application layout, input screens, menus, and retract handler
+          # 3. Patch layout, unmask passwords, and handle keyboard retraction
           cat << 'EOF' > patch_ui.py
           import os, re
 
-          print("=== Applying Comprehensive UI & Stability Patches ===")
+          print("=== Applying Layout, Password Visibility & Retract Patches ===")
           patched_count = 0
 
+          # Part A: Patch LVGL core components directly
+          for root, dirs, files in os.walk("."):
+              for file in files:
+                  p = os.path.join(root, file)
+
+                  # 1. Permanently disable password asterisks inside lv_textarea.c
+                  if file == "lv_textarea.c":
+                      try:
+                          with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                              c = f.read()
+                          orig = c
+                          c = re.sub(r"ta->pwd_mode\s*=\s*[^;]+;", "ta->pwd_mode = 0;", c)
+                          if c != orig:
+                              with open(p, "w", encoding="utf-8") as f:
+                                  f.write(c)
+                              print(f"Patched password masking in: {p}")
+                              patched_count += 1
+                      except Exception as e:
+                          print(f"Error in textarea patch: {e}")
+
+                  # 2. Patch lv_keyboard.c: retract button hides keyboard; clicking textarea restores it
+                  if file == "lv_keyboard.c":
+                      try:
+                          with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                              c = f.read()
+                          orig = c
+
+                          retract_handler = (
+                              "if(strcmp(txt, LV_SYMBOL_KEYBOARD) == 0) {\n"
+                              "        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);\n"
+                              "        return;\n"
+                              "    }"
+                          )
+                          c = re.sub(
+                              r"if\s*\(\s*strcmp\s*\(\s*txt\s*,\s*LV_SYMBOL_KEYBOARD\s*\)\s*==\s*0\s*\)\s*\{[^}]*\}",
+                              retract_handler,
+                              c
+                          )
+
+                          unhide_cb = (
+                              "\nstatic void _kb_ta_unhide_cb(lv_event_t * e) {\n"
+                              "    lv_obj_t * kb = (lv_obj_t *)lv_event_get_user_data(e);\n"
+                              "    if(kb && lv_obj_has_flag(kb, LV_OBJ_FLAG_HIDDEN)) {\n"
+                              "        lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);\n"
+                              "        lv_obj_move_foreground(kb);\n"
+                              "    }\n"
+                              "}\n"
+                          )
+                          if "_kb_ta_unhide_cb" not in c:
+                              c = unhide_cb + c
+
+                          c = re.sub(
+                              r"(void\s+lv_keyboard_set_textarea\s*\([^{]+{\s*)",
+                              r"\1if(ta) { lv_obj_add_event_cb(ta, _kb_ta_unhide_cb, LV_EVENT_CLICKED, obj); }\n    ",
+                              c
+                          )
+
+                          if c != orig:
+                              with open(p, "w", encoding="utf-8") as f:
+                                  f.write(c)
+                              print(f"Patched keyboard retract handler in: {p}")
+                              patched_count += 1
+                      except Exception as e:
+                          print(f"Error in keyboard patch: {e}")
+
+          # Part B: Patch application sources
           for root, dirs, files in os.walk("."):
               dirs[:] = [d for d in dirs if d not in ("managed_components", "build-waveshare", "build", ".git")]
 
@@ -62,15 +128,7 @@ jobs:
                           s = f.read()
                       orig = s
 
-                      # --- FIX REBOOT BUG: PREVENT DELETION OF ACTIVE SCREEN ---
-                      s = re.sub(
-                          r"lv_obj_del\s*\(\s*lv_obj_get_parent\s*\(([^)]+)\)\s*\);",
-                          r"{ lv_obj_t *__p = lv_obj_get_parent(\1); if(__p && __p != lv_scr_act()) lv_obj_del(__p); else lv_obj_del(\1); }",
-                          s
-                      )
-
-                      # --- FIX MENU & BUTTON SIZING ---
-                      # 1. Clamp list buttons
+                      # Clamp list buttons
                       def patch_list_btn(m):
                           v = m.group(1).strip()
                           return (
@@ -88,7 +146,7 @@ jobs:
                           s
                       )
 
-                      # 2. Clamp standalone menu/dialog buttons
+                      # Clamp standalone buttons
                       def patch_btn_create(m):
                           v = m.group(1).strip()
                           return (
@@ -107,17 +165,14 @@ jobs:
                           flags=re.IGNORECASE
                       )
 
-                      # 3. Compress row gaps and padding across containers to 2px
+                      # Compress container gaps and padding
                       s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_obj_set_style_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
-
-                      # 4. Remap all fonts (including 14px) down to Montserrat 12
                       s = re.sub(r"&lv_font_montserrat_(?:14|16|18|20|22|24|28)", r"&lv_font_montserrat_12", s)
 
-                      # --- FIX KEYBOARD & INPUT OVERLAP (APPLIED GLOBALLY) ---
-                      # 5. Intercept lv_keyboard_set_textarea across all input screens
+                      # Horizontal split wiring
                       def patch_kb_ta(m):
                           kb = m.group(1).strip()
                           ta = m.group(2).strip()
@@ -153,7 +208,7 @@ jobs:
                           s
                       )
 
-                      # 6. Override subsequent text area alignments and resizes in muse_input.c
+                      # Lock positioning on inputs and keyboards
                       s = re.sub(
                           r"lv_obj_align\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input)[^,;]*)\s*,[^;]+;",
                           r"lv_obj_set_size(\1, 205, 140); lv_obj_align(\1, LV_ALIGN_LEFT_MID, 10, 0);",
@@ -172,8 +227,6 @@ jobs:
                           s,
                           flags=re.IGNORECASE
                       )
-
-                      # 7. Override subsequent keyboard sizing
                       s = re.sub(
                           r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
                           r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
@@ -187,9 +240,9 @@ jobs:
                           flags=re.IGNORECASE
                       )
 
-                      # 8. Unmask passwords across all input screens
+                      # Disable password masking globally across any calls
                       s = re.sub(
-                          r"lv_textarea_set_password_mode\s*\(\s*([^,]+)\s*,\s*true\s*\);",
+                          r"lv_textarea_set_password_mode\s*\(\s*([^,]+)\s*,[^)]+\);",
                           r"lv_textarea_set_password_mode(\1, false);",
                           s
                       )
@@ -202,7 +255,7 @@ jobs:
                   except Exception:
                       pass
 
-          print(f"=== Complete. Total application files patched: {patched_count} ===")
+          print(f"=== Complete. Total files patched: {patched_count} ===")
           EOF
 
           python3 patch_ui.py
