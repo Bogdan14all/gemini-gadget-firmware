@@ -19,36 +19,25 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Build Firmware
+      - name: Fetch Components & Patch UI Layout
         shell: bash
         run: |
           . $IDF_PATH/export.sh
           cd esp32
-
-          OVERLAY=$(find devices/ -type f -name "*349*" | head -n 1)
-          DEFAULTS="sdkconfig.defaults"
-          [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
-          [ -n "$OVERLAY" ] && DEFAULTS="$DEFAULTS;$OVERLAY"
-
-          # 1. Enable compact fonts across all configuration files so they link cleanly
-          for cfg in sdkconfig.defaults devices/sdkconfig.muse "$OVERLAY"; do
-            if [ -f "$cfg" ]; then
-              echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> "$cfg"
-              echo "CONFIG_LV_FONT_MONTSERRAT_12=y" >> "$cfg"
-              echo "CONFIG_LV_FONT_MONTSERRAT_14=y" >> "$cfg"
-            fi
-          done
-
-          # 2. Fetch dependencies and download LVGL component
-          idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" reconfigure
-
-          # 3. Create and run the Python patch script safely using a Heredoc
+          
+          echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> sdkconfig.defaults
+          echo "CONFIG_LV_FONT_MONTSERRAT_12=y" >> sdkconfig.defaults
+          
+          idf.py -B build-waveshare reconfigure || true
+          
           cat << 'EOF' > patch.py
           import os, re
-
-          print("Executing direct source code layout optimizations...")
-
           for root, _, files in os.walk("."):
               for file in files:
                   if file.endswith((".c", ".cpp", ".h")):
-                      p = os.path
+                      p = os.path.join(root, file)
+                      try:
+                          with open(p, "r", encoding="utf-8", errors="ignore") as f: s = f.read()
+                          orig = s
+                          if "lv_keyboard.c" in file:
+                              s = re.sub(r"lv_obj_set_size\(\s*obj\s*,\s*
