@@ -25,15 +25,16 @@ jobs:
           . $IDF_PATH/export.sh
           cd esp32
 
-          # 1. Enable compact fonts across build configurations
+          # 1. Enforce Montserrat 12 as the system-wide default font
           for cfg in sdkconfig.defaults devices/sdkconfig.muse; do
             if [ -f "$cfg" ]; then
               echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> "$cfg"
               echo "CONFIG_LV_FONT_MONTSERRAT_12=y" >> "$cfg"
+              echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=y" >> "$cfg"
             fi
           done
 
-          # 2. Reconfigure project so source files exist on disk
+          # 2. Reconfigure project dependencies
           OVERLAY=$(find devices/ -type f -name "*349*" | head -n 1)
           DEFAULTS="sdkconfig.defaults"
           [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
@@ -41,11 +42,11 @@ jobs:
 
           idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" reconfigure
 
-          # 3. Patch application C files
+          # 3. Patch application layout, input screens, menus, and retract handler
           cat << 'EOF' > patch_ui.py
           import os, re
 
-          print("=== Applying UI Layout Optimizations ===")
+          print("=== Applying Comprehensive UI & Stability Patches ===")
           patched_count = 0
 
           for root, dirs, files in os.walk("."):
@@ -61,7 +62,15 @@ jobs:
                           s = f.read()
                       orig = s
 
-                      # --- PART 1: PRESERVE COMPACT MENU & SETTINGS ---
+                      # --- FIX REBOOT BUG: PREVENT DELETION OF ACTIVE SCREEN ---
+                      s = re.sub(
+                          r"lv_obj_del\s*\(\s*lv_obj_get_parent\s*\(([^)]+)\)\s*\);",
+                          r"{ lv_obj_t *__p = lv_obj_get_parent(\1); if(__p && __p != lv_scr_act()) lv_obj_del(__p); else lv_obj_del(\1); }",
+                          s
+                      )
+
+                      # --- FIX MENU & BUTTON SIZING ---
+                      # 1. Clamp list buttons
                       def patch_list_btn(m):
                           v = m.group(1).strip()
                           return (
@@ -79,71 +88,36 @@ jobs:
                           s
                       )
 
-                      s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*\))", r"\g<1>2\2", s)
-                      s = re.sub(r"(lv_obj_set_style_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*,)", r"\g<1>2\2", s)
-                      s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*\))", r"\g<1>2\2", s)
-                      s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:1[0-9]|2[0-9]|[7-9])(\s*,)", r"\g<1>2\2", s)
-                      s = re.sub(r"&lv_font_montserrat_(?:16|18|20|22|24|28)", r"&lv_font_montserrat_12", s)
-
-                      # --- PART 2: HORIZONTAL SPLIT (NO OVERLAP) ---
-                      # A. Override ANY explicit sizing/positioning on the textarea
-                      s = re.sub(
-                          r"lv_obj_set_size\s*\(\s*([^,;]*(?:ta|textarea|password|pwd)[^,;]*)\s*,[^;]+;",
-                          r"lv_obj_set_size(\1, 205, 150);\n    lv_obj_align(\1, LV_ALIGN_LEFT_MID, 10, 0);",
-                          s,
-                          flags=re.IGNORECASE
-                      )
-                      s = re.sub(
-                          r"lv_obj_align\s*\(\s*([^,;]*(?:ta|textarea|password|pwd)[^,;]*)\s*,[^;]+;",
-                          r"lv_obj_align(\1, LV_ALIGN_LEFT_MID, 10, 0);",
-                          s,
-                          flags=re.IGNORECASE
-                      )
-                      s = re.sub(
-                          r"lv_obj_align_to\s*\(\s*([^,;]*(?:ta|textarea|password|pwd)[^,;]*)\s*,[^;]+;",
-                          r"lv_obj_align(\1, LV_ALIGN_LEFT_MID, 10, 0);",
-                          s,
-                          flags=re.IGNORECASE
-                      )
-
-                      # B. Override ANY explicit sizing on keyboard objects
-                      s = re.sub(
-                          r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
-                          r"lv_obj_set_size(\1, 415, 172);\n    lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
-                          s,
-                          flags=re.IGNORECASE
-                      )
-                      s = re.sub(
-                          r"lv_obj_set_height\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
-                          r"lv_obj_set_size(\1, 415, 172);\n    lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
-                          s,
-                          flags=re.IGNORECASE
-                      )
-
-                      # C. Hook creation of textarea to ensure screen-parenting & styling
-                      def patch_ta_create(m):
-                          var = m.group(1).strip()
+                      # 2. Clamp standalone menu/dialog buttons
+                      def patch_btn_create(m):
+                          v = m.group(1).strip()
                           return (
                               f"{m.group(0)}\n"
-                              f"    if ({var}) {{\n"
-                              f"        lv_obj_set_parent({var}, lv_scr_act());\n"
-                              f"        lv_obj_set_size({var}, 205, 150);\n"
-                              f"        lv_obj_align({var}, LV_ALIGN_LEFT_MID, 10, 0);\n"
-                              f"        lv_obj_set_style_pad_all({var}, 4, 0);\n"
-                              f"        lv_obj_set_style_text_font({var}, &lv_font_montserrat_12, 0);\n"
-                              f"        lv_textarea_set_password_mode({var}, false);\n"
-                              f"        lv_textarea_set_one_line({var}, false);\n"
-                              f"        lv_obj_move_foreground({var});\n"
+                              f"    if ({v}) {{\n"
+                              f"        lv_obj_set_height({v}, 32);\n"
+                              f"        lv_obj_set_style_pad_ver({v}, 2, 0);\n"
+                              f"        lv_obj_set_style_pad_hor({v}, 8, 0);\n"
+                              f"        lv_obj_set_style_text_font({v}, &lv_font_montserrat_12, 0);\n"
                               f"    }}"
                           )
                       s = re.sub(
-                          r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]*(?:ta|textarea|password|pwd)[a-zA-Z0-9_>.-]*)\s*=\s*lv_textarea_create\s*\([^;]+\);",
-                          patch_ta_create,
+                          r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]*(?:btn|item)[a-zA-Z0-9_>.-]*)\s*=\s*lv_btn_create\s*\([^;]+\);",
+                          patch_btn_create,
                           s,
                           flags=re.IGNORECASE
                       )
 
-                      # D. Hook lv_keyboard_set_textarea: anchor both sides securely
+                      # 3. Compress row gaps and padding across containers to 2px
+                      s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_obj_set_style_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
+
+                      # 4. Remap all fonts (including 14px) down to Montserrat 12
+                      s = re.sub(r"&lv_font_montserrat_(?:14|16|18|20|22|24|28)", r"&lv_font_montserrat_12", s)
+
+                      # --- FIX KEYBOARD & INPUT OVERLAP (APPLIED GLOBALLY) ---
+                      # 5. Intercept lv_keyboard_set_textarea across all input screens
                       def patch_kb_ta(m):
                           kb = m.group(1).strip()
                           ta = m.group(2).strip()
@@ -164,7 +138,7 @@ jobs:
                               f"    }}\n"
                               f"    if ({ta}) {{\n"
                               f"        lv_obj_set_parent({ta}, lv_scr_act());\n"
-                              f"        lv_obj_set_size({ta}, 205, 150);\n"
+                              f"        lv_obj_set_size({ta}, 205, 140);\n"
                               f"        lv_obj_align({ta}, LV_ALIGN_LEFT_MID, 10, 0);\n"
                               f"        lv_obj_set_style_pad_all({ta}, 4, 0);\n"
                               f"        lv_obj_set_style_text_font({ta}, &lv_font_montserrat_12, 0);\n"
@@ -179,7 +153,41 @@ jobs:
                           s
                       )
 
-                      # E. Turn off password masking
+                      # 6. Override subsequent text area alignments and resizes in muse_input.c
+                      s = re.sub(
+                          r"lv_obj_align\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input)[^,;]*)\s*,[^;]+;",
+                          r"lv_obj_set_size(\1, 205, 140); lv_obj_align(\1, LV_ALIGN_LEFT_MID, 10, 0);",
+                          s,
+                          flags=re.IGNORECASE
+                      )
+                      s = re.sub(
+                          r"lv_obj_set_size\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input)[^,;]*)\s*,[^;]+;",
+                          r"lv_obj_set_size(\1, 205, 140); lv_obj_align(\1, LV_ALIGN_LEFT_MID, 10, 0);",
+                          s,
+                          flags=re.IGNORECASE
+                      )
+                      s = re.sub(
+                          r"lv_obj_align_to\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input|kb|keyboard)[^,;]*)\s*,[^;]+;",
+                          r"/* align_to neutralized */",
+                          s,
+                          flags=re.IGNORECASE
+                      )
+
+                      # 7. Override subsequent keyboard sizing
+                      s = re.sub(
+                          r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
+                          r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
+                          s,
+                          flags=re.IGNORECASE
+                      )
+                      s = re.sub(
+                          r"lv_obj_set_height\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
+                          r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
+                          s,
+                          flags=re.IGNORECASE
+                      )
+
+                      # 8. Unmask passwords across all input screens
                       s = re.sub(
                           r"lv_textarea_set_password_mode\s*\(\s*([^,]+)\s*,\s*true\s*\);",
                           r"lv_textarea_set_password_mode(\1, false);",
