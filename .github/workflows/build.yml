@@ -19,47 +19,55 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Aggressive UI Scale & Keyboard Patch
-        shell: bash
-        run: |
-          python3 -c '
-          import os, re
-          for root, _, files in os.walk("esp32"):
-              for file in files:
-                  if file.endswith((".c", ".cpp", ".h")):
-                      p = os.path.join(root, file)
-                      try:
-                          with open(p, "r", encoding="utf-8") as f: s = f.read()
-                          # Force aggressive global UI scaling down to ~50%
-                          s = re.sub(r"#define LV_DPI_DEF\s+\d+", "#define LV_DPI_DEF 65", s)
-                          # Lock keyboard to 50% height and remove internal padding
-                          s = re.sub(
-                              r"([a-zA-Z0-9_>.-]+)\s*=\s*lv_keyboard_create\(([^)]+)\);",
-                              r"\1 = lv_keyboard_create(\2);\n    lv_obj_set_height(\1, lv_pct(50));\n    lv_obj_align(\1, LV_ALIGN_BOTTOM_MID, 0, 0);\n    lv_obj_set_style_pad_all(\1, 0, 0);",
-                              s
-                          )
-                          with open(p, "w", encoding="utf-8") as f: f.write(s)
-                      except: pass
-          '
-
       - name: Build Firmware
         shell: bash
         run: |
           . $IDF_PATH/export.sh
           cd esp32
           
-          # Force minimum font sizes in sdkconfig
-          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_10=y" >> sdkconfig.defaults
-          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=n" >> sdkconfig.defaults
-          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=n" >> sdkconfig.defaults
-          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_16=n" >> sdkconfig.defaults
-          
           OVERLAY=$(find devices/ -type f -name "*349*" | head -n 1)
           DEFAULTS="sdkconfig.defaults"
           [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
           [ -n "$OVERLAY" ] && DEFAULTS="$DEFAULTS;$OVERLAY"
           
-          idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" build
+          # Inject scaling directly into overlay and defaults so they cannot be overridden
+          for cfg in sdkconfig.defaults "$OVERLAY" devices/sdkconfig.muse; do
+            if [ -f "$cfg" ]; then
+              echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_10=y" >> "$cfg"
+              echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=n" >> "$cfg"
+              echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=n" >> "$cfg"
+              echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_16=n" >> "$cfg"
+              echo "CONFIG_LV_DPI_DEF=75" >> "$cfg"
+            fi
+          done
+          
+          # Fetch components first so all UI and LVGL source files exist on disk
+          idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" reconfigure
+          
+          # Scale down global DPI and lock the keyboard height
+          python3 -c '
+          import os, re
+          for root, _, files in os.walk("."):
+              for file in files:
+                  if file.endswith((".c", ".cpp", ".h")):
+                      p = os.path.join(root, file)
+                      try:
+                          with open(p, "r", encoding="utf-8", errors="ignore") as f: s = f.read()
+                          orig = s
+                          s = re.sub(r"#\s*define\s+LV_DPI_DEF\s+\d+", "#define LV_DPI_DEF 75", s)
+                          if "lv_keyboard_create" in s:
+                              s = re.sub(
+                                  r"([a-zA-Z0-9_>.-]+)\s*=\s*lv_keyboard_create\(([^)]+)\);",
+                                  r"\1 = lv_keyboard_create(\2);\n    lv_obj_set_height(\1, 85);\n    lv_obj_align(\1, LV_ALIGN_BOTTOM_MID, 0, 0);\n    lv_obj_set_style_pad_all(\1, 0, 0);",
+                                  s
+                              )
+                          if s != orig:
+                              with open(p, "w", encoding="utf-8") as f: f.write(s)
+                              print("Patched:", p)
+                      except Exception: pass
+          '
+          
+          idf.py -B build-waveshare build
 
       - name: Upload Binaries
         uses: actions/upload-artifact@v4
