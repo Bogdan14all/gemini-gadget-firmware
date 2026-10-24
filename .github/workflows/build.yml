@@ -237,15 +237,19 @@ jobs:
           . $IDF_PATH/export.sh
           cd esp32
 
+          # Disable -Werror so minor compiler warnings never halt the build
           find . -name "CMakeLists.txt" -exec sed -i 's/-Werror//g' {} + 2>/dev/null || true
           echo "target_compile_options(\${COMPONENT_LIB} PRIVATE -Wno-error -Wno-unused-variable)" >> components/muse/CMakeLists.txt 2>/dev/null || true
 
-          echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> sdkconfig.defaults
-          echo "CONFIG_LV_FONT_MONTSERRAT_12=y" >> sdkconfig.defaults
-          echo "CONFIG_COMPILER_WARNINGS_FATAL=n" >> sdkconfig.defaults
-          [ -f "devices/sdkconfig.muse" ] && echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> devices/sdkconfig.muse
-          [ -f "devices/sdkconfig.muse" ] && echo "CONFIG_LV_FONT_MONTSERRAT_12=y" >> devices/sdkconfig.muse
-          [ -f "devices/sdkconfig.muse" ] && echo "CONFIG_COMPILER_WARNINGS_FATAL=n" >> devices/sdkconfig.muse
+          # Configure fonts and embed your SDK token directly into the build
+          for cfg in sdkconfig.defaults devices/sdkconfig.muse; do
+            if [ -f "$cfg" ]; then
+              echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> "$cfg"
+              echo "CONFIG_LV_FONT_MONTSERRAT_12=y" >> "$cfg"
+              echo "CONFIG_COMPILER_WARNINGS_FATAL=n" >> "$cfg"
+              echo 'CONFIG_GADGET_SDK_TOKEN="mgst_LrWRdZyzCCRYZBUPVIJ6cVWK0PfFIzdVgFgj17EMsjY"' >> "$cfg"
+            fi
+          done
 
           OVERLAY=$(find devices/ -type f -name "*349*" | head -n 1)
           DEFAULTS="sdkconfig.defaults"
@@ -267,10 +271,8 @@ jobs:
           cp esp32/build-waveshare/*.bin /tmp/firmware_package/ 2>/dev/null || true
           cp esp32/build-waveshare/flasher_args.json /tmp/firmware_package/ 2>/dev/null || true
           
-          # Ensure open permissions
           chmod -R 777 /tmp/firmware_package
           
-          # Create root-level ZIP
           cd /tmp/firmware_package
           zip -r /tmp/firmware-waveshare-349.zip *
           cd /
