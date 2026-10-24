@@ -13,52 +13,23 @@ jobs:
       - name: Safe Git Directory
         run: git config --global --add safe.directory '*'
 
-      - name: Checkout Meta Muse Gadget SDK
+      - name: Checkout Waveshare 3.49 Port
         uses: actions/checkout@v4
         with:
-          repository: facebookincubator/muse-gadget-sdk
+          repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
-
-      - name: Patch Waveshare V2 Display & IO Drivers
-        shell: bash
-        run: |
-          cd esp32
-          
-          # Descarca driverul I2C expander (TCA9554)
-          mkdir -p components/tca9554
-          curl -sL https://raw.githubusercontent.com/waveshareteam/ESP32-S3-Touch-LCD-3.49-V2/main/Libraries/TCA9554/TCA9554.h > components/tca9554/TCA9554.h
-          curl -sL https://raw.githubusercontent.com/waveshareteam/ESP32-S3-Touch-LCD-3.49-V2/main/Libraries/TCA9554/TCA9554.cpp > components/tca9554/TCA9554.cpp
-          echo 'idf_component_register(SRCS "TCA9554.cpp" INCLUDE_DIRS ".")' > components/tca9554/CMakeLists.txt
-
-          # Descarca driverul Display (AXS15231B)
-          mkdir -p components/esp_lcd_axs15231b
-          curl -sL https://raw.githubusercontent.com/espressif/esp-bsp/master/components/lcd/esp_lcd_axs15231b/esp_lcd_axs15231b.c > components/esp_lcd_axs15231b/esp_lcd_axs15231b.c
-          curl -sL https://raw.githubusercontent.com/espressif/esp-bsp/master/components/lcd/esp_lcd_axs15231b/include/esp_lcd_axs15231b.h --create-dirs -o components/esp_lcd_axs15231b/include/esp_lcd_axs15231b.h
-          echo 'idf_component_register(SRCS "esp_lcd_axs15231b.c" INCLUDE_DIRS "include" REQUIRES esp_lcd)' > components/esp_lcd_axs15231b/CMakeLists.txt
-
-          # Creeaza configuratia placii Waveshare V2
-          cat << 'EOF' > devices/sdkconfig.muse-waveshare-v2
-          CONFIG_IDF_TARGET="esp32s3"
-          CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
-          CONFIG_SPIRAM_MODE_OCT=y
-          CONFIG_SPIRAM_SPEED_80M=y
-          CONFIG_HOMEHUB_WAVESHARE_349_V2=y
-          EOF
 
       - name: Build Firmware
         shell: bash
         run: |
           . $IDF_PATH/export.sh
           cd esp32
-          idf.py -B build-waveshare-v2 \
-            -DIDF_TARGET=esp32s3 \
-            -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;devices/sdkconfig.muse;devices/sdkconfig.muse-waveshare-v2" \
-            build
+          idf.py -B build-waveshare build
 
       - name: Upload Binaries
         uses: actions/upload-artifact@v4
         with:
           name: muse-waveshare-v2-binaries
           path: |
-            esp32/build-waveshare-v2/**/*.bin
-            esp32/build-waveshare-v2/**/flasher_args.json
+            esp32/build-waveshare/**/*.bin
+            esp32/build-waveshare/**/flasher_args.json
