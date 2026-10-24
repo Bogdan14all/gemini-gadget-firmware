@@ -19,30 +19,27 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Patch Keyboard & UI Sizing
+      - name: Patch UI Scaling & Keyboard Height
         shell: bash
         run: |
+          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=y" >> esp32/sdkconfig.defaults
+          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=n" >> esp32/sdkconfig.defaults
+          echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_16=n" >> esp32/sdkconfig.defaults
+          
           python3 -c '
           import os, re
-
           for root, _, files in os.walk("esp32"):
               for file in files:
-                  if file.endswith((".c", ".cpp", ".h")):
+                  if file.endswith((".c", ".cpp")):
                       p = os.path.join(root, file)
-                      with open(p, "r", encoding="utf-8", errors="ignore") as f:
-                          s = f.read()
-                      modified = False
+                      with open(p, "r", encoding="utf-8", errors="ignore") as f: s = f.read()
                       if "lv_keyboard_create" in s:
-                          print("Shrinking keyboard in:", p)
                           s = re.sub(
                               r"(lv_obj_t\s*\*\s*(\w+)\s*=\s*lv_keyboard_create\([^;]+;\s*)",
-                              r"\1lv_obj_set_height(\2, 95);\n    lv_obj_align(\2, LV_ALIGN_BOTTOM_MID, 0, 0);\n    lv_obj_set_style_pad_all(\2, 1, 0);\n    lv_obj_set_style_pad_gap(\2, 1, 0);\n",
+                              r"\1lv_obj_set_height(\2, lv_pct(50));\n    lv_obj_align(\2, LV_ALIGN_BOTTOM_MID, 0, 0);\n",
                               s
                           )
-                          modified = True
-                      if modified:
-                          with open(p, "w", encoding="utf-8") as f:
-                              f.write(s)
+                          with open(p, "w", encoding="utf-8") as f: f.write(s)
           '
 
       - name: Build Firmware
