@@ -19,7 +19,7 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Overhaul UI, Gemini Engine and Auto-WiFi
+      - name: Implement Gemini REST Engine and Credentials Injection
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -32,7 +32,174 @@ jobs:
           gemini_key = os.environ.get("GEMINI_KEY", "").strip()
           wifi_ssid = os.environ.get("WIFI_SSID", "TP-Link_2.4G_9318_Guest").strip()
           wifi_pass = os.environ.get("WIFI_PASSWORD", "revelion").strip()
-          print(f"=== Injecting Gemini AI & Auto-WiFi ({wifi_ssid}) ===")
+          print(f"=== Configuring Gemini REST & Auto-Storage (Key: {bool(gemini_key)}) ===")
+
+          # 1. Native Gemini REST C Engine
+          gemini_c_code = f"""
+          #include <stdio.h>
+          #include <string.h>
+          #include <stdlib.h>
+          #include "esp_log.h"
+          #include "esp_http_client.h"
+          #include "esp_crt_bundle.h"
+          #include "cJSON.h"
+          #include "mbedtls/base64.h"
+          #include "nvs_flash.h"
+          #include "nvs.h"
+          #include "esp_wifi.h"
+
+          static const char *TAG_G = "GEMINI_REST";
+          static const char *GEMINI_API_KEY = "{gemini_key}";
+
+          void gemini_auto_init_nvs(void) {{
+              nvs_handle_t h;
+              if (nvs_open("muse", NVS_READWRITE, &h) == ESP_OK) {{
+                  nvs_set_str(h, "token", GEMINI_API_KEY);
+                  nvs_set_str(h, "api_key", GEMINI_API_KEY);
+                  nvs_set_str(h, "device_token", GEMINI_API_KEY);
+                  nvs_set_str(h, "wifi_ssid", "{wifi_ssid}");
+                  nvs_set_str(h, "wifi_password", "{wifi_pass}");
+                  nvs_commit(h);
+                  nvs_close(h);
+              }}
+              if (nvs_open("wifi", NVS_READWRITE, &h) == ESP_OK) {{
+                  nvs_set_str(h, "ssid", "{wifi_ssid}");
+                  nvs_set_str(h, "password", "{wifi_pass}");
+                  nvs_commit(h);
+                  nvs_close(h);
+              }}
+              wifi_config_t wcfg;
+              memset(&wcfg, 0, sizeof(wcfg));
+              strncpy((char*)wcfg.sta.ssid, "{wifi_ssid}", sizeof(wcfg.sta.ssid));
+              strncpy((char*)wcfg.sta.password, "{wifi_pass}", sizeof(wcfg.sta.password));
+              esp_wifi_set_config(WIFI_IF_STA, &wcfg);
+              esp_wifi_connect();
+          }}
+
+          char* gemini_send_audio_rest(const uint8_t *pcm_data, size_t pcm_len) {{
+              if (!GEMINI_API_KEY || strlen(GEMINI_API_KEY) < 10) {{
+                  ESP_LOGE(TAG_G, "Cheia Gemini API lipseste!");
+                  return strdup("Eroare: Cheie Gemini lipsa.");
+              }}
+
+              // Generate standard 44-byte WAV header (16kHz, 16-bit, 1 channel)
+              size_t wav_len = 44 + pcm_len;
+              uint8_t *wav_buf = malloc(wav_len);
+              if (!wav_buf) return strdup("Eroare memorie audio.");
+
+              memcpy(wav_buf, "RIFF", 4);
+              uint32_t file_size = wav_len - 8;
+              memcpy(wav_buf + 4, &file_size, 4);
+              memcpy(wav_buf + 8, "WAVEfmt ", 8);
+              uint32_t subchunk1_size = 16;
+              uint16_t audio_format = 1;
+              uint16_t num_channels = 1;
+              uint32_t sample_rate = 16000;
+              uint32_t byte_rate = 32000;
+              uint16_t block_align = 2;
+              uint16_t bits_per_sample = 16;
+              memcpy(wav_buf + 16, &subchunk1_size, 4);
+              memcpy(wav_buf + 20, &audio_format, 2);
+              memcpy(wav_buf + 22, &num_channels, 2);
+              memcpy(wav_buf + 24, &sample_rate, 4);
+              memcpy(wav_buf + 28, &byte_rate, 4);
+              memcpy(wav_buf + 32, &block_align, 2);
+              memcpy(wav_buf + 34, &bits_per_sample, 2);
+              memcpy(wav_buf + 36, "data", 4);
+              uint32_t data_size = pcm_len;
+              memcpy(wav_buf + 40, &data_size, 4);
+              memcpy(wav_buf + 44, pcm_data, pcm_len);
+
+              // Base64 encode
+              size_t b64_len = 0;
+              mbedtls_base64_encode(NULL, 0, &b64_len, wav_buf, wav_len);
+              char *b64_str = malloc(b64_len + 1);
+              if (!b64_str) {{
+                  free(wav_buf);
+                  return strdup("Eroare alocare Base64.");
+              }}
+              mbedtls_base64_encode((unsigned char *)b64_str, b64_len + 1, &b64_len, wav_buf, wav_len);
+              b64_str[b64_len] = '\\0';
+              free(wav_buf);
+
+              // Build JSON payload
+              cJSON *root = cJSON_CreateObject();
+              cJSON *contents = cJSON_AddArrayToObject(root, "contents");
+              cJSON *content_item = cJSON_CreateObject();
+              cJSON_AddItemToArray(contents, content_item);
+              cJSON *parts = cJSON_AddArrayToObject(content_item, "parts");
+
+              cJSON *audio_part = cJSON_CreateObject();
+              cJSON *inline_data = cJSON_AddObjectToObject(audio_part, "inline_data");
+              cJSON_AddStringToObject(inline_data, "mime_type", "audio/wav");
+              cJSON_AddStringToObject(inline_data, "data", b64_str);
+              cJSON_AddItemToArray(parts, audio_part);
+
+              cJSON *text_part = cJSON_CreateObject();
+              cJSON_AddStringToObject(text_part, "text", "Raspunde foarte concis in limba romana la mesajul audio.");
+              cJSON_AddItemToArray(parts, text_part);
+
+              char *post_data = cJSON_PrintUnformatted(root);
+              cJSON_Delete(root);
+              free(b64_str);
+
+              char url[256];
+              snprintf(url, sizeof(url), "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s", GEMINI_API_KEY);
+
+              esp_http_client_config_t config = {{
+                  .url = url,
+                  .method = HTTP_METHOD_POST,
+                  .crt_bundle_attach = esp_crt_bundle_attach,
+                  .timeout_ms = 15000,
+                  .buffer_size = 4096,
+                  .buffer_size_tx = 4096,
+              }};
+              esp_http_client_handle_t client = esp_http_client_init(&config);
+              esp_http_client_set_header(client, "Content-Type", "application/json");
+              esp_http_client_set_post_field(client, post_data, strlen(post_data));
+
+              char *reply_text = NULL;
+              esp_err_t err = esp_http_client_perform(client);
+              if (err == ESP_OK && esp_http_client_get_status_code(client) == 200) {{
+                  int content_len = esp_http_client_get_content_length(client);
+                  if (content_len <= 0) content_len = 8192;
+                  char *resp_buf = malloc(content_len + 1);
+                  int read_len = esp_http_client_read(client, resp_buf, content_len);
+                  resp_buf[read_len > 0 ? read_len : 0] = '\\0';
+
+                  cJSON *resp_json = cJSON_Parse(resp_buf);
+                  if (resp_json) {{
+                      cJSON *cands = cJSON_GetObjectItem(resp_json, "candidates");
+                      if (cands && cJSON_GetArraySize(cands) > 0) {{
+                          cJSON *cand = cJSON_GetArrayItem(cands, 0);
+                          cJSON *cnt = cJSON_GetObjectItem(cand, "content");
+                          if (cnt) {{
+                              cJSON *pts = cJSON_GetObjectItem(cnt, "parts");
+                              if (pts && cJSON_GetArraySize(pts) > 0) {{
+                                  cJSON *p0 = cJSON_GetArrayItem(pts, 0);
+                                  cJSON *txt = cJSON_GetObjectItem(p0, "text");
+                                  if (txt && txt->valuestring) {{
+                                      reply_text = strdup(txt->valuestring);
+                                  }}
+                              }}
+                          }}
+                      }}
+                      cJSON_Delete(resp_json);
+                  }}
+                  free(resp_buf);
+              }} else {{
+                  reply_text = strdup("Eroare comunicare Gemini API.");
+              }}
+
+              free(post_data);
+              esp_http_client_cleanup(client);
+              return reply_text ? reply_text : strdup("Fara raspuns de la Gemini.");
+          }}
+          """
+
+          os.makedirs("esp32/components/muse/src", exist_ok=True)
+          with open("esp32/components/muse/src/gemini_rest.c", "w", encoding="utf-8") as f:
+              f.write(gemini_c_code)
 
           helpers = """
           static void __attribute__((unused)) _muse_parent_del_cb(lv_event_t * e) {
@@ -48,18 +215,10 @@ jobs:
               lv_obj_t * kb = lv_event_get_target(e);
               lv_obj_t * ta = (lv_obj_t *)lv_event_get_user_data(e);
               if (code == LV_EVENT_CANCEL) {
-                  if (kb) {
-                      lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
-                  }
+                  if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
               } else if (code == LV_EVENT_READY) {
-                  if (ta) {
-                      lv_obj_add_flag(ta, LV_OBJ_FLAG_HIDDEN);
-                      lv_obj_del_async(ta);
-                  }
-                  if (kb) {
-                      lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
-                      lv_obj_del_async(kb);
-                  }
+                  if (ta) { lv_obj_add_flag(ta, LV_OBJ_FLAG_HIDDEN); lv_obj_del_async(ta); }
+                  if (kb) { lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN); lv_obj_del_async(kb); }
               }
           }
 
@@ -72,6 +231,7 @@ jobs:
           }
           """
 
+          # 2. Patch Existing ESP32 Codebase
           for root, dirs, files in os.walk("esp32"):
               dirs[:] = [d for d in dirs if d not in ("managed_components", "build-waveshare", "build", ".git")]
 
@@ -85,7 +245,12 @@ jobs:
                           s = f.read()
                       orig = s
 
-                      # 1. UI Keyboard & Layout Adjustments for 3.49" Screen
+                      # Auto-Init NVS and Wi-Fi on boot
+                      if "app_main(" in s and "gemini_auto_init_nvs" not in s:
+                          s = '#include "esp_wifi.h"\nvoid gemini_auto_init_nvs(void);\n' + s
+                          s = re.sub(r'(nvs_flash_init\(\);)', r'\1\n    gemini_auto_init_nvs();', s)
+
+                      # UI Screen & Keyboard adjustments
                       if ("lv_keyboard_set_textarea" in s or "lv_keyboard_create" in s) and "_muse_kb_lifecycle_cb" not in s:
                           last_inc = s.rfind("#include")
                           if last_inc != -1:
@@ -95,22 +260,6 @@ jobs:
                       s = re.sub(r"\bint\s+w\s*=\s*muse_board->width[^;]*;", "__attribute__((unused)) int w = 415;", s)
                       s = re.sub(r"\bint\s+h\s*=\s*muse_board->height[^;]*;", "__attribute__((unused)) int h = 172;", s)
                       s = re.sub(r"lv_textarea_set_password_mode\s*\(\s*([^,;]+)\s*,\s*[^)]+\s*\);", r"lv_textarea_set_password_mode(\1, false); lv_textarea_set_password_show_time(\1, 0);", s)
-
-                      def patch_list_btn(m):
-                          v = m.group(1).strip()
-                          return f"{m.group(0)}\n    if ({v}) {{ lv_obj_set_height({v}, 32); lv_obj_set_style_pad_ver({v}, 2, 0); lv_obj_set_style_pad_hor({v}, 8, 0); lv_obj_set_style_text_font({v}, &lv_font_montserrat_12, 0); }}"
-                      s = re.sub(r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]+)\s*=\s*lv_list_add_btn\s*\([^;]+\);", patch_list_btn, s)
-
-                      def patch_btn_create(m):
-                          v = m.group(1).strip()
-                          return f"{m.group(0)}\n    if ({v}) {{ lv_obj_set_height({v}, 32); lv_obj_set_style_pad_ver({v}, 2, 0); lv_obj_set_style_pad_hor({v}, 8, 0); lv_obj_set_style_text_font({v}, &lv_font_montserrat_12, 0); }}"
-                      s = re.sub(r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]*(?:btn|item)[a-zA-Z0-9_>.-]*)\s*=\s*lv_btn_create\s*\([^;]+\);", patch_btn_create, s, flags=re.IGNORECASE)
-
-                      s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
-                      s = re.sub(r"(lv_obj_set_style_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
-                      s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
-                      s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
-                      s = re.sub(r"&lv_font_montserrat_(?:14|16|18|20|22|24|28)", r"&lv_font_montserrat_12", s)
 
                       def patch_kb_ta(m):
                           kb = m.group(1).strip()
@@ -155,138 +304,4 @@ jobs:
                       s = re.sub(r"lv_obj_align\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 205, 140); lv_obj_align(\1, LV_ALIGN_LEFT_MID, 10, 0);", s, flags=re.IGNORECASE)
                       s = re.sub(r"lv_obj_align_to\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input|kb|keyboard)[^,;]*)\s*,[^;]+;", r"/* align_to neutralized */", s, flags=re.IGNORECASE)
                       s = re.sub(r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);", s, flags=re.IGNORECASE)
-                      s = re.sub(r"lv_obj_set_height\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);", s, flags=re.IGNORECASE)
-
-                      # 2. Comprehensive UI and Strings Cleanup
-                      s = s.replace("hatch.metaaivm.com", "generativelanguage.googleapis.com")
-                      s = s.replace("SenseNova unreachable", "")
-                      s = s.replace("unreachable", "Gemini AI Ready")
-                      s = s.replace("SenseNova", "Google Gemini")
-                      s = s.replace("iFlytek", "Google Gemini")
-                      s = re.sub(r'Pair with the Muse app[^"]*', 'Dispozitiv autonom configurat pentru Google Gemini AI.', s)
-                      s = re.sub(r'"Server"', '"Backend"', s)
-                      s = re.sub(r'"VM ID"', '"Model"', s)
-                      s = re.sub(r'"Device token"', '"Gemini Key"', s)
-                      s = re.sub(r'"Test connection"', '"Status"', s)
-                      s = re.sub(r'"MUSE"', '"Gemini AI"', s)
-                      s = re.sub(r'"Muse"', '"Gemini AI"', s)
-                      s = re.sub(r'"Muse Gadget"', '"Gemini AI"', s)
-                      s = re.sub(r'\bMuseGadget\b', 'GeminiAI', s)
-                      s = re.sub(r'讯飞[^"]*', 'Gemini AI', s)
-
-                      # 3. Native Gemini 2.0 Flash URL & Routing
-                      if gemini_key:
-                          s = re.sub(r'https?://(?:iat-api\.xfyun\.cn|api\.sensenova\.cn)[^"]*', f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}', s)
-                          s = re.sub(r'iat-api\.xfyun\.cn', 'generativelanguage.googleapis.com', s)
-                          s = re.sub(r'api\.sensenova\.cn', 'generativelanguage.googleapis.com', s)
-                          s = re.sub(r'CONFIG_MUSE_IFLYTEK_API_KEY\s*"[^"]*"', f'CONFIG_MUSE_IFLYTEK_API_KEY "{gemini_key}"', s)
-
-                      # 4. Fallback Auto-Connect Wi-Fi Credentials
-                      if "esp_wifi_connect()" in s:
-                          wifi_inject = f"""
-                          {{
-                              wifi_config_t _wcfg;
-                              esp_wifi_get_config(WIFI_IF_STA, &_wcfg);
-                              if (strlen((char*)_wcfg.sta.ssid) == 0) {{
-                                  strncpy((char*)_wcfg.sta.ssid, "{wifi_ssid}", sizeof(_wcfg.sta.ssid));
-                                  strncpy((char*)_wcfg.sta.password, "{wifi_pass}", sizeof(_wcfg.sta.password));
-                                  esp_wifi_set_config(WIFI_IF_STA, &_wcfg);
-                              }}
-                              esp_wifi_connect();
-                          }}
-                          """
-                          s = s.replace("esp_wifi_connect();", wifi_inject, 1)
-
-                      if s != orig:
-                          with open(p, "w", encoding="utf-8") as f:
-                              f.write(s)
-                  except Exception as e:
-                      print(f"File patch error on {p}: {e}")
-          EOF
-          python3 patch_gemini.py
-
-      - name: Build Firmware
-        shell: bash
-        env:
-          GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
-          WIFI_SSID: ${{ secrets.WIFI_SSID || 'TP-Link_2.4G_9318_Guest' }}
-          WIFI_PASSWORD: ${{ secrets.WIFI_PASSWORD || 'revelion' }}
-        run: |
-          . $IDF_PATH/export.sh
-          cd esp32
-
-          find . -name "CMakeLists.txt" -exec sed -i 's/-Werror//g' {} + 2>/dev/null || true
-          echo "target_compile_options(\${COMPONENT_LIB} PRIVATE -Wno-error -Wno-unused-variable)" >> components/muse/CMakeLists.txt 2>/dev/null || true
-
-          for cfg in sdkconfig.defaults devices/sdkconfig.muse; do
-            if [ -f "$cfg" ]; then
-              echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> "$cfg"
-              echo "CONFIG_LV_FONT_MONTSERRAT_12=y" >> "$cfg"
-              echo "CONFIG_COMPILER_WARNINGS_FATAL=n" >> "$cfg"
-              if [ -n "$GEMINI_KEY" ]; then
-                echo "CONFIG_GEMINI_API_KEY=\"$GEMINI_KEY\"" >> "$cfg"
-              fi
-              if [ -n "$WIFI_SSID" ]; then
-                echo "CONFIG_ESP_WIFI_SSID=\"$WIFI_SSID\"" >> "$cfg"
-                echo "CONFIG_ESP_WIFI_PASSWORD=\"$WIFI_PASSWORD\"" >> "$cfg"
-              fi
-            fi
-          done
-
-          OVERLAY=$(find devices/ -type f -name "*349*" | head -n 1)
-          DEFAULTS="sdkconfig.defaults"
-          [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
-          [ -n "$OVERLAY" ] && DEFAULTS="$DEFAULTS;$OVERLAY"
-
-          idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" build
-
-      - name: Package Firmware ZIP
-        shell: bash
-        run: |
-          apt-get update && apt-get install -y zip
-          mkdir -p /tmp/firmware_package
-
-          cp esp32/build-waveshare/bootloader/bootloader.bin /tmp/firmware_package/ 2>/dev/null || true
-          cp esp32/build-waveshare/partition_table/partition-table.bin /tmp/firmware_package/ 2>/dev/null || true
-          cp esp32/build-waveshare/*.bin /tmp/firmware_package/ 2>/dev/null || true
-
-          cat << 'EOF' > /tmp/firmware_package/flasher_args.json
-          {
-              "write_flash_args" : [ "--flash-mode", "dio",
-                                     "--flash-size", "keep",
-                                     "--flash-freq", "80m" ],
-              "flash_settings" : {
-                  "flash_mode": "dio",
-                  "flash_size": "keep",
-                  "flash_freq": "80m"
-              },
-              "flash_files" : {
-                  "0x0" : "bootloader.bin",
-                  "0x10000" : "partition-table.bin",
-                  "0x1d000" : "ota_data_initial.bin",
-                  "0x20000" : "muse-gadget.bin"
-              },
-              "bootloader" : { "offset" : "0x0", "file" : "bootloader.bin", "encrypted" : "false" },
-              "partition-table" : { "offset" : "0x10000", "file" : "partition-table.bin", "encrypted" : "false" },
-              "otadata" : { "offset" : "0x1d000", "file" : "ota_data_initial.bin", "encrypted" : "false" },
-              "app" : { "offset" : "0x20000", "file" : "muse-gadget.bin", "encrypted" : "false" },
-              "extra_esptool_args" : {
-                  "after"  : "hard-reset",
-                  "before" : "default-reset",
-                  "stub"   : true,
-                  "chip"   : "esp32s3"
-              }
-          }
-          EOF
-
-          chmod -R 777 /tmp/firmware_package
-          cd /tmp/firmware_package
-          zip -r /tmp/firmware-waveshare-349.zip *
-          cd /
-
-      - name: Upload Firmware Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware-waveshare-349
-          path: /tmp/firmware-waveshare-349.zip
-          if-no-files-found: error
+                      s = re.sub(r"
