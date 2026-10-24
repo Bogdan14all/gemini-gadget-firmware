@@ -36,13 +36,13 @@ jobs:
 
                       s = re.sub(
                           r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
-                          r"lv_obj_set_size(\1, 420, 172);\n    lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
+                          r"lv_obj_set_size(\1, 410, 172);\n    lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
                           s,
                           flags=re.IGNORECASE
                       )
                       s = re.sub(
                           r"lv_obj_set_height\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;",
-                          r"lv_obj_set_size(\1, 420, 172);\n    lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
+                          r"lv_obj_set_size(\1, 410, 172);\n    lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);",
                           s,
                           flags=re.IGNORECASE
                       )
@@ -53,7 +53,7 @@ jobs:
                           return (
                               f"lv_keyboard_set_textarea({kb}, {ta});\n"
                               f"    if ({kb}) {{\n"
-                              f"        lv_obj_set_size({kb}, 420, 172);\n"
+                              f"        lv_obj_set_size({kb}, 410, 172);\n"
                               f"        lv_obj_align({kb}, LV_ALIGN_RIGHT_MID, 0, 0);\n"
                               f"        lv_obj_set_style_pad_all({kb}, 1, LV_PART_MAIN);\n"
                               f"        lv_obj_set_style_pad_row({kb}, 2, LV_PART_MAIN);\n"
@@ -64,8 +64,8 @@ jobs:
                               f"        lv_obj_set_style_text_font({kb}, &lv_font_montserrat_12, LV_PART_ITEMS);\n"
                               f"    }}\n"
                               f"    if ({ta}) {{\n"
-                              f"        lv_obj_set_size({ta}, 220, 50);\n"
-                              f"        lv_obj_align({ta}, LV_ALIGN_LEFT_MID, 4, 0);\n"
+                              f"        lv_obj_set_size({ta}, 210, 80);\n"
+                              f"        lv_obj_align({ta}, LV_ALIGN_LEFT_MID, 10, 0);\n"
                               f"        lv_obj_set_style_pad_all({ta}, 4, 0);\n"
                               f"        lv_obj_set_style_text_font({ta}, &lv_font_montserrat_12, 0);\n"
                               f"        lv_textarea_set_password_mode({ta}, false);\n"
@@ -84,7 +84,7 @@ jobs:
                           return (
                               f"{m.group(0)}\n"
                               f"    if ({var}) {{\n"
-                              f"        lv_obj_set_size({var}, 420, 172);\n"
+                              f"        lv_obj_set_size({var}, 410, 172);\n"
                               f"        lv_obj_align({var}, LV_ALIGN_RIGHT_MID, 0, 0);\n"
                               f"        lv_obj_set_style_pad_all({var}, 1, LV_PART_MAIN);\n"
                               f"        lv_obj_set_style_pad_row({var}, 2, LV_PART_MAIN);\n"
@@ -106,8 +106,8 @@ jobs:
                           return (
                               f"{m.group(0)}\n"
                               f"    if ({var}) {{\n"
-                              f"        lv_obj_set_size({var}, 220, 50);\n"
-                              f"        lv_obj_align({var}, LV_ALIGN_LEFT_MID, 4, 0);\n"
+                              f"        lv_obj_set_size({var}, 210, 80);\n"
+                              f"        lv_obj_align({var}, LV_ALIGN_LEFT_MID, 10, 0);\n"
                               f"        lv_obj_set_style_pad_all({var}, 4, 0);\n"
                               f"        lv_obj_set_style_text_font({var}, &lv_font_montserrat_12, 0);\n"
                               f"        lv_textarea_set_password_mode({var}, false);\n"
@@ -116,7 +116,7 @@ jobs:
                               f"    }}"
                           )
                       s = re.sub(
-                          r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]+)\s*=\s*lv_textarea_create\s*\([^;]+\);",
+                          r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]+)\s*=\s*lv_textarea_create\([^;]+\);",
                           patch_ta_create,
                           s
                       )
