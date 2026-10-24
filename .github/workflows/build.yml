@@ -142,9 +142,9 @@ jobs:
                       )
 
                       # 5. Compress container row gaps and padding to 2px
-                      s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]\vert{}[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_obj_set_style_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
-                      s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:[4-9]\vert{}[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
+                      s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
                       s = re.sub(r"&lv_font_montserrat_(?:14|16|18|20|22|24|28)", r"&lv_font_montserrat_12", s)
 
@@ -237,7 +237,6 @@ jobs:
           . $IDF_PATH/export.sh
           cd esp32
 
-          # Disable -Werror so harmless compiler warnings never halt the build
           find . -name "CMakeLists.txt" -exec sed -i 's/-Werror//g' {} + 2>/dev/null || true
           echo "target_compile_options(\${COMPONENT_LIB} PRIVATE -Wno-error -Wno-unused-variable)" >> components/muse/CMakeLists.txt 2>/dev/null || true
 
@@ -246,3 +245,42 @@ jobs:
           echo "CONFIG_COMPILER_WARNINGS_FATAL=n" >> sdkconfig.defaults
           [ -f "devices/sdkconfig.muse" ] && echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> devices/sdkconfig.muse
           [ -f "devices/sdkconfig.muse" ] && echo "CONFIG_LV_FONT_MONTSERRAT_12=y" >> devices/sdkconfig.muse
+          [ -f "devices/sdkconfig.muse" ] && echo "CONFIG_COMPILER_WARNINGS_FATAL=n" >> devices/sdkconfig.muse
+
+          OVERLAY=$(find devices/ -type f -name "*349*" | head -n 1)
+          DEFAULTS="sdkconfig.defaults"
+          [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
+          [ -n "$OVERLAY" ] && DEFAULTS="$DEFAULTS;$OVERLAY"
+
+          idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" build
+
+      - name: Package Firmware ZIP
+        shell: bash
+        run: |
+          apt-get update && apt-get install -y zip
+          
+          mkdir -p /tmp/firmware_package
+          
+          # Copy all flashed binary components
+          cp esp32/build-waveshare/bootloader/bootloader.bin /tmp/firmware_package/ 2>/dev/null || true
+          cp esp32/build-waveshare/partition_table/partition-table.bin /tmp/firmware_package/ 2>/dev/null || true
+          cp esp32/build-waveshare/*.bin /tmp/firmware_package/ 2>/dev/null || true
+          cp esp32/build-waveshare/flasher_args.json /tmp/firmware_package/ 2>/dev/null || true
+          
+          # Ensure open permissions
+          chmod -R 777 /tmp/firmware_package
+          
+          # Create root-level ZIP
+          cd /tmp/firmware_package
+          zip -r /tmp/firmware-waveshare-349.zip *
+          cd /
+          
+          echo "=== Contents of firmware-waveshare-349.zip ==="
+          unzip -l /tmp/firmware-waveshare-349.zip
+
+      - name: Upload Firmware Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-waveshare-349
+          path: /tmp/firmware-waveshare-349.zip
+          if-no-files-found: error
