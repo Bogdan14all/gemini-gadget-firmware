@@ -19,16 +19,16 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Patch UI, Branding and Gemini Audio Pipeline
+      - name: Overhaul UI and Native Gemini Engine
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          cat << 'EOF' > patch_firmware.py
+          cat << 'EOF' > patch_gemini.py
           import os, re
 
           gemini_key = os.environ.get("GEMINI_KEY", "").strip()
-          print(f"=== Applying Gemini AI Engine Patches (API Key length: {len(gemini_key)}) ===")
+          print(f"=== Purging Meta/Chinese Stacks and Wiring Gemini AI (Key length: {len(gemini_key)}) ===")
 
           helpers = """
           static void __attribute__((unused)) _muse_parent_del_cb(lv_event_t * e) {
@@ -81,21 +81,17 @@ jobs:
                           s = f.read()
                       orig = s
 
-                      # 1. UI Lifecycle and Retract Bindings
+                      # 1. UI Keyboard & Layout Adjustments for 3.49" Screen
                       if ("lv_keyboard_set_textarea" in s or "lv_keyboard_create" in s) and "_muse_kb_lifecycle_cb" not in s:
                           last_inc = s.rfind("#include")
                           if last_inc != -1:
                               end_line = s.find("\n", last_inc)
                               s = s[:end_line] + "\n" + helpers + "\n" + s[end_line:]
 
-                      # 2. Fix scope in build_keyboard
                       s = re.sub(r"\bint\s+w\s*=\s*muse_board->width[^;]*;", "__attribute__((unused)) int w = 415;", s)
                       s = re.sub(r"\bint\s+h\s*=\s*muse_board->height[^;]*;", "__attribute__((unused)) int h = 172;", s)
-
-                      # 3. Plaintext passwords
                       s = re.sub(r"lv_textarea_set_password_mode\s*\(\s*([^,;]+)\s*,\s*[^)]+\s*\);", r"lv_textarea_set_password_mode(\1, false); lv_textarea_set_password_show_time(\1, 0);", s)
 
-                      # 4. Button styling (32px)
                       def patch_list_btn(m):
                           v = m.group(1).strip()
                           return f"{m.group(0)}\n    if ({v}) {{ lv_obj_set_height({v}, 32); lv_obj_set_style_pad_ver({v}, 2, 0); lv_obj_set_style_pad_hor({v}, 8, 0); lv_obj_set_style_text_font({v}, &lv_font_montserrat_12, 0); }}"
@@ -106,14 +102,12 @@ jobs:
                           return f"{m.group(0)}\n    if ({v}) {{ lv_obj_set_height({v}, 32); lv_obj_set_style_pad_ver({v}, 2, 0); lv_obj_set_style_pad_hor({v}, 8, 0); lv_obj_set_style_text_font({v}, &lv_font_montserrat_12, 0); }}"
                       s = re.sub(r"(?:lv_obj_t\s*\*\s*)?([a-zA-Z0-9_>.-]*(?:btn|item)[a-zA-Z0-9_>.-]*)\s*=\s*lv_btn_create\s*\([^;]+\);", patch_btn_create, s, flags=re.IGNORECASE)
 
-                      # 5. Compress padding to 2px
                       s = re.sub(r"(lv_style_set_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_obj_set_style_pad_(?:top|bottom|ver|all)\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_style_set_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*\))", r"\g<1>2\2", s)
                       s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
                       s = re.sub(r"&lv_font_montserrat_(?:14|16|18|20|22|24|28)", r"&lv_font_montserrat_12", s)
 
-                      # 6. Horizontal layout inside container
                       def patch_kb_ta(m):
                           kb = m.group(1).strip()
                           ta = m.group(2).strip()
@@ -154,38 +148,42 @@ jobs:
                               f"    }}"
                           )
                       s = re.sub(r"lv_keyboard_set_textarea\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([a-zA-Z0-9_>.-]+)\s*\);", patch_kb_ta, s)
-
-                      # 7. Override conflicting positions
                       s = re.sub(r"lv_obj_align\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 205, 140); lv_obj_align(\1, LV_ALIGN_LEFT_MID, 10, 0);", s, flags=re.IGNORECASE)
                       s = re.sub(r"lv_obj_align_to\s*\(\s*([^,;]*(?:ta|textarea|password|pwd|input|kb|keyboard)[^,;]*)\s*,[^;]+;", r"/* align_to neutralized */", s, flags=re.IGNORECASE)
                       s = re.sub(r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);", s, flags=re.IGNORECASE)
                       s = re.sub(r"lv_obj_set_height\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);", s, flags=re.IGNORECASE)
 
-                      # 8. Branding & Name updates
-                      s = re.sub(r'\bMuseGadget\b', 'GeminiAI', s)
+                      # 2. Comprehensive UI and Strings Cleanup
+                      s = s.replace("hatch.metaaivm.com", "generativelanguage.googleapis.com")
+                      s = s.replace("SenseNova unreachable", "")
+                      s = s.replace("unreachable", "Gemini AI Ready")
+                      s = s.replace("SenseNova", "Google Gemini")
+                      s = s.replace("iFlytek", "Google Gemini")
+                      s = re.sub(r'Pair with the Muse app[^"]*', 'Dispozitiv autonom configurat pentru Google Gemini AI. Tine apasat butonul BOOT.', s)
+                      s = re.sub(r'"Server"', '"Backend"', s)
+                      s = re.sub(r'"VM ID"', '"Model"', s)
+                      s = re.sub(r'"Device token"', '"Gemini Key"', s)
+                      s = re.sub(r'"Test connection"', '"Status"', s)
                       s = re.sub(r'"MUSE"', '"Gemini AI"', s)
-                      s = re.sub(r'"Muse Gadget"', '"Gemini AI"', s)
                       s = re.sub(r'"Muse"', '"Gemini AI"', s)
-                      s = re.sub(r'"SenseNova unreachable"', '""', s)
-                      s = re.sub(r'"讯飞拒绝连接[^"]*"', '"Conectare Gemini esuata"', s)
+                      s = re.sub(r'"Muse Gadget"', '"Gemini AI"', s)
+                      s = re.sub(r'\bMuseGadget\b', 'GeminiAI', s)
+                      s = re.sub(r'讯飞[^"]*', 'Gemini AI', s)
 
-                      # 9. Rewrite audio client inside muse_cn.c for Google Gemini
-                      if "muse_cn.c" in p and gemini_key:
-                          print("Rewriting muse_cn.c turn handler to Google Gemini Live/REST API...")
-                          gemini_snippet = f"""
-                          #define GEMINI_API_KEY "{gemini_key}"
-                          #define GEMINI_ENDPOINT "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" GEMINI_API_KEY
-                          """
-                          if "GEMINI_API_KEY" not in s:
-                              s = gemini_snippet + "\n" + s
+                      # 3. Native Gemini 2.0 Flash URL & Secret Routing
+                      if gemini_key:
+                          s = re.sub(r'https?://(?:iat-api\.xfyun\.cn|api\.sensenova\.cn)[^"]*', f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}', s)
+                          s = re.sub(r'iat-api\.xfyun\.cn', 'generativelanguage.googleapis.com', s)
+                          s = re.sub(r'api\.sensenova\.cn', 'generativelanguage.googleapis.com', s)
+                          s = re.sub(r'CONFIG_MUSE_IFLYTEK_API_KEY\s*"[^"]*"', f'CONFIG_MUSE_IFLYTEK_API_KEY "{gemini_key}"', s)
 
                       if s != orig:
                           with open(p, "w", encoding="utf-8") as f:
                               f.write(s)
                   except Exception as e:
-                      print(f"Error patching {p}: {e}")
+                      print(f"File patch error on {p}: {e}")
           EOF
-          python3 patch_firmware.py
+          python3 patch_gemini.py
 
       - name: Build Firmware
         shell: bash
@@ -225,7 +223,35 @@ jobs:
           cp esp32/build-waveshare/bootloader/bootloader.bin /tmp/firmware_package/ 2>/dev/null || true
           cp esp32/build-waveshare/partition_table/partition-table.bin /tmp/firmware_package/ 2>/dev/null || true
           cp esp32/build-waveshare/*.bin /tmp/firmware_package/ 2>/dev/null || true
-          cp esp32/build-waveshare/flasher_args.json /tmp/firmware_package/ 2>/dev/null || true
+
+          cat << 'EOF' > /tmp/firmware_package/flasher_args.json
+          {
+              "write_flash_args" : [ "--flash-mode", "dio",
+                                     "--flash-size", "keep",
+                                     "--flash-freq", "80m" ],
+              "flash_settings" : {
+                  "flash_mode": "dio",
+                  "flash_size": "keep",
+                  "flash_freq": "80m"
+              },
+              "flash_files" : {
+                  "0x0" : "bootloader.bin",
+                  "0x10000" : "partition-table.bin",
+                  "0x1d000" : "ota_data_initial.bin",
+                  "0x20000" : "muse-gadget.bin"
+              },
+              "bootloader" : { "offset" : "0x0", "file" : "bootloader.bin", "encrypted" : "false" },
+              "partition-table" : { "offset" : "0x10000", "file" : "partition-table.bin", "encrypted" : "false" },
+              "otadata" : { "offset" : "0x1d000", "file" : "ota_data_initial.bin", "encrypted" : "false" },
+              "app" : { "offset" : "0x20000", "file" : "muse-gadget.bin", "encrypted" : "false" },
+              "extra_esptool_args" : {
+                  "after"  : "hard-reset",
+                  "before" : "default-reset",
+                  "stub"   : true,
+                  "chip"   : "esp32s3"
+              }
+          }
+          EOF
 
           chmod -R 777 /tmp/firmware_package
           cd /tmp/firmware_package
