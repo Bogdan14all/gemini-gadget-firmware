@@ -24,7 +24,15 @@ jobs:
         run: |
           . $IDF_PATH/export.sh
           cd esp32
-          idf.py -B build-waveshare build
+          
+          # Assemble all required board config overlays
+          DEFAULTS="sdkconfig.defaults"
+          [ -f "devices/sdkconfig.muse" ] && DEFAULTS="$DEFAULTS;devices/sdkconfig.muse"
+          OVERLAY=$(find devices/ -type f \( -name "*349*" -o -name "*waveshare*" \) 2>/dev/null | head -n 1)
+          [ -n "$OVERLAY" ] && DEFAULTS="$DEFAULTS;$OVERLAY"
+          
+          echo "Compiling with configs: $DEFAULTS"
+          idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" build
 
       - name: Upload Binaries
         uses: actions/upload-artifact@v4
