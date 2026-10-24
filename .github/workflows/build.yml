@@ -2,6 +2,15 @@ name: Build Meta Muse Firmware
 
 on:
   workflow_dispatch:
+    inputs:
+      wifi_ssid:
+        description: 'Wi-Fi SSID'
+        required: false
+        default: 'TP-Link_2.4G_9318_Guest'
+      wifi_pass:
+        description: 'Wi-Fi Password'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -19,7 +28,7 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Patch Keyboard Sizing
+      - name: Patch Keyboard & UI Sizing
         shell: bash
         run: |
           python3 -c '
@@ -27,20 +36,32 @@ jobs:
 
           for root, _, files in os.walk("esp32"):
               for file in files:
-                  if file.endswith((".c", ".cpp")):
+                  if file.endswith((".c", ".cpp", ".h")):
                       p = os.path.join(root, file)
                       with open(p, "r", encoding="utf-8", errors="ignore") as f:
                           s = f.read()
+                      modified = False
+                      # Constrain keyboard height and reduce key padding
                       if "lv_keyboard_create" in s:
-                          print("Patching keyboard in:", p)
                           s = re.sub(
                               r"(lv_obj_t\s*\*\s*(\w+)\s*=\s*lv_keyboard_create\([^;]+;\s*)",
-                              r"\1lv_obj_set_height(\2, lv_pct(60));\n    lv_obj_align(\2, LV_ALIGN_BOTTOM_MID, 0, 0);\n",
+                              r"\1lv_obj_set_height(\2, 95);\n    lv_obj_align(\2, LV_ALIGN_BOTTOM_MID, 0, 0);\n    lv_obj_set_style_pad_all(\2, 1, 0);\n    lv_obj_set_style_pad_gap(\2, 1, 0);\n",
                               s
                           )
+                          modified = True
+                      if modified:
                           with open(p, "w", encoding="utf-8") as f:
                               f.write(s)
           '
+
+      - name: Set Pre-configured Wi-Fi (Optional)
+        shell: bash
+        run: |
+          cd esp32
+          if [ -n "${{ inputs.wifi_pass }}" ]; then
+            echo 'CONFIG_ESP_WIFI_SSID="${{ inputs.wifi_ssid }}"' >> sdkconfig.defaults
+            echo 'CONFIG_ESP_WIFI_PASSWORD="${{ inputs.wifi_pass }}"' >> sdkconfig.defaults
+          fi
 
       - name: Build Firmware
         shell: bash
