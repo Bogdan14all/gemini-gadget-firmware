@@ -33,9 +33,9 @@ jobs:
           wifi_ssid = os.environ.get("WIFI_SSID", "TP-Link_2.4G_9318_Guest").strip()
           wifi_pass = os.environ.get("WIFI_PASSWORD", "revelion").strip()
 
-          print(f"=== Configurare motor REST Gemini (Key: {bool(gemini_key)}, SSID: {wifi_ssid}) ===")
+          print(f"=== Configurare firmware autonom Gemini (Key: {bool(gemini_key)}, SSID: {wifi_ssid}) ===")
 
-          # 1. Motor Backend pur in C (fara dependente de headere LVGL)
+          # 1. Motor Backend pur in C (Fara dependente directe LVGL pentru a preveni erorile de compilare)
           gemini_c_code = f"""
           #include <stdio.h>
           #include <string.h>
@@ -119,7 +119,7 @@ jobs:
           static void ip_event_handler(void* arg, esp_event_base_t event_base,
                                       int32_t event_id, void* event_data) {{
               if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {{
-                  ESP_LOGI(TAG_G, "Wi-Fi conectat. Pornire test automat Gemini in fundal...");
+                  ESP_LOGI(TAG_G, "Wi-Fi conectat. Testare automata a cheii Gemini in fundal...");
                   snprintf(g_last_status, sizeof(g_last_status), "Testare Gemini...");
                   xTaskCreate(gemini_auto_test_task, "g_test", 4096, NULL, 5, NULL);
               }}
@@ -199,7 +199,7 @@ jobs:
                       mbedtls_base64_encode((unsigned char *)b64_str, b64_len, &out_len, wav_buf, wav_len);
                       b64_str[out_len] = '\\0';
 
-                      // Eliberare imediata a bufferului WAV
+                      // Eliberare buffer WAV
                       free(wav_buf);
                       wav_buf = NULL;
 
@@ -330,7 +330,7 @@ jobs:
                       if "CONFIG_HOMEHUB_LED_STRIP_GPIO is an SPI flash pin" in s:
                           s = re.sub(r'#error\s+.*SPI flash pin.*', '//#error bypassed SPI flash pin', s)
 
-                      # Injectare initializare la pornire
+                      # Injectare initializare automata la pornire
                       if "app_main(" in s and "gemini_auto_init_nvs" not in s:
                           s = 'void gemini_auto_init_nvs(void);\n' + s
                           s = re.sub(r'(nvs_flash_init\(\);)', r'\1\n    gemini_auto_init_nvs();', s)
@@ -366,17 +366,19 @@ jobs:
                       s = re.sub(r'"Muse"', '"Gemini AI"', s)
                       s = re.sub(r'"MUSE"', '"Gemini AI"', s)
 
-                      # Injectare functii de callback dupa headerele incluse din fisierele UI
+                      # Injectare helpers strict in fisierele UI relevante
                       if ("lv_keyboard_set_textarea" in s or "lv_keyboard_create" in s or "Test Gemini Key" in s) and "gemini_ui_test_btn_cb" not in s:
                           last_inc = s.rfind("#include")
                           if last_inc != -1:
                               end_line = s.find("\n", last_inc)
                               s = s[:end_line] + "\n" + helpers + "\n" + s[end_line:]
 
-                      s = re.sub(r'lv_obj_add_event_cb\s*\(\s*([a-zA-Z0-9_>.-]*(?:test|btn)[a-zA-Z0-9_>.-]*)\s*,\s*[^,]+\s*,\s*LV_EVENT_CLICKED\s*,\s*([^)]+)\);',
-                                 r'lv_obj_add_event_cb(\1, gemini_ui_test_btn_cb, LV_EVENT_CLICKED, \2);', s)
+                      # Legare callback DOAR pentru butonul de test conexiune din ecranul de setari
+                      if "Test Gemini Key" in s:
+                          s = re.sub(r'lv_obj_add_event_cb\s*\(\s*([a-zA-Z0-9_>.-]*test[a-zA-Z0-9_>.-]*)\s*,\s*[^,]+\s*,\s*LV_EVENT_CLICKED\s*,\s*([^)]+)\);',
+                                     r'lv_obj_add_event_cb(\1, gemini_ui_test_btn_cb, LV_EVENT_CLICKED, \2);', s)
 
-                      # Reglare rezolutie tastatura pentru ecranul de 3.49"
+                      # Reglare tastatura pentru ecranul de 3.49"
                       s = re.sub(r"\bint\s+w\s*=\s*muse_board->width[^;]*;", "__attribute__((unused)) int w = 415;", s)
                       s = re.sub(r"\bint\s+h\s*=\s*muse_board->height[^;]*;", "__attribute__((unused)) int h = 172;", s)
                       s = re.sub(r"lv_textarea_set_password_mode\s*\(\s*([^,;]+)\s*,\s*[^)]+\s*\);", r"lv_textarea_set_password_mode(\1, false); lv_textarea_set_password_show_time(\1, 0);", s)
