@@ -32,10 +32,14 @@ jobs:
           arduino-cli lib install "lvgl"@9.1.0 || true
           arduino-cli lib install "ArduinoJson"@6.21.4
 
-      - name: Locate and Compile Display/LVGL Demo
+      - name: Fix Legacy I2C Driver Include & Compile
         run: |
           SKETCH_PATH=$(find Arduino -type f -name "*.ino" | grep -Ei "10_LVGL|lcd|display|demo" | head -n 1)
-          echo "Compilare sketch identificat: $SKETCH_PATH"
+          SKETCH_DIR=$(dirname "$SKETCH_PATH")
+          echo "Compilare sketch identificat in: $SKETCH_DIR"
+
+          # Inlocuire driver/i2c_master.h cu driver/i2c.h daca este necesar pentru compatibilitate ESP-IDF / Arduino Core
+          find "$SKETCH_DIR" -type f \\( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \\) -exec sed -i 's/driver\/i2c_master.h/driver\/i2c.h/g' {} +
 
           FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi"
           echo "Utilizare FQBN: $FQBN"
