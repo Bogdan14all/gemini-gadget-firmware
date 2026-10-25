@@ -22,7 +22,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           submodules: recursive
 
-      - name: Clean Source, Compact UI & Native Gemini Integration
+      - name: Clean Source, Compact UI & Gemini Native Engine
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -195,47 +195,10 @@ jobs:
           python3 - << 'PYEOF'
           import os, re
 
-          flex_keypad_helper = """
-          static void __attribute__((unused)) _gemini_fix_keypad(lv_obj_t *kb, lv_obj_t *ta) {
-              if (ta) {
-                  lv_obj_t *scr = lv_scr_act();
-                  lv_obj_set_parent(ta, scr);
-                  lv_obj_set_size(ta, 620, 34);
-                  lv_obj_set_pos(ta, 10, 3);
-                  lv_obj_set_style_bg_color(ta, lv_color_hex(0x121826), 0);
-                  lv_obj_set_style_bg_opa(ta, LV_OPA_COVER, 0);
-                  lv_obj_set_style_border_color(ta, lv_color_hex(0x3B82F6), 0);
-                  lv_obj_set_style_border_width(ta, 2, 0);
-                  lv_obj_set_style_radius(ta, 6, 0);
-                  lv_obj_set_style_text_color(ta, lv_color_hex(0xFFFFFF), 0);
-                  lv_obj_set_style_text_font(ta, &lv_font_montserrat_12, 0);
-                  lv_obj_set_style_pad_all(ta, 4, 0);
-                  lv_textarea_set_password_mode(ta, false);
-                  lv_textarea_set_one_line(ta, true);
-                  lv_obj_clear_flag(ta, LV_OBJ_FLAG_HIDDEN);
-              }
-              if (kb) {
-                  lv_obj_t *scr = lv_scr_act();
-                  lv_obj_set_parent(kb, scr);
-                  lv_obj_set_size(kb, 640, 132);
-                  lv_obj_set_pos(kb, 0, 40);
-                  lv_obj_set_style_pad_all(kb, 1, LV_PART_MAIN);
-                  lv_obj_set_style_pad_row(kb, 1, LV_PART_MAIN);
-                  lv_obj_set_style_pad_column(kb, 1, LV_PART_MAIN);
-                  lv_obj_set_style_pad_all(kb, 1, LV_PART_ITEMS);
-                  lv_obj_set_style_text_font(kb, &lv_font_montserrat_12, LV_PART_ITEMS);
-                  lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
-                  lv_obj_move_foreground(kb);
-              }
-              if (ta) {
-                  lv_obj_move_foreground(ta);
-              }
-          }
-          """
+          gemini_key = os.environ.get("GEMINI_KEY", "").strip()
 
           for root, dirs, files in os.walk("esp32/components/muse"):
               for file in files:
-                  # STRICT: Modifica exclusiv fisierele de implementare (.c / .cpp) pentru a evita redefinirea din headers
                   if not file.endswith((".c", ".cpp")):
                       continue
 
@@ -244,37 +207,71 @@ jobs:
                       content = f.read()
                   orig = content
 
-                  if "keypad" in file.lower() or "lv_keyboard" in content:
-                      if "_gemini_fix_keypad" not in content:
-                          last_inc = content.rfind("#include")
-                          if last_inc != -1:
-                              end_line = content.find("\n", last_inc)
-                              content = content[:end_line] + "\n" + flex_keypad_helper + "\n" + content[end_line:]
-
-                      content = re.sub(
-                          r'lv_keyboard_set_textarea\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([a-zA-Z0-9_>.-]+)\s*\);',
-                          r'lv_keyboard_set_textarea(\1, \2); _gemini_fix_keypad(\1, \2);',
-                          content
+                  # 1. Reparare layout tastatura si casuta de text in muse_keypad.c (fara a reparenta)
+                  def patch_kb_set_ta(m):
+                      kb = m.group(1).strip()
+                      ta = m.group(2).strip()
+                      return (
+                          f"lv_keyboard_set_textarea({kb}, {ta});\n"
+                          f"    if ({ta}) {{\n"
+                          f"        lv_obj_set_size({ta}, 620, 36);\n"
+                          f"        lv_obj_align({ta}, LV_ALIGN_TOP_MID, 0, 2);\n"
+                          f"        lv_obj_set_style_bg_color({ta}, lv_color_hex(0x18181B), 0);\n"
+                          f"        lv_obj_set_style_bg_opa({ta}, LV_OPA_COVER, 0);\n"
+                          f"        lv_obj_set_style_border_color({ta}, lv_color_hex(0x3B82F6), 0);\n"
+                          f"        lv_obj_set_style_border_width({ta}, 2, 0);\n"
+                          f"        lv_obj_set_style_radius({ta}, 4, 0);\n"
+                          f"        lv_obj_set_style_text_color({ta}, lv_color_hex(0xFFFFFF), 0);\n"
+                          f"        lv_obj_set_style_text_font({ta}, &lv_font_montserrat_12, 0);\n"
+                          f"        lv_obj_set_style_pad_all({ta}, 4, 0);\n"
+                          f"        lv_textarea_set_password_mode({ta}, false);\n"
+                          f"        lv_textarea_set_one_line({ta}, true);\n"
+                          f"        lv_obj_clear_flag({ta}, LV_OBJ_FLAG_HIDDEN);\n"
+                          f"        lv_obj_move_foreground({ta});\n"
+                          f"    }}\n"
+                          f"    if ({kb}) {{\n"
+                          f"        lv_obj_t *__cont = lv_obj_get_parent({kb});\n"
+                          f"        if (__cont) {{\n"
+                          f"            lv_obj_set_size(__cont, 640, 172);\n"
+                          f"            lv_obj_set_pos(__cont, 0, 0);\n"
+                          f"            lv_obj_set_style_pad_all(__cont, 0, 0);\n"
+                          f"            lv_obj_clear_flag(__cont, LV_OBJ_FLAG_SCROLLABLE);\n"
+                          f"        }}\n"
+                          f"        lv_obj_set_size({kb}, 640, 130);\n"
+                          f"        lv_obj_align({kb}, LV_ALIGN_BOTTOM_MID, 0, 0);\n"
+                          f"        lv_obj_set_style_pad_all({kb}, 1, LV_PART_MAIN);\n"
+                          f"        lv_obj_set_style_pad_row({kb}, 1, LV_PART_MAIN);\n"
+                          f"        lv_obj_set_style_pad_column({kb}, 1, LV_PART_MAIN);\n"
+                          f"        lv_obj_set_style_pad_all({kb}, 1, LV_PART_ITEMS);\n"
+                          f"        lv_obj_set_style_text_font({kb}, &lv_font_montserrat_12, LV_PART_ITEMS);\n"
+                          f"        lv_obj_clear_flag({kb}, LV_OBJ_FLAG_HIDDEN);\n"
+                          f"        lv_obj_clear_flag({kb}, LV_OBJ_FLAG_SCROLLABLE);\n"
+                          f"        if ({ta}) lv_obj_move_foreground({ta});\n"
+                          f"    }}"
                       )
-                      content = re.sub(
-                          r'([a-zA-Z0-9_>.-]+)\s*=\s*lv_keyboard_create\s*\(([^)]+)\);',
-                          r'\1 = lv_keyboard_create(\2); if (\1) { _gemini_fix_keypad(\1, NULL); }',
-                          content
-                      )
 
-                  # Reducere fonturi la Montserrat 12
+                  content = re.sub(
+                      r'lv_keyboard_set_textarea\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([a-zA-Z0-9_>.-]+)\s*\);',
+                      patch_kb_set_ta,
+                      content
+                  )
+
+                  # 2. Reducere globala fonturi la Montserrat 12
                   content = re.sub(r'&lv_font_montserrat_(?:14|16|18|20|24)', '&lv_font_montserrat_12', content)
 
-                  # Comprimare inaltime randuri de meniu de la 50-80px la 32px
+                  # 3. Comprimare randuri setari la 32 px inaltime
                   content = re.sub(r'lv_obj_set_height\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*(?:[4-9][0-9]|1[0-9]{2})\s*\);', r'lv_obj_set_height(\1, 32);', content)
                   content = re.sub(r'lv_obj_set_style_pad_top\s*\(\s*([^,]+)\s*,\s*[5-9][0-9]*\s*,\s*0\s*\);', r'lv_obj_set_style_pad_top(\1, 2, 0);', content)
                   content = re.sub(r'lv_obj_set_style_pad_bottom\s*\(\s*([^,]+)\s*,\s*[5-9][0-9]*\s*,\s*0\s*\);', r'lv_obj_set_style_pad_bottom(\1, 2, 0);', content)
 
-                  # Inlocuire texte chinezesti si Muse cu Gemini
+                  # 4. Reducere inaltime bara de titlu/antet
+                  content = re.sub(r'lv_obj_set_height\s*\(\s*([^,;]*header[^,;]*)\s*,\s*[0-9]+\s*\);', r'lv_obj_set_height(\1, 24);', content, flags=re.IGNORECASE)
+
+                  # 5. Inlocuire etichete chinezesti / Muse cu Gemini
                   content = content.replace('"MUSE"', '"GEMINI AI"')
                   content = content.replace('"Muse"', '"Gemini AI"')
                   content = content.replace('"VM ID"', '"Model"')
-                  content = content.replace('"Device token"', '"Gemini Key"')
+                  content = content.replace('"Device token"', '"Gemini API Key"')
                   content = content.replace('"Reset pairing"', '"Gemini Ready"')
                   content = content.replace('"untested"', '"Online"')
                   content = content.replace("iFlytek • SenseNova", "Google Gemini 2.0")
@@ -283,12 +280,16 @@ jobs:
                   content = content.replace("SenseNova", "Google Gemini")
                   content = content.replace("讯飞拒绝连接", "Eroare Gemini")
                   content = content.replace("讯飞", "Gemini")
-                  content = content.replace("Pair with the Muse app", "Gemini Standalone")
-                  content = content.replace('"Server"', '"Backend"')
+                  content = content.replace("Pair with the Muse app", "Gemini 2.0 Standalone")
+                  content = content.replace('"Server"', '"API: Google Gemini"')
                   content = content.replace("iat-api.xfyun.cn", "generativelanguage.googleapis.com")
                   content = content.replace("api.sensenova.cn", "generativelanguage.googleapis.com")
                   content = content.replace("hatch.metaaivm.com", "generativelanguage.googleapis.com")
 
+                  if "settings" in file.lower():
+                      content = content.replace('"Not set"', '"Configurat"')
+
+                  # 6. Bypass pairing
                   content = re.sub(r'bool\s+muse_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_paired(void) { return true; }', content)
                   content = re.sub(r'bool\s+muse_is_activated\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_activated(void) { return true; }', content)
                   content = re.sub(r'bool\s+muse_app_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_app_is_paired(void) { return true; }', content)
