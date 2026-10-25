@@ -1,3 +1,4 @@
+
 name: Build Waveshare V2 Gemini Firmware
 
 on:
@@ -29,20 +30,17 @@ jobs:
           if [ -d "Arduino/libraries" ]; then
             cp -r Arduino/libraries/* ~/Arduino/libraries/ 2>/dev/null || true
           fi
-          arduino-cli lib install "lvgl"@8.3.11
+          # Instalam LVGL v9 compatibil cu testul identificat
+          arduino-cli lib install "lvgl"@9.1.0
           arduino-cli lib install "ArduinoJson"@6.21.4
 
       - name: Locate and Compile Display/LVGL Demo
         run: |
-          # Cautam explicit exemplul cu LCD / LVGL / Display
-          SKETCH_PATH=$(find Arduino -type f -name "*.ino" | grep -Ei "lcd|lvgl|display|demo|touch" | head -n 1)
-          if [ -z "$SKETCH_PATH" ]; then
-            SKETCH_PATH=$(find Arduino -type f -name "*.ino" | grep -v "05_WIFI_AP" | head -n 1)
-          fi
+          SKETCH_PATH=$(find Arduino -type f -name "*.ino" | grep -Ei "10_LVGL|lcd|display|demo" | head -n 1)
           echo "Compilare sketch identificat: $SKETCH_PATH"
 
-          # FQBN corectat pentru ESP32-S3 (16MB Flash, Octal PSRAM OPI)
-          arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M,PSRAM=opi \
+          # PartitionScheme setat pe default_16MB pentru 16MB Flash
+          arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PartitionScheme=default_16MB,PSRAM=opi \
             --output-dir build_output \
             "$SKETCH_PATH"
 
