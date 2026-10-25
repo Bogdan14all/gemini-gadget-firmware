@@ -1,3 +1,4 @@
+
 name: Build Gemini OS for Waveshare 3.49 V2
 
 on:
@@ -10,6 +11,14 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Setup Python & esptool
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install esptool
+        run: pip install esptool
 
       - name: Setup Arduino CLI & ESP32 Core
         run: |
@@ -26,7 +35,6 @@ jobs:
           arduino-cli lib install "lvgl"@8.3.11
           arduino-cli lib install "ArduinoJson"@6.21.4
 
-          # LVGL cauta lv_conf.h langa directorul lvgl (~/Arduino/libraries/)
           cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
           #ifndef LV_CONF_H
           #define LV_CONF_H
@@ -222,33 +230,31 @@ jobs:
             --output-dir build_output \
             gemini_os
 
-      - name: Package Firmware Binaries
+      - name: Merge into a Single All-in-One Binary (Offset 0x0)
         run: |
           mkdir -p package_bin
-          cp build_output/*.bin package_bin/ 2>/dev/null || true
-          cp build_output/*.bootloader.bin package_bin/bootloader.bin 2>/dev/null || true
-          cp build_output/*.partitions.bin package_bin/partitions.bin 2>/dev/null || true
+          BOOTLOADER=$(ls build_output/*.bootloader.bin | head -n 1)
+          PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
+          APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
 
-          cat << 'EOF' > package_bin/flasher_args.json
-          {
-              "write_flash_args" : [ "--flash-mode", "dio",
-                                     "--flash-size", "16MB",
-                                     "--flash-freq", "80m" ],
-              "flash_settings" : {
-                  "flash_mode": "dio",
-                  "flash_size": "16MB",
-                  "flash_freq": "80m"
-              },
-              "flash_files" : {
-                  "0x0" : "bootloader.bin",
-                  "0x8000" : "partitions.bin"
-              }
-          }
-          EOF
+          echo "Unificare fisiere:"
+          echo "Bootloader (0x0): $BOOTLOADER"
+          echo "Partitions (0x8000): $PARTITIONS"
+          echo "App (0x10000): $APP_BIN"
 
-      - name: Upload Clean Binary Artifact
+          # Fuzioneaza toate componentele intr-un singur binar gata de flash la 0x0
+          esptool.py --chip esp32s3 merge_bin \
+            -o package_bin/gemini-os-full-0x0.bin \
+            --flash_mode dio \
+            --flash_size 16MB \
+            --flash_freq 80m \
+            0x0 "$BOOTLOADER" \
+            0x8000 "$PARTITIONS" \
+            0x10000 "$APP_BIN"
+
+      - name: Upload Single Monolithic Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-waveshare-v2-gemini
-          path: package_bin/
+          name: gemini-os-waveshare-v2-single-bin
+          path: package_bin/gemini-os-full-0x0.bin
           if-no-files-found: error
