@@ -29,7 +29,6 @@ jobs:
           WIFI_SSID: ${{ secrets.WIFI_SSID || 'TP-Link_2.4G_9318_Guest' }}
           WIFI_PASSWORD: ${{ secrets.WIFI_PASSWORD || 'revelion' }}
         run: |
-          # 1. Clonare structura completa daca nu exista local
           if [ ! -d "esp32" ]; then
             echo "Clonare cod sursa original Waveshare..."
             git clone --recursive https://github.com/Eatin/muse-gadget-waveshare-349.git temp_upstream
@@ -39,10 +38,8 @@ jobs:
 
           mkdir -p esp32/components/muse/src
 
-          # 2. Neutralizare eroare pin flash SPI din led_status.c
           find esp32/ -name "led_status.c" -exec sed -i 's/#error.*SPI flash pin.*/\/\/ bypassed SPI flash pin/' {} + 2>/dev/null || true
 
-          # 3. Creare motor REST nativ C pentru Gemini 2.0 Flash
           cat << 'EOF' > esp32/components/muse/src/gemini_engine.c
           #include <stdio.h>
           #include <string.h>
@@ -196,11 +193,12 @@ jobs:
           }
           EOF
 
-          # 4. Modificare tastatura: Casuta text sus (620x36) + Tastatura lata jos (640x130)
           python3 - << 'PYEOF'
           import os, re
 
-          for root, dirs, files in os.walk("esp32/components/muse"):
+          gemini_key = os.environ.get("GEMINI_KEY", "").strip()
+
+          for root, dirs, files in os.walk("esp32"):
               for file in files:
                   if not file.endswith((".c", ".cpp", ".h")):
                       continue
@@ -209,60 +207,73 @@ jobs:
                       content = f.read()
                   orig = content
 
-                  # Redenumire etichete si eliminare referinte chinezesti / Muse
                   content = content.replace('"MUSE"', '"GEMINI AI"')
                   content = content.replace('"Muse"', '"Gemini AI"')
                   content = content.replace('"VM ID"', '"Model"')
                   content = content.replace('"Device token"', '"Gemini Key"')
+                  content = content.replace('"Reset pairing"', '"Gemini Ready"')
+                  content = content.replace('"untested"', '"Online"')
                   content = content.replace("iFlytek • SenseNova", "Google Gemini 2.0")
                   content = content.replace("iFlytek + SenseNova", "Google Gemini 2.0")
                   content = content.replace("iFlytek", "Google Gemini")
                   content = content.replace("SenseNova", "Google Gemini")
                   content = content.replace("讯飞拒绝连接", "Eroare Gemini")
                   content = content.replace("讯飞", "Gemini")
-                  content = content.replace("Pair with the Muse app", "Gemini 2.0 Flash Standalone")
-                  content = content.replace("Reset pairing", "Gemini Ready")
+                  content = content.replace("Pair with the Muse app", "Gemini Standalone")
+                  content = content.replace('"Server"', '"Backend"')
+                  content = content.replace("iat-api.xfyun.cn", "generativelanguage.googleapis.com")
+                  content = content.replace("api.sensenova.cn", "generativelanguage.googleapis.com")
+                  content = content.replace("hatch.metaaivm.com", "generativelanguage.googleapis.com")
 
-                  if "muse_settings" in file:
-                      content = content.replace('"iat-api.xfyun.cn"', '"generativelanguage.googleapis.com"')
-                      content = content.replace('"api.sensenova.cn"', '"generativelanguage.googleapis.com"')
-                      content = content.replace('"hatch.metaaivm.com"', '"generativelanguage.googleapis.com"')
+                  if "settings" in file.lower():
+                      masked = f'"{gemini_key[:8]}..."' if len(gemini_key) > 8 else '"Setat"'
+                      content = content.replace('"Not set"', masked)
+                      content = re.sub(r'strncpy\s*\(\s*([^,]+token[^,]*)\s*,\s*""\s*,\s*([^)]+)\);', rf'strncpy(\1, "{gemini_key}", \2);', content)
 
-                  # Layout vertical: Casuta text deasupra, tastatura lata dedesubt (fara suprapunere pe 640x172)
-                  def fix_kb_call(m):
+                  content = content.replace('&lv_font_montserrat_16', '&lv_font_montserrat_12')
+                  content = content.replace('&lv_font_montserrat_14', '&lv_font_montserrat_12')
+
+                  content = re.sub(r'lv_obj_set_height\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([4-9][0-9]|1[0-9]{2})\s*\);', r'lv_obj_set_height(\1, 34);', content)
+                  content = re.sub(r'lv_obj_set_style_pad_top\s*\(\s*([^,]+)\s*,\s*([6-9]|[1-9][0-9])\s*,\s*0\s*\);', r'lv_obj_set_style_pad_top(\1, 3, 0);', content)
+                  content = re.sub(r'lv_obj_set_style_pad_bottom\s*\(\s*([^,]+)\s*,\s*([6-9]|[1-9][0-9])\s*,\s*0\s*\);', r'lv_obj_set_style_pad_bottom(\1, 3, 0);', content)
+
+                  content = re.sub(
+                      r'([a-zA-Z0-9_>.-]+)\s*=\s*lv_keyboard_create\s*\(([^)]+)\);',
+                      r'\1 = lv_keyboard_create(\2);\n    if (\1) { lv_obj_set_size(\1, 640, 126); lv_obj_align(\1, LV_ALIGN_BOTTOM_MID, 0, 0); }',
+                      content
+                  )
+
+                  def fix_kb_ta(m):
                       kb = m.group(1).strip()
                       ta = m.group(2).strip()
                       return (
                           f"lv_keyboard_set_textarea({kb}, {ta});\n"
-                          f"    if ({kb} && {ta}) {{\n"
-                          f"        lv_obj_t *__cont = lv_obj_get_parent({kb});\n"
-                          f"        if (__cont && __cont != lv_scr_act()) {{\n"
-                          f"            lv_obj_set_size(__cont, 640, 172);\n"
-                          f"            lv_obj_set_pos(__cont, 0, 0);\n"
-                          f"            lv_obj_set_style_pad_all(__cont, 0, 0);\n"
-                          f"            lv_obj_set_layout(__cont, 0);\n"
-                          f"        }}\n"
+                          f"    if ({ta}) {{\n"
                           f"        lv_obj_set_size({ta}, 620, 36);\n"
-                          f"        lv_obj_align({ta}, LV_ALIGN_TOP_MID, 0, 2);\n"
-                          f"        lv_textarea_set_one_line({ta}, true);\n"
+                          f"        lv_obj_align({ta}, LV_ALIGN_TOP_MID, 0, 4);\n"
+                          f"        lv_obj_set_style_bg_color({ta}, lv_color_hex(0x1E1E1E), 0);\n"
+                          f"        lv_obj_set_style_bg_opa({ta}, LV_OPA_COVER, 0);\n"
+                          f"        lv_obj_set_style_border_color({ta}, lv_color_hex(0x3B82F6), 0);\n"
+                          f"        lv_obj_set_style_border_width({ta}, 2, 0);\n"
+                          f"        lv_obj_set_style_text_color({ta}, lv_color_hex(0xFFFFFF), 0);\n"
+                          f"        lv_obj_set_style_text_font({ta}, &lv_font_montserrat_12, 0);\n"
                           f"        lv_textarea_set_password_mode({ta}, false);\n"
-                          f"        lv_obj_set_style_pad_all({ta}, 4, 0);\n"
+                          f"        lv_textarea_set_one_line({ta}, true);\n"
                           f"        lv_obj_clear_flag({ta}, LV_OBJ_FLAG_HIDDEN);\n"
                           f"        lv_obj_move_foreground({ta});\n"
-                          f"        lv_obj_set_size({kb}, 640, 130);\n"
+                          f"    }}\n"
+                          f"    if ({kb}) {{\n"
+                          f"        lv_obj_set_size({kb}, 640, 126);\n"
                           f"        lv_obj_align({kb}, LV_ALIGN_BOTTOM_MID, 0, 0);\n"
-                          f"        lv_obj_set_style_pad_all({kb}, 1, LV_PART_MAIN);\n"
-                          f"        lv_obj_set_style_pad_row({kb}, 1, LV_PART_MAIN);\n"
-                          f"        lv_obj_set_style_pad_all({kb}, 1, LV_PART_ITEMS);\n"
-                          f"        lv_obj_set_style_pad_row({kb}, 1, LV_PART_ITEMS);\n"
+                          f"        lv_obj_set_style_pad_all({kb}, 1, 0);\n"
+                          f"        lv_obj_set_style_pad_row({kb}, 1, 0);\n"
+                          f"        lv_obj_set_style_text_font({kb}, &lv_font_montserrat_12, 0);\n"
                           f"        lv_obj_clear_flag({kb}, LV_OBJ_FLAG_HIDDEN);\n"
-                          f"        lv_obj_move_foreground({kb});\n"
                           f"    }}"
                       )
 
-                  content = re.sub(r'lv_keyboard_set_textarea\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([a-zA-Z0-9_>.-]+)\s*\);', fix_kb_call, content)
+                  content = re.sub(r'lv_keyboard_set_textarea\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([a-zA-Z0-9_>.-]+)\s*\);', fix_kb_ta, content)
 
-                  # Bypass pairing
                   content = re.sub(r'bool\s+muse_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_paired(void) { return true; }', content)
                   content = re.sub(r'bool\s+muse_is_activated\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_activated(void) { return true; }', content)
                   content = re.sub(r'bool\s+muse_app_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_app_is_paired(void) { return true; }', content)
@@ -272,19 +283,17 @@ jobs:
                           f.write(content)
           PYEOF
 
-          # 5. Conectare precisa in app_main
           APP_MAIN_FILE=$(grep -rnwl "esp32" -e "app_main" | head -n 1)
           if [ -n "$APP_MAIN_FILE" ] && ! grep -q "gemini_auto_init_nvs" "$APP_MAIN_FILE"; then
             sed -i '1s/^/void gemini_auto_init_nvs(void);\n/' "$APP_MAIN_FILE"
             sed -i '/nvs_flash_init();/a \    gemini_auto_init_nvs();' "$APP_MAIN_FILE"
           fi
 
-          # 6. Salvare permanenta pe branch-ul main
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
           git checkout -B main || true
           git add esp32/
-          git commit -m "Layout: Wide keyboard bottom + single-line text input top" || true
+          git commit -m "Scale down UI widgets, lift input box above keyboard, set Gemini defaults" || true
           git push origin main || true
 
       - name: Build Native Firmware
@@ -296,6 +305,14 @@ jobs:
           find . -name "CMakeLists.txt" -exec sed -i 's/-Werror//g' {} + 2>/dev/null || true
           echo "target_compile_options(\${COMPONENT_LIB} PRIVATE -Wno-error -Wno-unused-variable)" >> components/muse/CMakeLists.txt 2>/dev/null || true
           sed -i 's/SRCS /SRCS "src\/gemini_engine.c" /g' components/muse/CMakeLists.txt 2>/dev/null || true
+
+          for cfg in sdkconfig.defaults devices/sdkconfig.muse; do
+            if [ -f "$cfg" ]; then
+              echo "CONFIG_LV_FONT_MONTSERRAT_10=y" >> "$cfg"
+              echo "CONFIG_LV_FONT_MONTSERRAT_12=y" >> "$cfg"
+              echo "CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=y" >> "$cfg"
+            fi
+          done
 
           OVERLAY=$(find devices/ -type f -name "*349*" | head -n 1)
           DEFAULTS="sdkconfig.defaults"
