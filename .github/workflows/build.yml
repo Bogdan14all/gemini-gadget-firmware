@@ -1,11 +1,14 @@
-name: Build Gemini AI Firmware
+name: Setup Clean Gemini Firmware
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build:
-    name: Build Waveshare 3.49 Gemini Firmware
+  import-and-build:
+    name: Import Eatin, Purge iFlytek and Build
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:v6.0.1
@@ -13,30 +16,32 @@ jobs:
       - name: Safe Git Directory
         run: git config --global --add safe.directory '*'
 
-      - name: Checkout Waveshare 3.49 Port
+      - name: Checkout User Repository
         uses: actions/checkout@v4
         with:
-          repository: Eatin/muse-gadget-waveshare-349
+          token: ${{ secrets.GITHUB_TOKEN }}
           submodules: recursive
 
-      - name: Clean Integration (Native Layout & Credentials Separation)
+      - name: Import Upstream Code & Decouple iFlytek
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
           WIFI_SSID: ${{ secrets.WIFI_SSID || 'TP-Link_2.4G_9318_Guest' }}
           WIFI_PASSWORD: ${{ secrets.WIFI_PASSWORD || 'revelion' }}
         run: |
-          cat << 'EOF' > patch_gemini.py
-          import os, re
+          # 1. Daca esp32 nu exista local in repo, il clonam de la Eatin
+          if [ ! -d "esp32" ]; then
+            echo "Clonare cod sursa original Waveshare..."
+            git clone --recursive https://github.com/Eatin/muse-gadget-waveshare-349.git temp_upstream
+            cp -r temp_upstream/* .
+            rm -rf temp_upstream
+          fi
 
-          gemini_key = os.environ.get("GEMINI_KEY", "").strip()
-          wifi_ssid = os.environ.get("WIFI_SSID", "TP-Link_2.4G_9318_Guest").strip()
-          wifi_pass = os.environ.get("WIFI_PASSWORD", "revelion").strip()
+          # 2. Neutralizare eroare pin flash SPI din led_status.c
+          find esp32/ -name "led_status.c" -exec sed -i 's/#error.*SPI flash pin.*/\/\/ bypassed SPI flash pin/' {} + 2>/dev/null || true
 
-          print(f"=== Configurare NVS & Gemini (SSID: {wifi_ssid}, Key setata: {bool(gemini_key)}) ===")
-
-          # 1. Motor C pentru NVS automat, Wi-Fi si trimitere REST Gemini
-          gemini_engine = f"""
+          # 3. Creare gemini_engine.c pur (fara modificari pe interfata grafica sau fonturi)
+          cat << 'EOF' > esp32/components/muse/src/gemini_engine.c
           #include <stdio.h>
           #include <string.h>
           #include <stdlib.h>
@@ -54,84 +59,32 @@ jobs:
           #include "freertos/task.h"
 
           static const char *TAG_G = "GEMINI_CORE";
-          static const char *G_KEY = "{gemini_key}";
-          static const char *W_SSID = "{wifi_ssid}";
-          static const char *W_PASS = "{wifi_pass}";
+          EOF
 
-          static char g_api_status[64] = "Gemini Ready";
+          cat << EOF >> esp32/components/muse/src/gemini_engine.c
+          static const char *G_KEY = "${GEMINI_KEY}";
+          static const char *W_SSID = "${WIFI_SSID}";
+          static const char *W_PASS = "${WIFI_PASSWORD}";
+          EOF
 
-          const char* gemini_get_key(void) {{
-              return G_KEY;
-          }}
-
-          const char* gemini_get_status(void) {{
-              return g_api_status;
-          }}
-
-          static void* safe_alloc(size_t size) {{
+          cat << 'EOF' >> esp32/components/muse/src/gemini_engine.c
+          static void* safe_alloc(size_t size) {
               void *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
               if (!ptr) ptr = malloc(size);
               return ptr;
-          }}
+          }
 
-          bool gemini_test_api_key(char *out_msg, size_t out_len) {{
-              if (!G_KEY || strlen(G_KEY) < 10) {{
-                  snprintf(g_api_status, sizeof(g_api_status), "Cheie lipsa");
-                  if (out_msg) snprintf(out_msg, out_len, "%s", g_api_status);
-                  return false;
-              }}
-
-              char url[320];
-              snprintf(url, sizeof(url), "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash?key=%s", G_KEY);
-
-              esp_http_client_config_t config = {{
-                  .url = url,
-                  .method = HTTP_METHOD_GET,
-                  .crt_bundle_attach = esp_crt_bundle_attach,
-                  .timeout_ms = 8000,
-                  .buffer_size = 1024,
-              }};
-              esp_http_client_handle_t client = esp_http_client_init(&config);
-              esp_err_t err = esp_http_client_perform(client);
-              int status = esp_http_client_get_status_code(client);
-              esp_http_client_cleanup(client);
-
-              if (err == ESP_OK && status == 200) {{
-                  snprintf(g_api_status, sizeof(g_api_status), "Gemini OK (Valid)");
-                  if (out_msg) snprintf(out_msg, out_len, "%s", g_api_status);
-                  return true;
-              }} else {{
-                  snprintf(g_api_status, sizeof(g_api_status), "Eroare (%d)", status);
-                  if (out_msg) snprintf(out_msg, out_len, "%s", g_api_status);
-                  return false;
-              }}
-          }}
-
-          static void gemini_auto_test_task(void *pvParameters) {{
-              vTaskDelay(pdMS_TO_TICKS(3000));
-              gemini_test_api_key(NULL, 0);
-              vTaskDelete(NULL);
-          }}
-
-          static void ip_event_handler(void* arg, esp_event_base_t event_base,
-                                      int32_t event_id, void* event_data) {{
-              if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {{
-                  xTaskCreate(gemini_auto_test_task, "g_test", 4096, NULL, 5, NULL);
-              }}
-          }}
-
-          void gemini_auto_init_nvs(void) {{
+          void gemini_auto_init_nvs(void) {
               nvs_handle_t h;
-              // 1. Salvare Wi-Fi strict in namespace wifi
-              if (nvs_open("wifi", NVS_READWRITE, &h) == ESP_OK) {{
+              // Salvare stricta Wi-Fi
+              if (nvs_open("wifi", NVS_READWRITE, &h) == ESP_OK) {
                   nvs_set_str(h, "ssid", W_SSID);
                   nvs_set_str(h, "password", W_PASS);
                   nvs_commit(h);
                   nvs_close(h);
-              }}
-
-              // 2. Salvare token Gemini strict in namespace muse
-              if (nvs_open("muse", NVS_READWRITE, &h) == ESP_OK) {{
+              }
+              // Salvare token Gemini si marcare activ
+              if (nvs_open("muse", NVS_READWRITE, &h) == ESP_OK) {
                   nvs_set_str(h, "token", G_KEY);
                   nvs_set_str(h, "device_token", G_KEY);
                   nvs_set_str(h, "api_key", G_KEY);
@@ -139,32 +92,29 @@ jobs:
                   nvs_set_u8(h, "activated", 1);
                   nvs_commit(h);
                   nvs_close(h);
-              }}
+              }
 
-              // Conectare Wi-Fi automata
               wifi_config_t wcfg;
               memset(&wcfg, 0, sizeof(wcfg));
               strncpy((char*)wcfg.sta.ssid, W_SSID, sizeof(wcfg.sta.ssid));
               strncpy((char*)wcfg.sta.password, W_PASS, sizeof(wcfg.sta.password));
               wcfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
               esp_wifi_set_config(WIFI_IF_STA, &wcfg);
-
-              esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL, NULL);
               esp_wifi_connect();
-          }}
+          }
 
-          typedef struct {{
+          typedef struct {
               uint8_t *pcm_data;
               size_t pcm_len;
-          }} audio_task_args_t;
+          } audio_task_args_t;
 
-          static void gemini_process_audio_task(void *arg) {{
+          static void gemini_process_audio_task(void *arg) {
               audio_task_args_t *args = (audio_task_args_t*)arg;
-              if (!args) {{ vTaskDelete(NULL); return; }}
+              if (!args) { vTaskDelete(NULL); return; }
 
               size_t wav_len = 44 + args->pcm_len;
               uint8_t *wav_buf = (uint8_t*)safe_alloc(wav_len);
-              if (wav_buf) {{
+              if (wav_buf) {
                   memcpy(wav_buf, "RIFF", 4);
                   uint32_t file_size = wav_len - 8;
                   memcpy(wav_buf + 4, &file_size, 4);
@@ -190,10 +140,10 @@ jobs:
 
                   size_t b64_len = ((wav_len + 2) / 3) * 4 + 1;
                   char *b64_str = (char*)safe_alloc(b64_len);
-                  if (b64_str) {{
+                  if (b64_str) {
                       size_t out_len = 0;
                       mbedtls_base64_encode((unsigned char *)b64_str, b64_len, &out_len, wav_buf, wav_len);
-                      b64_str[out_len] = '\\0';
+                      b64_str[out_len] = '\0';
                       free(wav_buf); wav_buf = NULL;
 
                       cJSON *root = cJSON_CreateObject();
@@ -219,14 +169,14 @@ jobs:
                       char url[320];
                       snprintf(url, sizeof(url), "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s", G_KEY);
 
-                      esp_http_client_config_t config = {{
+                      esp_http_client_config_t config = {
                           .url = url,
                           .method = HTTP_METHOD_POST,
                           .crt_bundle_attach = esp_crt_bundle_attach,
                           .timeout_ms = 18000,
                           .buffer_size = 4096,
                           .buffer_size_tx = 4096,
-                      }};
+                      };
                       esp_http_client_handle_t client = esp_http_client_init(&config);
                       esp_http_client_set_header(client, "Content-Type", "application/json");
                       esp_http_client_set_post_field(client, post_data, strlen(post_data));
@@ -234,102 +184,53 @@ jobs:
                       esp_http_client_perform(client);
                       free(post_data);
                       esp_http_client_cleanup(client);
-                  }}
+                  }
                   if (wav_buf) free(wav_buf);
-              }}
+              }
               if (args->pcm_data) free(args->pcm_data);
               free(args);
               vTaskDelete(NULL);
-          }}
+          }
 
-          void gemini_dispatch_audio(const uint8_t *pcm_data, size_t pcm_len) {{
+          void gemini_dispatch_audio(const uint8_t *pcm_data, size_t pcm_len) {
               if (!pcm_data || pcm_len == 0) return;
               audio_task_args_t *args = safe_alloc(sizeof(audio_task_args_t));
               if (!args) return;
               args->pcm_data = safe_alloc(pcm_len);
-              if (!args->pcm_data) {{ free(args); return; }}
+              if (!args->pcm_data) { free(args); return; }
               memcpy(args->pcm_data, pcm_data, pcm_len);
               args->pcm_len = pcm_len;
               xTaskCreate(gemini_process_audio_task, "gem_audio", 8192, args, 5, NULL);
-          }}
-          """
-
-          os.makedirs("esp32/components/muse/src", exist_ok=True)
-          with open("esp32/components/muse/src/gemini_engine.c", "w", encoding="utf-8") as f:
-              f.write(gemini_engine)
-
-          helpers = """
-          extern bool gemini_test_api_key(char *out_msg, size_t out_len);
-          static void __attribute__((unused)) gemini_ui_test_btn_cb(lv_event_t * e) {
-              if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
-                  lv_obj_t * label = (lv_obj_t *)lv_event_get_user_data(e);
-                  if (label) {
-                      lv_label_set_text(label, "Testare...");
-                      char buf[64] = "Eroare Timeout";
-                      gemini_test_api_key(buf, sizeof(buf));
-                      lv_label_set_text(label, buf);
-                  }
-              }
           }
-          """
-
-          for root, dirs, files in os.walk("esp32"):
-              dirs[:] = [d for d in dirs if d not in ("managed_components", "build-waveshare", "build", ".git")]
-              for file in files:
-                  if not file.endswith((".c", ".cpp", ".h")):
-                      continue
-
-                  p = os.path.join(root, file)
-                  try:
-                      with open(p, "r", encoding="utf-8", errors="ignore") as f:
-                          s = f.read()
-                      orig = s
-
-                      # 1. Neutralizare eroare SPI flash din led_status.c
-                      if "CONFIG_HOMEHUB_LED_STRIP_GPIO is an SPI flash pin" in s:
-                          s = re.sub(r'#error\s+.*SPI flash pin.*', '//#error bypassed SPI flash pin', s)
-
-                      # 2. Injectare auto-init la pornire
-                      if "app_main(" in s and "gemini_auto_init_nvs" not in s:
-                          s = 'void gemini_auto_init_nvs(void);\n' + s
-                          s = re.sub(r'(nvs_flash_init\(\);)', r'\1\n    gemini_auto_init_nvs();', s)
-
-                      # 3. Bypass pairing Muse
-                      s = re.sub(r'bool\s+muse_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_paired(void) { return true; }', s)
-                      s = re.sub(r'bool\s+muse_is_activated\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_activated(void) { return true; }', s)
-                      s = re.sub(r'bool\s+muse_app_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_app_is_paired(void) { return true; }', s)
-
-                      # 4. Inlocuire etichete din meniul Settings FARA A ATINGE STRUCTURA GRAFICA
-                      if "muse_settings_ui.c" in file or "settings" in file.lower():
-                          s = s.replace('"Muse"', '"Gemini AI"')
-                          s = s.replace('"Device token"', '"Gemini Key"')
-                          s = s.replace('"Test connection"', '"Test Gemini Key"')
-                          if "Test Gemini Key" in s and "gemini_ui_test_btn_cb" not in s:
-                              last_inc = s.rfind("#include")
-                              if last_inc != -1:
-                                  end_line = s.find("\n", last_inc)
-                                  s = s[:end_line] + "\n" + helpers + "\n" + s[end_line:]
-                              s = re.sub(r'lv_obj_add_event_cb\s*\(\s*([a-zA-Z0-9_>.-]*test[a-zA-Z0-9_>.-]*)\s*,\s*[^,]+\s*,\s*LV_EVENT_CLICKED\s*,\s*([^)]+)\);',
-                                         r'lv_obj_add_event_cb(\1, gemini_ui_test_btn_cb, LV_EVENT_CLICKED, \2);', s)
-
-                      # 5. Eliminare mesaje de eroare iFlytek
-                      s = s.replace("讯飞拒绝连接", "Eroare Conexiune")
-                      s = s.replace("讯飞", "Gemini")
-
-                      if s != orig:
-                          with open(p, "w", encoding="utf-8") as f:
-                              f.write(s)
-                  except Exception as e:
-                      pass
           EOF
-          python3 patch_gemini.py
 
-      - name: Build Firmware
+          # 4. Dezactivare logica de pairing si eliminare endpoint-uri chinezesti din C
+          find esp32/components/muse/src/ -type f -name "*.c" -o -name "*.cpp" | while read -r f; do
+            sed -i 's/bool muse_is_paired.*/bool muse_is_paired(void) { return true; }/g' "$f"
+            sed -i 's/bool muse_is_activated.*/bool muse_is_activated(void) { return true; }/g' "$f"
+            sed -i 's/bool muse_app_is_paired.*/bool muse_app_is_paired(void) { return true; }/g' "$f"
+            sed -i 's/hatch.metaaivm.com/generativelanguage.googleapis.com/g' "$f"
+            sed -i 's/iat-api.xfyun.cn/generativelanguage.googleapis.com/g' "$f"
+            sed -i 's/api.sensenova.cn/generativelanguage.googleapis.com/g' "$f"
+            sed -i 's/讯飞拒绝连接/Eroare Server/g' "$f"
+          done
+
+          # 5. Legare auto_init in app_main
+          MAIN_C=$(find esp32/main/ -name "*.c" | head -n 1)
+          if ! grep -q "gemini_auto_init_nvs" "$MAIN_C"; then
+            sed -i '1s/^/void gemini_auto_init_nvs(void);\n/' "$MAIN_C"
+            sed -i '/nvs_flash_init();/a \    gemini_auto_init_nvs();' "$MAIN_C"
+          fi
+
+          # 6. Salvare permanenta in repository
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git add esp32/
+          git commit -m "Import clean Waveshare 3.49 stack with native Gemini engine" || true
+          git push origin main || true
+
+      - name: Build Native Firmware
         shell: bash
-        env:
-          GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
-          WIFI_SSID: ${{ secrets.WIFI_SSID || 'TP-Link_2.4G_9318_Guest' }}
-          WIFI_PASSWORD: ${{ secrets.WIFI_PASSWORD || 'revelion' }}
         run: |
           . $IDF_PATH/export.sh
           cd esp32
@@ -345,7 +246,7 @@ jobs:
 
           idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" build
 
-      - name: Prepare Clean Package Directory
+      - name: Package Firmware Files
         shell: bash
         run: |
           mkdir -p package_bin
@@ -382,7 +283,7 @@ jobs:
           }
           EOF
 
-      - name: Upload Single ZIP Artifact
+      - name: Upload Clean Artifact
         uses: actions/upload-artifact@v4
         with:
           name: firmware-waveshare-349
