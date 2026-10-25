@@ -196,11 +196,9 @@ jobs:
           }
           EOF
 
-          # 4. Modificare chirurgicala pentru afisaj split Tastatura + Input Box & Inlocuire elemente UI chinezesti
+          # 4. Modificare tastatura: Casuta text sus (620x36) + Tastatura lata jos (640x130)
           python3 - << 'PYEOF'
           import os, re
-
-          gemini_key = os.environ.get("GEMINI_KEY", "").strip()
 
           for root, dirs, files in os.walk("esp32/components/muse"):
               for file in files:
@@ -211,7 +209,7 @@ jobs:
                       content = f.read()
                   orig = content
 
-                  # Redenumire etichete si adaptare completa la Google Gemini
+                  # Redenumire etichete si eliminare referinte chinezesti / Muse
                   content = content.replace('"MUSE"', '"GEMINI AI"')
                   content = content.replace('"Muse"', '"Gemini AI"')
                   content = content.replace('"VM ID"', '"Model"')
@@ -225,33 +223,46 @@ jobs:
                   content = content.replace("Pair with the Muse app", "Gemini 2.0 Flash Standalone")
                   content = content.replace("Reset pairing", "Gemini Ready")
 
-                  # Pre-populare model si cheie daca structura este goala
                   if "muse_settings" in file:
                       content = content.replace('"iat-api.xfyun.cn"', '"generativelanguage.googleapis.com"')
                       content = content.replace('"api.sensenova.cn"', '"generativelanguage.googleapis.com"')
                       content = content.replace('"hatch.metaaivm.com"', '"generativelanguage.googleapis.com"')
 
-                  # Solutie pentru casuta de input si tastatura (afisaj impartit pe ecranul 640x172)
-                  # Plaseaza Input Box in stanga (205px) si Tastatura in dreapta (415px)
+                  # Layout vertical: Casuta text deasupra, tastatura lata dedesubt (fara suprapunere pe 640x172)
                   def fix_kb_call(m):
                       kb = m.group(1).strip()
                       ta = m.group(2).strip()
                       return (
                           f"lv_keyboard_set_textarea({kb}, {ta});\n"
                           f"    if ({kb} && {ta}) {{\n"
-                          f"        lv_obj_set_size({ta}, 205, 140);\n"
-                          f"        lv_obj_align({ta}, LV_ALIGN_LEFT_MID, 10, 0);\n"
+                          f"        lv_obj_t *__cont = lv_obj_get_parent({kb});\n"
+                          f"        if (__cont && __cont != lv_scr_act()) {{\n"
+                          f"            lv_obj_set_size(__cont, 640, 172);\n"
+                          f"            lv_obj_set_pos(__cont, 0, 0);\n"
+                          f"            lv_obj_set_style_pad_all(__cont, 0, 0);\n"
+                          f"            lv_obj_set_layout(__cont, 0);\n"
+                          f"        }}\n"
+                          f"        lv_obj_set_size({ta}, 620, 36);\n"
+                          f"        lv_obj_align({ta}, LV_ALIGN_TOP_MID, 0, 2);\n"
+                          f"        lv_textarea_set_one_line({ta}, true);\n"
                           f"        lv_textarea_set_password_mode({ta}, false);\n"
+                          f"        lv_obj_set_style_pad_all({ta}, 4, 0);\n"
                           f"        lv_obj_clear_flag({ta}, LV_OBJ_FLAG_HIDDEN);\n"
-                          f"        lv_obj_set_size({kb}, 415, 172);\n"
-                          f"        lv_obj_align({kb}, LV_ALIGN_RIGHT_MID, 0, 0);\n"
+                          f"        lv_obj_move_foreground({ta});\n"
+                          f"        lv_obj_set_size({kb}, 640, 130);\n"
+                          f"        lv_obj_align({kb}, LV_ALIGN_BOTTOM_MID, 0, 0);\n"
+                          f"        lv_obj_set_style_pad_all({kb}, 1, LV_PART_MAIN);\n"
+                          f"        lv_obj_set_style_pad_row({kb}, 1, LV_PART_MAIN);\n"
+                          f"        lv_obj_set_style_pad_all({kb}, 1, LV_PART_ITEMS);\n"
+                          f"        lv_obj_set_style_pad_row({kb}, 1, LV_PART_ITEMS);\n"
                           f"        lv_obj_clear_flag({kb}, LV_OBJ_FLAG_HIDDEN);\n"
+                          f"        lv_obj_move_foreground({kb});\n"
                           f"    }}"
                       )
 
                   content = re.sub(r'lv_keyboard_set_textarea\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([a-zA-Z0-9_>.-]+)\s*\);', fix_kb_call, content)
 
-                  # Bypass permanent asociere Muse
+                  # Bypass pairing
                   content = re.sub(r'bool\s+muse_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_paired(void) { return true; }', content)
                   content = re.sub(r'bool\s+muse_is_activated\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_activated(void) { return true; }', content)
                   content = re.sub(r'bool\s+muse_app_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_app_is_paired(void) { return true; }', content)
@@ -273,7 +284,7 @@ jobs:
           git config --global user.email "action@github.com"
           git checkout -B main || true
           git add esp32/
-          git commit -m "Split Wi-Fi keyboard layout and purge Chinese UI references" || true
+          git commit -m "Layout: Wide keyboard bottom + single-line text input top" || true
           git push origin main || true
 
       - name: Build Native Firmware
