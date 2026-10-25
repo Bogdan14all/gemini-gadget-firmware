@@ -81,6 +81,9 @@ jobs:
         find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include "demos\/lv_demos.h"/\/\/ #include "demos\/lv_demos.h"/g' {} + 2>/dev/null || true
         find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include <demos\/lv_demos.h>/\/\/ #include <demos\/lv_demos.h>/g' {} + 2>/dev/null || true
         find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/lv_demo_widgets();/\/\/ lv_demo_widgets();/g' {} + 2>/dev/null || true
+        # Fix LV_COLOR_FORMAT_GET_SIZE -> 2 bytes per pixel for RGB565 in LVGL 9
+        find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" \) -exec sed -i 's/LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)/2/g' {} + 2>/dev/null || true
+        find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" \) -exec sed -i 's/LV_COLOR_FORMAT_GET_SIZE/lv_color_format_get_size/g' {} + 2>/dev/null || true
 
         python3 - << 'PYEOF'
         import os
