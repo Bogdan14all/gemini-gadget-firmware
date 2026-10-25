@@ -31,47 +31,62 @@ jobs:
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
-          # Instalam cel mai recent core ESP32 pentru a include noile headere I2C (i2c_master.h)
           arduino-cli core install esp32:esp32
 
-      - name: Install Project Libraries
+      - name: Install Project Libraries & Configure lv_conf.h
         run: |
           mkdir -p ~/Arduino/libraries
           if [ -d "Arduino/libraries" ]; then
             cp -r Arduino/libraries/* ~/Arduino/libraries/ 2>/dev/null || true
           fi
-          # Asigurare biblioteci suplimentare necesare
+          # Instalam LVGL v9
           arduino-cli lib install "lvgl"@9.1.0 2>/dev/null || true
+
+          # Copiem fisierul de configurare lv_conf.h in ~/Arduino/libraries/ (unde il cauta ../../lv_conf.h)
+          # si in toate directoarele sketch-urilor
+          if [ -f "Arduino/libraries/lv_conf.h" ]; then
+            cp "Arduino/libraries/lv_conf.h" ~/Arduino/libraries/lv_conf.h
+          elif [ -f "Arduino/examples/10_LVGL_V9_Test/lv_conf.h" ]; then
+            cp "Arduino/examples/10_LVGL_V9_Test/lv_conf.h" ~/Arduino/libraries/lv_conf.h
+          else
+            # Generam un lv_conf.h valid pentru LVGL v9 daca nu exista
+            cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
+#ifndef LV_CONF_H
+#define LV_CONF_H
+#define LV_COLOR_DEPTH 16
+#define LV_COLOR_16_SWAP 1
+#define LV_MEM_CUSTOM 0
+#define LV_MEM_SIZE (64U * 1024U)
+#define LV_TICK_CUSTOM 1
+#define LV_TICK_CUSTOM_INCLUDE "Arduino.h"
+#define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
+#define LV_FONT_MONTSERRAT_12 1
+#define LV_FONT_MONTSERRAT_14 1
+#define LV_FONT_MONTSERRAT_16 1
+#define LV_USE_LABEL 1
+#endif
+EOF
+          fi
+
+          # Ne asiguram ca e prezent si in directorul librariei lvgl si in cel al sketch-ului
+          cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/lv_conf.h 2>/dev/null || true
+          cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
 
       - name: Configure Display to Show 'Gemini OS by Bogdan'
         shell: bash
         run: |
-          # 1. Identificare sketch demo pentru ecran
-          SKETCH_PATH=$(find Arduino -type f -name "*.ino" | grep -Ei "10_LVGL|lcd|display|demo" | head -n 1)
-          if [ -z "$SKETCH_PATH" ]; then
-            SKETCH_PATH=$(find Arduino -type f -name "*.ino" | head -n 1)
-          fi
-          echo "Sketch identificat: $SKETCH_PATH"
+          SKETCH_PATH="Arduino/examples/10_LVGL_V9_Test/10_LVGL_V9_Test.ino"
+          echo "Sketch utilizat: $SKETCH_PATH"
           SKETCH_DIR=$(dirname "$SKETCH_PATH")
 
-          # 2. Asigurare compatibilitate i2c_master.h pe orice versiune de core
+          # 1. Asigurare compatibilitate driver i2c
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.cpp" -o -name "*.c" \) -exec sed -i 's/driver\/i2c_master.h/driver\/i2c.h/g' {} + 2>/dev/null || true
 
-          # 3. Patch pe sketch pentru a afisa exact textul dorit: "Gemini OS by Bogdan"
+          # 2. Patch pe sketch pentru a afisa textul: "Gemini OS by Bogdan"
           python3 - << 'PYEOF'
-          import os, glob
+          import os
 
-          sketch_path = os.environ.get("SKETCH_PATH", "")
-          if not sketch_path:
-              ino_files = glob.glob("Arduino/**/*.ino", recursive=True)
-              for f in ino_files:
-                  if "10_LVGL" in f or "lcd" in f.lower() or "display" in f.lower():
-                      sketch_path = f
-                      break
-              if not sketch_path and ino_files:
-                  sketch_path = ino_files[0]
-
-          print(f"Modificare sketch: {sketch_path}")
+          sketch_path = "Arduino/examples/10_LVGL_V9_Test/10_LVGL_V9_Test.ino"
           with open(sketch_path, "r", encoding="utf-8", errors="ignore") as f:
               content = f.read()
 
@@ -83,10 +98,11 @@ jobs:
               pinMode(1, OUTPUT);
               digitalWrite(1, HIGH); // Backlight GPIO 1 pentru Hardware V2
 
-              lv_obj_t *scr = lv_scr_act();
+              lv_obj_t *scr = lv_screen_active();
+              if (!scr) scr = lv_scr_act();
               lv_obj_set_style_bg_color(scr, lv_color_hex(0x0A0E17), 0);
 
-              // 1. Text Principal Mare: "Gemini OS by Bogdan"
+              // 1. Text Principal: "Gemini OS by Bogdan"
               lv_obj_t *lbl_title = lv_label_create(scr);
               lv_label_set_text(lbl_title, "Gemini OS by Bogdan");
               lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x00E5FF), 0);
@@ -100,7 +116,6 @@ jobs:
           }
           """
 
-          # Inseram functia noastra inainte de setup()
           if "show_bogdan_screen" not in content:
               setup_idx = content.find("void setup()")
               if setup_idx != -1:
@@ -108,12 +123,10 @@ jobs:
               else:
                   content = custom_screen_func + "\n" + content
 
-          # In setup(), apelam show_bogdan_screen() la finalul initializarii
           setup_body_start = content.find("void setup()")
           if setup_body_start != -1:
               brace_start = content.find("{", setup_body_start)
               if brace_start != -1:
-                  # Gasim sfarsitul functiei setup()
                   open_braces = 1
                   i = brace_start + 1
                   while i < len(content) and open_braces > 0:
@@ -127,19 +140,14 @@ jobs:
 
           with open(sketch_path, "w", encoding="utf-8") as f:
               f.write(content)
-          print("Sketch actualizat cu succes pentru a afisa 'Gemini OS by Bogdan'!")
+          print("Sketch actualizat cu succes!")
           PYEOF
 
       - name: Compile Minimal Firmware
         run: |
-          SKETCH_PATH=$(find Arduino -type f -name "*.ino" | grep -Ei "10_LVGL|lcd|display|demo" | head -n 1)
-          if [ -z "$SKETCH_PATH" ]; then
-            SKETCH_PATH=$(find Arduino -type f -name "*.ino" | head -n 1)
-          fi
-          echo "Compilare sketch: $SKETCH_PATH"
-
+          SKETCH_PATH="Arduino/examples/10_LVGL_V9_Test/10_LVGL_V9_Test.ino"
           FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi"
-          echo "Utilizare FQBN: $FQBN"
+          echo "Compilare sketch: $SKETCH_PATH cu FQBN: $FQBN"
 
           arduino-cli compile --fqbn "$FQBN" \
             --output-dir build_output \
@@ -157,7 +165,7 @@ jobs:
           echo "Partitions (0x8000): $PARTITIONS"
           echo "App (0x10000): $APP_BIN"
 
-          # Imbinare sigura la offset-urile hardware native ESP32-S3
+          # Imbinare automata intr-un singur fisier la 0x0
           esptool.py --chip esp32s3 merge_bin \
             -o package_bin/gemini-os-full-0x0.bin \
             --flash_mode keep \
