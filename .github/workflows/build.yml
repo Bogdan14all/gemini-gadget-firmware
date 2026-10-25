@@ -1,23 +1,28 @@
-name: Build Gemini OS Waveshare V2
+name: Build Minimal Gemini OS (Bogdan Edition)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Build Complete Gemini OS Monolithic Binary
+  build-minimal:
+    name: Build Minimal Gemini OS - Hello Bogdan
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout Waveshare Official V2 Repository
         uses: actions/checkout@v4
+        with:
+          repository: waveshareteam/ESP32-S3-Touch-LCD-3.49-V2
+          submodules: recursive
 
       - name: Setup Python & esptool
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install esptool
-        run: pip install esptool
+      - name: Install esptool & zip
+        run: |
+          pip install esptool
+          sudo apt-get update && sudo apt-get install -y zip
 
       - name: Setup Arduino CLI & ESP32 Core
         run: |
@@ -26,566 +31,121 @@ jobs:
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32@2.0.14
+          # Instalam cel mai recent core ESP32 pentru a include noile headere I2C (i2c_master.h)
+          arduino-cli core install esp32:esp32
 
-      - name: Install Graphic and JSON Libraries
+      - name: Install Project Libraries
         run: |
           mkdir -p ~/Arduino/libraries
-          arduino-cli lib install "lvgl"@8.3.11
-          arduino-cli lib install "ArduinoJson"@6.21.4
+          if [ -d "Arduino/libraries" ]; then
+            cp -r Arduino/libraries/* ~/Arduino/libraries/ 2>/dev/null || true
+          fi
+          # Asigurare biblioteci suplimentare necesare
+          arduino-cli lib install "lvgl"@9.1.0 2>/dev/null || true
 
-          # Configurare completa LVGL 8.3.11 (16-bit color, swap bytes, fonturi activate)
-          cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
-          #ifndef LV_CONF_H
-          #define LV_CONF_H
-          #define LV_COLOR_DEPTH 16
-          #define LV_COLOR_16_SWAP 1
-          #define LV_MEM_CUSTOM 0
-          #define LV_MEM_SIZE (128U * 1024U)
-          #define LV_TICK_CUSTOM 1
-          #define LV_TICK_CUSTOM_INCLUDE "Arduino.h"
-          #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
-          #define LV_FONT_MONTSERRAT_10 1
-          #define LV_FONT_MONTSERRAT_12 1
-          #define LV_FONT_MONTSERRAT_14 1
-          #define LV_FONT_MONTSERRAT_16 1
-          #define LV_USE_KEYBOARD 1
-          #define LV_USE_TEXTAREA 1
-          #define LV_USE_LABEL 1
-          #define LV_USE_BTN 1
-          #define LV_USE_SLIDER 1
-          #define LV_USE_SWITCH 1
-          #define LV_USE_LIST 1
-          #define LV_USE_ARC 1
-          #endif
-          EOF
-
-      - name: Generate Gemini OS Source Code with All Advanced Features
+      - name: Configure Display to Show 'Gemini OS by Bogdan'
         shell: bash
-        env:
-          GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
-          WIFI_SSID: ${{ secrets.WIFI_SSID || 'TP-Link_2.4G_9318_Guest' }}
-          WIFI_PASSWORD: ${{ secrets.WIFI_PASSWORD || 'revelion' }}
         run: |
-          mkdir -p gemini_os
-          cp ~/Arduino/libraries/lv_conf.h gemini_os/lv_conf.h
+          # 1. Identificare sketch demo pentru ecran
+          SKETCH_PATH=$(find Arduino -type f -name "*.ino" | grep -Ei "10_LVGL|lcd|display|demo" | head -n 1)
+          if [ -z "$SKETCH_PATH" ]; then
+            SKETCH_PATH=$(find Arduino -type f -name "*.ino" | head -n 1)
+          fi
+          echo "Sketch identificat: $SKETCH_PATH"
+          SKETCH_DIR=$(dirname "$SKETCH_PATH")
 
-          cat << 'EOF' > gemini_os/gemini_os.ino
-          #include <Arduino.h>
-          #include <WiFi.h>
-          #include <HTTPClient.h>
-          #include <WiFiClientSecure.h>
-          #include <ArduinoJson.h>
-          #include <lvgl.h>
-          #include <Wire.h>
-          #include <time.h>
-          #include <Preferences.h>
-          #include <FS.h>
-          #include <SD.h>
-          #include <SPI.h>
+          # 2. Asigurare compatibilitate i2c_master.h pe orice versiune de core
+          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.cpp" -o -name "*.c" \) -exec sed -i 's/driver\/i2c_master.h/driver\/i2c.h/g' {} + 2>/dev/null || true
 
-          // ==================== SPECIFICATII HARDWARE WAVESHARE V2 ====================
-          #define LCD_WIDTH       640
-          #define LCD_HEIGHT      172
-          #define LCD_BL_PIN      1       // Backlight GPIO 1 pentru versiunea V2
-          #define I2C_SDA_PIN     4
-          #define I2C_SCL_PIN     5
-          #define SD_CS_PIN       10      // Chip Select pentru slot MicroSD de pe placa
-          #define IMU_I2C_ADDR    0x6B    // Adresa I2C QMI8658 IMU 6-axe integrat
+          # 3. Patch pe sketch pentru a afisa exact textul dorit: "Gemini OS by Bogdan"
+          python3 - << 'PYEOF'
+          import os, glob
 
-          EOF
+          sketch_path = os.environ.get("SKETCH_PATH", "")
+          if not sketch_path:
+              ino_files = glob.glob("Arduino/**/*.ino", recursive=True)
+              for f in ino_files:
+                  if "10_LVGL" in f or "lcd" in f.lower() or "display" in f.lower():
+                      sketch_path = f
+                      break
+              if not sketch_path and ino_files:
+                  sketch_path = ino_files[0]
 
-          cat << EOF >> gemini_os/gemini_os.ino
-          static const char* DEFAULT_SSID = "${WIFI_SSID}";
-          static const char* DEFAULT_PASS = "${WIFI_PASSWORD}";
-          static const char* DEFAULT_KEY  = "${GEMINI_KEY}";
-          EOF
+          print(f"Modificare sketch: {sketch_path}")
+          with open(sketch_path, "r", encoding="utf-8", errors="ignore") as f:
+              content = f.read()
 
-          cat << 'EOF' >> gemini_os/gemini_os.ino
-          Preferences prefs;
-          String cfg_ssid;
-          String cfg_pass;
-          String cfg_key;
+          custom_screen_func = """
+          // ==========================================
+          // ECRAN PERSONALIZAT: GEMINI OS BY BOGDAN
+          // ==========================================
+          void show_bogdan_screen() {
+              pinMode(1, OUTPUT);
+              digitalWrite(1, HIGH); // Backlight GPIO 1 pentru Hardware V2
 
-          static lv_disp_draw_buf_t draw_buf;
-          static lv_color_t disp_buf[LCD_WIDTH * 20];
+              lv_obj_t *scr = lv_scr_act();
+              lv_obj_set_style_bg_color(scr, lv_color_hex(0x0A0E17), 0);
 
-          // Referinte Ecrane
-          static lv_obj_t *screen_home;
-          static lv_obj_t *screen_chat;
-          static lv_obj_t *screen_settings;
+              // 1. Text Principal Mare: "Gemini OS by Bogdan"
+              lv_obj_t *lbl_title = lv_label_create(scr);
+              lv_label_set_text(lbl_title, "Gemini OS by Bogdan");
+              lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x00E5FF), 0);
+              lv_obj_center(lbl_title);
 
-          // Bara de Stare & Widget-uri
-          static lv_obj_t *lbl_clock;
-          static lv_obj_t *lbl_weather;
-          static lv_obj_t *lbl_wifi;
-          static lv_obj_t *lbl_battery;
-          static lv_obj_t *lbl_mic;
-          static lv_obj_t *lbl_ai_mode;
-
-          // Ecran Chat Split-Screen (310px stanga / 310px dreapta)
-          static lv_obj_t *ta_chat_user;
-          static lv_obj_t *ta_chat_reply;
-          static lv_obj_t *ta_chat_input;
-          static lv_obj_t *kb_chat;
-
-          // Avatar Animat
-          static lv_obj_t *avatar_eye_l;
-          static lv_obj_t *avatar_eye_r;
-          static lv_obj_t *avatar_mouth;
-          static lv_obj_t *lbl_avatar_status;
-
-          // Stari de Sistem
-          enum AssistantState { STATE_IDLE, STATE_LISTENING, STATE_THINKING, STATE_SPEAKING };
-          static AssistantState current_state = STATE_IDLE;
-          static bool mic_muted = false;
-          static uint8_t brightness_val = 85;
-          static uint8_t volume_val = 70;
-          static bool dark_theme = true;
-          static bool sd_card_mounted = false;
-
-          // Moduri Comportament AI: 0: Concis (default), 1: Creativ, 2: Translator RO->EN
-          static uint8_t ai_mode = 0;
-          const char* ai_mode_names[] = {"Mod: Concis", "Mod: Creativ", "Mod: Translator"};
-
-          // Salvare istoric pe Card MicroSD
-          void log_to_sd(const char* sender, const char* message) {
-              if (!sd_card_mounted) return;
-              File file = SD.open("/chat_history.txt", FILE_APPEND);
-              if (file) {
-                  file.printf("[%lu] %s: %s\n", millis(), sender, message);
-                  file.close();
-              }
+              // 2. Subtitlu Stare: "Boot OK | Waveshare 3.49 V2"
+              lv_obj_t *lbl_sub = lv_label_create(scr);
+              lv_label_set_text(lbl_sub, "Boot OK | Waveshare 3.49 V2");
+              lv_obj_set_style_text_color(lbl_sub, lv_color_hex(0x22C55E), 0);
+              lv_obj_align(lbl_sub, LV_ALIGN_CENTER, 0, 32);
           }
+          """
 
-          // Verificare senzor IMU QMI8658 (Intoarcere cu fata in jos -> Mute automat)
-          void check_imu_orientation() {
-              Wire.beginTransmission(IMU_I2C_ADDR);
-              Wire.write(0x3B); // Registru citire accelerometru Z
-              if (Wire.endTransmission(false) == 0) {
-                  Wire.requestFrom(IMU_I2C_ADDR, 2);
-                  if (Wire.available() >= 2) {
-                      int16_t az = (Wire.read() | (Wire.read() << 8));
-                      // Daca gravitatia Z este puternic negativa, placa e cu fata in jos
-                      if (az < -12000 && !mic_muted) {
-                          mic_muted = true;
-                          lv_label_set_text(lbl_mic, "MIC: MUTE (FLIP)");
-                          lv_obj_set_style_text_color(lbl_mic, lv_color_hex(0xEF4444), 0);
-                      }
-                  }
-              }
-          }
+          # Inseram functia noastra inainte de setup()
+          if "show_bogdan_screen" not in content:
+              setup_idx = content.find("void setup()")
+              if setup_idx != -1:
+                  content = content[:setup_idx] + custom_screen_func + "\n" + content[setup_idx:]
+              else:
+                  content = custom_screen_func + "\n" + content
 
-          // Driver Display Flush Dummy / Memory Buffer
-          void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
-              lv_disp_flush_ready(disp);
-          }
+          # In setup(), apelam show_bogdan_screen() la finalul initializarii
+          setup_body_start = content.find("void setup()")
+          if setup_body_start != -1:
+              brace_start = content.find("{", setup_body_start)
+              if brace_start != -1:
+                  # Gasim sfarsitul functiei setup()
+                  open_braces = 1
+                  i = brace_start + 1
+                  while i < len(content) and open_braces > 0:
+                      if content[i] == '{':
+                          open_braces += 1
+                      elif content[i] == '}':
+                          open_braces -= 1
+                      i += 1
+                  setup_end = i - 1
+                  content = content[:setup_end] + "\n    show_bogdan_screen();\n" + content[setup_end:]
 
-          // Actualizare Stare Avatar
-          void set_assistant_state(AssistantState state) {
-              current_state = state;
-              if (!avatar_eye_l || !avatar_mouth) return;
+          with open(sketch_path, "w", encoding="utf-8") as f:
+              f.write(content)
+          print("Sketch actualizat cu succes pentru a afisa 'Gemini OS by Bogdan'!")
+          PYEOF
 
-              if (state == STATE_IDLE) {
-                  lv_obj_set_size(avatar_eye_l, 14, 14);
-                  lv_obj_set_size(avatar_eye_r, 14, 14);
-                  lv_obj_set_size(avatar_mouth, 24, 6);
-                  lv_label_set_text(lbl_avatar_status, "Gemini OS Gata");
-              } else if (state == STATE_LISTENING) {
-                  lv_obj_set_size(avatar_eye_l, 16, 16);
-                  lv_obj_set_size(avatar_eye_r, 16, 16);
-                  lv_obj_set_size(avatar_mouth, 12, 12);
-                  lv_label_set_text(lbl_avatar_status, "Te ascult...");
-              } else if (state == STATE_THINKING) {
-                  lv_obj_set_size(avatar_eye_l, 14, 6);
-                  lv_obj_set_size(avatar_eye_r, 14, 6);
-                  lv_obj_set_size(avatar_mouth, 20, 4);
-                  lv_label_set_text(lbl_avatar_status, "Gemini gandeste...");
-              } else if (state == STATE_SPEAKING) {
-                  lv_obj_set_size(avatar_eye_l, 14, 14);
-                  lv_obj_set_size(avatar_eye_r, 14, 14);
-                  lv_obj_set_size(avatar_mouth, 26, 14);
-                  lv_label_set_text(lbl_avatar_status, "Raspund...");
-              }
-          }
-
-          // Apel REST Google Gemini 2.0 Flash adaptat pe Moduri
-          void send_gemini_query(const char* prompt) {
-              if (WiFi.status() != WL_CONNECTED) {
-                  lv_textarea_set_text(ta_chat_reply, "Eroare: Lipsa conexiune Wi-Fi!");
-                  return;
-              }
-
-              log_to_sd("User", prompt);
-              set_assistant_state(STATE_THINKING);
-              lv_timer_handler();
-
-              WiFiClientSecure client;
-              client.setInsecure();
-
-              HTTPClient http;
-              String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + cfg_key;
-
-              if (http.begin(client, url)) {
-                  http.addHeader("Content-Type", "application/json");
-
-                  StaticJsonDocument<2048> reqDoc;
-                  JsonObject contents = reqDoc.createNestedArray("contents").createNestedObject();
-                  JsonObject parts = contents.createNestedArray("parts").createNestedObject();
-
-                  String sysInstruction = "Esti asistentul Gemini OS pe un gadget cu ecran ultra-wide de 640x172. ";
-                  if (ai_mode == 0) {
-                      sysInstruction += "Raspunde ULTRA-CONCIS, in maximum 1-2 propozitii, direct si la obiect in limba romana la: ";
-                  } else if (ai_mode == 1) {
-                      sysInstruction += "Raspunde detaliat, creativ si prietenos in limba romana la: ";
-                  } else if (ai_mode == 2) {
-                      sysInstruction += "Traduce direct si exact urmatorul text in limba engleza fara explicatii suplimentare: ";
-                  }
-
-                  parts["text"] = sysInstruction + String(prompt);
-
-                  String requestBody;
-                  serializeJson(reqDoc, requestBody);
-
-                  int httpCode = http.POST(requestBody);
-                  if (httpCode == HTTP_CODE_OK) {
-                      String response = http.getString();
-                      StaticJsonDocument<4096> resDoc;
-                      DeserializationError error = deserializeJson(resDoc, response);
-
-                      if (!error) {
-                          const char* reply = resDoc["candidates"]["content"]["parts"]["text"];
-                          if (reply) {
-                              set_assistant_state(STATE_SPEAKING);
-                              lv_textarea_set_text(ta_chat_reply, reply);
-                              log_to_sd("Gemini", reply);
-                          } else {
-                              lv_textarea_set_text(ta_chat_reply, "Eroare: Format raspuns invalid.");
-                          }
-                      } else {
-                          lv_textarea_set_text(ta_chat_reply, "Eroare la parsarea JSON.");
-                      }
-                  } else {
-                      String err = "Eroare HTTP: " + String(httpCode);
-                      lv_textarea_set_text(ta_chat_reply, err.c_str());
-                  }
-                  http.end();
-              }
-              delay(600);
-              set_assistant_state(STATE_IDLE);
-          }
-
-          // Creare Bara de Stare Multi-Widget (640x22 px)
-          void create_status_bar(lv_obj_t *parent) {
-              lv_obj_t *bar = lv_obj_create(parent);
-              lv_obj_set_size(bar, 640, 22);
-              lv_obj_set_pos(bar, 0, 0);
-              lv_obj_set_style_bg_color(bar, lv_color_hex(0x0A0D14), 0);
-              lv_obj_set_style_border_width(bar, 0, 0);
-              lv_obj_set_style_radius(bar, 0, 0);
-              lv_obj_set_style_pad_all(bar, 2, 0);
-              lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-
-              lbl_clock = lv_label_create(bar);
-              lv_label_set_text(lbl_clock, "12:00");
-              lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0x00D2FF), 0);
-              lv_obj_align(lbl_clock, LV_ALIGN_LEFT_MID, 6, 0);
-
-              lbl_weather = lv_label_create(bar);
-              lv_label_set_text(lbl_weather, "21 C Insorit");
-              lv_obj_set_style_text_color(lbl_weather, lv_color_hex(0xFBBF24), 0);
-              lv_obj_align(lbl_weather, LV_ALIGN_LEFT_MID, 68, 0);
-
-              lbl_wifi = lv_label_create(bar);
-              lv_label_set_text(lbl_wifi, "Wi-Fi: ...");
-              lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x94A3B8), 0);
-              lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, -60, 0);
-
-              lbl_ai_mode = lv_label_create(bar);
-              lv_label_set_text(lbl_ai_mode, ai_mode_names[ai_mode]);
-              lv_obj_set_style_text_color(lbl_ai_mode, lv_color_hex(0xA855F7), 0);
-              lv_obj_align(lbl_ai_mode, LV_ALIGN_CENTER, 50, 0);
-
-              lbl_mic = lv_label_create(bar);
-              lv_label_set_text(lbl_mic, mic_muted ? "MIC: MUTE" : "MIC: ON");
-              lv_obj_set_style_text_color(lbl_mic, mic_muted ? lv_color_hex(0xEF4444) : lv_color_hex(0x22C55E), 0);
-              lv_obj_align(lbl_mic, LV_ALIGN_RIGHT_MID, -70, 0);
-
-              lbl_battery = lv_label_create(bar);
-              lv_label_set_text(lbl_battery, "BAT: 96%");
-              lv_obj_set_style_text_color(lbl_battery, lv_color_hex(0x22C55E), 0);
-              lv_obj_align(lbl_battery, LV_ALIGN_RIGHT_MID, -6, 0);
-          }
-
-          // Navigare
-          static void btn_nav_chat_cb(lv_event_t *e) { lv_scr_load(screen_chat); }
-          static void btn_nav_settings_cb(lv_event_t *e) { lv_scr_load(screen_settings); }
-          static void btn_back_home_cb(lv_event_t *e) { lv_scr_load(screen_home); }
-
-          static void btn_voice_cb(lv_event_t *e) {
-              if (mic_muted) {
-                  lv_label_set_text(lbl_avatar_status, "Microfon oprit (Mute)!");
-                  return;
-              }
-              set_assistant_state(STATE_LISTENING);
-              send_gemini_query("Salut! Raspunde ca esti gata de lucru.");
-          }
-
-          static void btn_switch_mode_cb(lv_event_t *e) {
-              ai_mode = (ai_mode + 1) % 3;
-              lv_label_set_text(lbl_ai_mode, ai_mode_names[ai_mode]);
-          }
-
-          // Tastatura Chat conform UI Change Protocol
-          static void kb_chat_cb(lv_event_t *e) {
-              lv_event_code_t code = lv_event_get_code(e);
-              if (code == LV_EVENT_READY) {
-                  const char *txt = lv_textarea_get_text(ta_chat_input);
-                  if (txt && strlen(txt) > 0) {
-                      lv_textarea_set_text(ta_chat_user, txt);
-                      lv_textarea_set_text(ta_chat_reply, "Se proceseaza...");
-                      send_gemini_query(txt);
-                      lv_textarea_set_text(ta_chat_input, "");
-                  }
-              }
-          }
-
-          // Construire Ecran Principal (Home)
-          void build_home_screen() {
-              screen_home = lv_obj_create(NULL);
-              lv_obj_set_style_bg_color(screen_home, lv_color_hex(0x10141D), 0);
-
-              create_status_bar(screen_home);
-
-              // Avatar Animat
-              avatar_eye_l = lv_obj_create(screen_home);
-              lv_obj_set_size(avatar_eye_l, 14, 14);
-              lv_obj_set_pos(avatar_eye_l, 290, 46);
-              lv_obj_set_style_radius(avatar_eye_l, LV_RADIUS_CIRCLE, 0);
-              lv_obj_set_style_bg_color(avatar_eye_l, lv_color_hex(0x00E5FF), 0);
-
-              avatar_eye_r = lv_obj_create(screen_home);
-              lv_obj_set_size(avatar_eye_r, 14, 14);
-              lv_obj_set_pos(avatar_eye_r, 336, 46);
-              lv_obj_set_style_radius(avatar_eye_r, LV_RADIUS_CIRCLE, 0);
-              lv_obj_set_style_bg_color(avatar_eye_r, lv_color_hex(0x00E5FF), 0);
-
-              avatar_mouth = lv_obj_create(screen_home);
-              lv_obj_set_size(avatar_mouth, 24, 6);
-              lv_obj_set_pos(avatar_mouth, 308, 74);
-              lv_obj_set_style_radius(avatar_mouth, 4, 0);
-              lv_obj_set_style_bg_color(avatar_mouth, lv_color_hex(0x00E5FF), 0);
-
-              lbl_avatar_status = lv_label_create(screen_home);
-              lv_label_set_text(lbl_avatar_status, "Gemini OS Gata");
-              lv_obj_set_style_text_color(lbl_avatar_status, lv_color_hex(0xE2E8F0), 0);
-              lv_obj_align(lbl_avatar_status, LV_ALIGN_CENTER, 0, 16);
-
-              // Butoane Actiune Home (4 Butoane ergonomice)
-              lv_obj_t *btn_voice = lv_btn_create(screen_home);
-              lv_obj_set_size(btn_voice, 145, 36);
-              lv_obj_set_pos(btn_voice, 10, 124);
-              lv_obj_set_style_bg_color(btn_voice, lv_color_hex(0x2563EB), 0);
-              lv_obj_add_event_cb(btn_voice, btn_voice_cb, LV_EVENT_CLICKED, NULL);
-              lv_obj_t *lbl_v = lv_label_create(btn_voice);
-              lv_label_set_text(lbl_v, "Live Voice");
-              lv_obj_center(lbl_v);
-
-              lv_obj_t *btn_chat = lv_btn_create(screen_home);
-              lv_obj_set_size(btn_chat, 145, 36);
-              lv_obj_set_pos(btn_chat, 165, 124);
-              lv_obj_set_style_bg_color(btn_chat, lv_color_hex(0x0D9488), 0);
-              lv_obj_add_event_cb(btn_chat, btn_nav_chat_cb, LV_EVENT_CLICKED, NULL);
-              lv_obj_t *lbl_c = lv_label_create(btn_chat);
-              lv_label_set_text(lbl_c, "Chat Text");
-              lv_obj_center(lbl_c);
-
-              lv_obj_t *btn_mode = lv_btn_create(screen_home);
-              lv_obj_set_size(btn_mode, 145, 36);
-              lv_obj_set_pos(btn_mode, 320, 124);
-              lv_obj_set_style_bg_color(btn_mode, lv_color_hex(0x7C3AED), 0);
-              lv_obj_add_event_cb(btn_mode, btn_switch_mode_cb, LV_EVENT_CLICKED, NULL);
-              lv_obj_t *lbl_m = lv_label_create(btn_mode);
-              lv_label_set_text(lbl_m, "Mod AI");
-              lv_obj_center(lbl_m);
-
-              lv_obj_t *btn_sett = lv_btn_create(screen_home);
-              lv_obj_set_size(btn_sett, 145, 36);
-              lv_obj_set_pos(btn_sett, 475, 124);
-              lv_obj_set_style_bg_color(btn_sett, lv_color_hex(0x475569), 0);
-              lv_obj_add_event_cb(btn_sett, btn_nav_settings_cb, LV_EVENT_CLICKED, NULL);
-              lv_obj_t *lbl_s = lv_label_create(btn_sett);
-              lv_label_set_text(lbl_s, "Setari");
-              lv_obj_center(lbl_s);
-          }
-
-          // Construire Ecran Chat Split-Screen pe orizontala
-          void build_chat_screen() {
-              screen_chat = lv_obj_create(NULL);
-              lv_obj_set_style_bg_color(screen_chat, lv_color_hex(0x0F172A), 0);
-
-              // Stanga (290px): Intrebarea Mea
-              ta_chat_user = lv_textarea_create(screen_chat);
-              lv_obj_set_size(ta_chat_user, 290, 44);
-              lv_obj_set_pos(ta_chat_user, 10, 2);
-              lv_obj_set_style_bg_color(ta_chat_user, lv_color_hex(0x1E293B), 0);
-              lv_obj_set_style_text_color(ta_chat_user, lv_color_hex(0x38BDF8), 0);
-              lv_obj_set_style_text_font(ta_chat_user, &lv_font_montserrat_12, 0);
-              lv_textarea_set_placeholder_text(ta_chat_user, "Tu: Scrie o comanda...");
-
-              // Dreapta (276px): Raspunsul Gemini
-              ta_chat_reply = lv_textarea_create(screen_chat);
-              lv_obj_set_size(ta_chat_reply, 276, 44);
-              lv_obj_set_pos(ta_chat_reply, 306, 2);
-              lv_obj_set_style_bg_color(ta_chat_reply, lv_color_hex(0x1E293B), 0);
-              lv_obj_set_style_text_color(ta_chat_reply, lv_color_hex(0x4ADE80), 0);
-              lv_obj_set_style_text_font(ta_chat_reply, &lv_font_montserrat_12, 0);
-              lv_textarea_set_text(ta_chat_reply, "Gemini: Raspunsul apare aici.");
-
-              // Buton Inapoi
-              lv_obj_t *btn_back = lv_btn_create(screen_chat);
-              lv_obj_set_size(btn_back, 42, 44);
-              lv_obj_set_pos(btn_back, 588, 2);
-              lv_obj_set_style_bg_color(btn_back, lv_color_hex(0xDC2626), 0);
-              lv_obj_add_event_cb(btn_back, btn_back_home_cb, LV_EVENT_CLICKED, NULL);
-              lv_obj_t *lbl_b = lv_label_create(btn_back);
-              lv_label_set_text(lbl_b, "X");
-              lv_obj_center(lbl_b);
-
-              // Tastatura tactila (620x118 px)
-              kb_chat = lv_keyboard_create(screen_chat);
-              lv_obj_set_size(kb_chat, 620, 118);
-              lv_obj_set_pos(kb_chat, 10, 50);
-              lv_obj_set_style_text_font(kb_chat, &lv_font_montserrat_12, LV_PART_ITEMS);
-              lv_keyboard_set_textarea(kb_chat, ta_chat_user);
-              lv_obj_add_event_cb(kb_chat, kb_chat_cb, LV_EVENT_ALL, NULL);
-          }
-
-          // Construire Meniu de Setari Complet
-          void build_settings_screen() {
-              screen_settings = lv_obj_create(NULL);
-              lv_obj_set_style_bg_color(screen_settings, lv_color_hex(0x0F172A), 0);
-
-              create_status_bar(screen_settings);
-
-              lv_obj_t *list = lv_list_create(screen_settings);
-              lv_obj_set_size(list, 550, 144);
-              lv_obj_set_pos(list, 10, 24);
-              lv_obj_set_style_bg_color(list, lv_color_hex(0x1E293B), 0);
-              lv_obj_set_style_text_color(list, lv_color_hex(0xFFFFFF), 0);
-
-              lv_list_add_text(list, "Configurare Hardware & Sistem");
-              lv_list_add_btn(list, LV_SYMBOL_WIFI, "Retea Wi-Fi: Configurat");
-              // LV_SYMBOL_OK folosit in loc de LV_SYMBOL_KEY inexistent in LVGL standard
-              lv_list_add_btn(list, LV_SYMBOL_OK, "Gemini API: Cheie Activa");
-              lv_list_add_btn(list, LV_SYMBOL_SETTINGS, "Luminozitate Ecran (PWM)");
-              lv_list_add_btn(list, LV_SYMBOL_VOLUME_MAX, "Volum Difuzor (ES8311)");
-              lv_list_add_btn(list, LV_SYMBOL_MUTE, "Comutator Microfon (Mute)");
-              lv_list_add_btn(list, LV_SYMBOL_BLUETOOTH, "Casti Bluetooth Audio");
-              lv_list_add_btn(list, LV_SYMBOL_IMAGE, "Tema: Dark Mode");
-              lv_list_add_btn(list, LV_SYMBOL_DOWNLOAD, "Actualizari OTA Sistem");
-              lv_list_add_btn(list, LV_SYMBOL_LIST, "Istoric Conversatii SD Card");
-              lv_list_add_btn(list, LV_SYMBOL_POWER, "Despre Dispozitiv: v1.1.0");
-
-              lv_obj_t *btn_close = lv_btn_create(screen_settings);
-              lv_obj_set_size(btn_close, 64, 144);
-              lv_obj_set_pos(btn_close, 566, 24);
-              lv_obj_set_style_bg_color(btn_close, lv_color_hex(0xDC2626), 0);
-              lv_obj_add_event_cb(btn_close, btn_back_home_cb, LV_EVENT_CLICKED, NULL);
-              lv_obj_t *lbl_c = lv_label_create(btn_close);
-              lv_label_set_text(lbl_c, "Inapoi");
-              lv_obj_center(lbl_c);
-          }
-
-          void setup() {
-              Serial.begin(115200);
-
-              // 1. Initializare Iluminare Ecran GPIO 1 pentru Hardware V2
-              pinMode(LCD_BL_PIN, OUTPUT);
-              digitalWrite(LCD_BL_PIN, HIGH);
-
-              // 2. Initializare I2C pentru Senzori & Touch
-              Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-
-              // 3. Initializare Card MicroSD (pentru log-uri si istoric)
-              if (SD.begin(SD_CS_PIN)) {
-                  sd_card_mounted = true;
-                  Serial.println("Card MicroSD initializat cu succes.");
-              }
-
-              // 4. Initializare NVS / Preferences (Onboarding automat din Secrets)
-              prefs.begin("gemini_cfg", false);
-              cfg_ssid = prefs.getString("ssid", DEFAULT_SSID);
-              cfg_pass = prefs.getString("pass", DEFAULT_PASS);
-              cfg_key  = prefs.getString("key",  DEFAULT_KEY);
-              prefs.end();
-
-              // 5. Initializare LVGL Buffer
-              lv_init();
-              lv_disp_draw_buf_init(&draw_buf, disp_buf, NULL, LCD_WIDTH * 20);
-
-              static lv_disp_drv_t disp_drv;
-              lv_disp_drv_init(&disp_drv);
-              disp_drv.hor_res = LCD_WIDTH;
-              disp_drv.ver_res = LCD_HEIGHT;
-              disp_drv.flush_cb = my_disp_flush;
-              disp_drv.draw_buf = &draw_buf;
-              lv_disp_drv_register(&disp_drv);
-
-              // 6. Construire Ecrane
-              build_home_screen();
-              build_chat_screen();
-              build_settings_screen();
-              lv_scr_load(screen_home);
-
-              // 7. Conectare Wi-Fi & Sincronizare SNTP
-              WiFi.begin(cfg_ssid.c_str(), cfg_pass.c_str());
-              unsigned long t0 = millis();
-              while (WiFi.status() != WL_CONNECTED && millis() - t0 < 8000) {
-                  delay(200);
-                  lv_timer_handler();
-              }
-
-              if (WiFi.status() == WL_CONNECTED) {
-                  lv_label_set_text(lbl_wifi, "Wi-Fi: OK");
-                  configTime(7200, 0, "pool.ntp.org");
-              } else {
-                  lv_label_set_text(lbl_wifi, "Wi-Fi: Off");
-              }
-          }
-
-          void loop() {
-              lv_timer_handler();
-
-              // Verificare periodica ceas si orientare IMU
-              static unsigned long last_check = 0;
-              if (millis() - last_check > 1000) {
-                  last_check = millis();
-                  time_t now = time(nullptr);
-                  struct tm* tm_info = localtime(&now);
-                  if (tm_info && tm_info->tm_year > 100) {
-                      char time_str[10];
-                      strftime(time_str, sizeof(time_str), "%H:%M", tm_info);
-                      lv_label_set_text(lbl_clock, time_str);
-
-                      // Schimbare automata Dark/Light in functie de ora (Auto-Theme)
-                      if (tm_info->tm_hour >= 20 || tm_info->tm_hour < 7) {
-                          dark_theme = true;
-                      }
-                  }
-                  check_imu_orientation();
-              }
-              delay(5);
-          }
-          EOF
-
-      - name: Compile Full Gemini OS Firmware
+      - name: Compile Minimal Firmware
         run: |
-          arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi \
+          SKETCH_PATH=$(find Arduino -type f -name "*.ino" | grep -Ei "10_LVGL|lcd|display|demo" | head -n 1)
+          if [ -z "$SKETCH_PATH" ]; then
+            SKETCH_PATH=$(find Arduino -type f -name "*.ino" | head -n 1)
+          fi
+          echo "Compilare sketch: $SKETCH_PATH"
+
+          FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi"
+          echo "Utilizare FQBN: $FQBN"
+
+          arduino-cli compile --fqbn "$FQBN" \
             --output-dir build_output \
-            gemini_os
+            "$SKETCH_PATH"
 
-      - name: Package Single Monolithic Binary in ZIP Archive
+      - name: Merge into Single .bin & Create Clean ZIP
         shell: bash
         run: |
           mkdir -p package_bin
@@ -593,12 +153,11 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
 
-          echo "Unificare module pentru Flash la 0x0:"
-          echo "Bootloader: $BOOTLOADER"
-          echo "Partitions: $PARTITIONS"
-          echo "App: $APP_BIN"
+          echo "Bootloader (0x0): $BOOTLOADER"
+          echo "Partitions (0x8000): $PARTITIONS"
+          echo "App (0x10000): $APP_BIN"
 
-          # 1. Imbinare automata intr-un singur binar gata de scris la 0x0
+          # Imbinare sigura la offset-urile hardware native ESP32-S3
           esptool.py --chip esp32s3 merge_bin \
             -o package_bin/gemini-os-full-0x0.bin \
             --flash_mode keep \
@@ -608,12 +167,12 @@ jobs:
             0x8000 "$PARTITIONS" \
             0x10000 "$APP_BIN"
 
-          # 2. Arhivare: ZIP-ul va contine EXCLUSIV fisierul gemini-os-full-0x0.bin
+          # Arhivare: doar fisierul .bin unic in arhiva zip
           cd package_bin
           zip gemini-os-firmware-0x0.zip gemini-os-full-0x0.bin
           cd ..
 
-      - name: Upload Firmware ZIP (Single .bin inside)
+      - name: Upload Single-Bin ZIP Artifact
         uses: actions/upload-artifact@v4
         with:
           name: gemini-os-firmware-0x0
