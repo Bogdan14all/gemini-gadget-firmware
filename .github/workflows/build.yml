@@ -163,15 +163,19 @@ jobs:
 
           lv_obj_t *lbl_wifi = NULL;
 
-          // Callback executat sincron in task-ul LVGL (100% thread-safe)
+          // Callback executat sincron in task-ul LVGL (100% thread-safe, FARA crash de memorie)
+          static bool wifi_reported = false;
           static void wifi_timer_cb(lv_timer_t * timer) {
-              if (WiFi.status() == WL_CONNECTED) {
+              if (!wifi_reported && WiFi.status() == WL_CONNECTED) {
+                  wifi_reported = true;
                   if (lbl_wifi) {
                       String ip_msg = "IP: " + WiFi.localIP().toString();
                       lv_label_set_text(lbl_wifi, ip_msg.c_str());
                   }
                   Serial.println("WiFi Conectat cu succes! IP: " + WiFi.localIP().toString());
-                  lv_timer_delete(timer);
+                  if (timer) {
+                      lv_timer_pause(timer);
+                  }
               }
           }
 
@@ -247,6 +251,11 @@ jobs:
           }
 
           void loop() {
+              static unsigned long last_heartbeat = 0;
+              if (millis() - last_heartbeat > 5000) {
+                  last_heartbeat = millis();
+                  Serial.println("[Heartbeat] Gemini OS Bogdan Edition ruleaza stabil pe Wi-Fi!");
+              }
               delay(100);
           }
           EOF
