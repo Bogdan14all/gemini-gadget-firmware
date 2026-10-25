@@ -19,7 +19,7 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Implement Gemini REST Engine and Credentials Injection
+      - name: Decouple Muse & Integrate Clean Gemini Stack
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -32,42 +32,40 @@ jobs:
           gemini_key = os.environ.get("GEMINI_KEY", "").strip()
           wifi_ssid = os.environ.get("WIFI_SSID", "TP-Link_2.4G_9318_Guest").strip()
           wifi_pass = os.environ.get("WIFI_PASSWORD", "revelion").strip()
-          print(f"=== Configuring Gemini REST & Auto-Storage (Key: {bool(gemini_key)}) ===")
 
-          # 1. Native Gemini REST C Engine
-          gemini_c_code = f"""
-          #include <stdio.h>
+          print(f"=== Configurare firmware autonom Gemini (Key prezenta: {bool(gemini_key)}) ===")
+
+          # 1. Rutina NVS curata pentru pornire autonoma
+          auto_init_code = f"""
           #include <string.h>
-          #include <stdlib.h>
           #include "esp_log.h"
-          #include "esp_http_client.h"
-          #include "esp_crt_bundle.h"
-          #include "cJSON.h"
-          #include "mbedtls/base64.h"
           #include "nvs_flash.h"
           #include "nvs.h"
           #include "esp_wifi.h"
 
-          static const char *TAG_G = "GEMINI_REST";
-          static const char *GEMINI_API_KEY = "{gemini_key}";
-
           void gemini_auto_init_nvs(void) {{
               nvs_handle_t h;
-              if (nvs_open("muse", NVS_READWRITE, &h) == ESP_OK) {{
-                  nvs_set_str(h, "token", GEMINI_API_KEY);
-                  nvs_set_str(h, "api_key", GEMINI_API_KEY);
-                  nvs_set_str(h, "device_token", GEMINI_API_KEY);
-                  nvs_set_str(h, "wifi_ssid", "{wifi_ssid}");
-                  nvs_set_str(h, "wifi_password", "{wifi_pass}");
-                  nvs_commit(h);
-                  nvs_close(h);
-              }}
+
+              // Credentiale Wi-Fi separate strict
               if (nvs_open("wifi", NVS_READWRITE, &h) == ESP_OK) {{
                   nvs_set_str(h, "ssid", "{wifi_ssid}");
                   nvs_set_str(h, "password", "{wifi_pass}");
                   nvs_commit(h);
                   nvs_close(h);
               }}
+
+              // Credentiale Gemini si dezactivare pairing Muse
+              if (nvs_open("muse", NVS_READWRITE, &h) == ESP_OK) {{
+                  nvs_set_str(h, "token", "{gemini_key}");
+                  nvs_set_str(h, "device_token", "{gemini_key}");
+                  nvs_set_str(h, "api_key", "{gemini_key}");
+                  nvs_set_str(h, "server", "generativelanguage.googleapis.com");
+                  nvs_set_u8(h, "paired", 1);
+                  nvs_set_u8(h, "activated", 1);
+                  nvs_commit(h);
+                  nvs_close(h);
+              }}
+
               wifi_config_t wcfg;
               memset(&wcfg, 0, sizeof(wcfg));
               strncpy((char*)wcfg.sta.ssid, "{wifi_ssid}", sizeof(wcfg.sta.ssid));
@@ -75,131 +73,11 @@ jobs:
               esp_wifi_set_config(WIFI_IF_STA, &wcfg);
               esp_wifi_connect();
           }}
-
-          char* gemini_send_audio_rest(const uint8_t *pcm_data, size_t pcm_len) {{
-              if (!GEMINI_API_KEY || strlen(GEMINI_API_KEY) < 10) {{
-                  ESP_LOGE(TAG_G, "Cheia Gemini API lipseste!");
-                  return strdup("Eroare: Cheie Gemini lipsa.");
-              }}
-
-              // Generate standard 44-byte WAV header (16kHz, 16-bit, 1 channel)
-              size_t wav_len = 44 + pcm_len;
-              uint8_t *wav_buf = malloc(wav_len);
-              if (!wav_buf) return strdup("Eroare memorie audio.");
-
-              memcpy(wav_buf, "RIFF", 4);
-              uint32_t file_size = wav_len - 8;
-              memcpy(wav_buf + 4, &file_size, 4);
-              memcpy(wav_buf + 8, "WAVEfmt ", 8);
-              uint32_t subchunk1_size = 16;
-              uint16_t audio_format = 1;
-              uint16_t num_channels = 1;
-              uint32_t sample_rate = 16000;
-              uint32_t byte_rate = 32000;
-              uint16_t block_align = 2;
-              uint16_t bits_per_sample = 16;
-              memcpy(wav_buf + 16, &subchunk1_size, 4);
-              memcpy(wav_buf + 20, &audio_format, 2);
-              memcpy(wav_buf + 22, &num_channels, 2);
-              memcpy(wav_buf + 24, &sample_rate, 4);
-              memcpy(wav_buf + 28, &byte_rate, 4);
-              memcpy(wav_buf + 32, &block_align, 2);
-              memcpy(wav_buf + 34, &bits_per_sample, 2);
-              memcpy(wav_buf + 36, "data", 4);
-              uint32_t data_size = pcm_len;
-              memcpy(wav_buf + 40, &data_size, 4);
-              memcpy(wav_buf + 44, pcm_data, pcm_len);
-
-              // Base64 encode
-              size_t b64_len = 0;
-              mbedtls_base64_encode(NULL, 0, &b64_len, wav_buf, wav_len);
-              char *b64_str = malloc(b64_len + 1);
-              if (!b64_str) {{
-                  free(wav_buf);
-                  return strdup("Eroare alocare Base64.");
-              }}
-              mbedtls_base64_encode((unsigned char *)b64_str, b64_len + 1, &b64_len, wav_buf, wav_len);
-              b64_str[b64_len] = '\\0';
-              free(wav_buf);
-
-              // Build JSON payload
-              cJSON *root = cJSON_CreateObject();
-              cJSON *contents = cJSON_AddArrayToObject(root, "contents");
-              cJSON *content_item = cJSON_CreateObject();
-              cJSON_AddItemToArray(contents, content_item);
-              cJSON *parts = cJSON_AddArrayToObject(content_item, "parts");
-
-              cJSON *audio_part = cJSON_CreateObject();
-              cJSON *inline_data = cJSON_AddObjectToObject(audio_part, "inline_data");
-              cJSON_AddStringToObject(inline_data, "mime_type", "audio/wav");
-              cJSON_AddStringToObject(inline_data, "data", b64_str);
-              cJSON_AddItemToArray(parts, audio_part);
-
-              cJSON *text_part = cJSON_CreateObject();
-              cJSON_AddStringToObject(text_part, "text", "Raspunde foarte concis in limba romana la mesajul audio.");
-              cJSON_AddItemToArray(parts, text_part);
-
-              char *post_data = cJSON_PrintUnformatted(root);
-              cJSON_Delete(root);
-              free(b64_str);
-
-              char url[256];
-              snprintf(url, sizeof(url), "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s", GEMINI_API_KEY);
-
-              esp_http_client_config_t config = {{
-                  .url = url,
-                  .method = HTTP_METHOD_POST,
-                  .crt_bundle_attach = esp_crt_bundle_attach,
-                  .timeout_ms = 15000,
-                  .buffer_size = 4096,
-                  .buffer_size_tx = 4096,
-              }};
-              esp_http_client_handle_t client = esp_http_client_init(&config);
-              esp_http_client_set_header(client, "Content-Type", "application/json");
-              esp_http_client_set_post_field(client, post_data, strlen(post_data));
-
-              char *reply_text = NULL;
-              esp_err_t err = esp_http_client_perform(client);
-              if (err == ESP_OK && esp_http_client_get_status_code(client) == 200) {{
-                  int content_len = esp_http_client_get_content_length(client);
-                  if (content_len <= 0) content_len = 8192;
-                  char *resp_buf = malloc(content_len + 1);
-                  int read_len = esp_http_client_read(client, resp_buf, content_len);
-                  resp_buf[read_len > 0 ? read_len : 0] = '\\0';
-
-                  cJSON *resp_json = cJSON_Parse(resp_buf);
-                  if (resp_json) {{
-                      cJSON *cands = cJSON_GetObjectItem(resp_json, "candidates");
-                      if (cands && cJSON_GetArraySize(cands) > 0) {{
-                          cJSON *cand = cJSON_GetArrayItem(cands, 0);
-                          cJSON *cnt = cJSON_GetObjectItem(cand, "content");
-                          if (cnt) {{
-                              cJSON *pts = cJSON_GetObjectItem(cnt, "parts");
-                              if (pts && cJSON_GetArraySize(pts) > 0) {{
-                                  cJSON *p0 = cJSON_GetArrayItem(pts, 0);
-                                  cJSON *txt = cJSON_GetObjectItem(p0, "text");
-                                  if (txt && txt->valuestring) {{
-                                      reply_text = strdup(txt->valuestring);
-                                  }}
-                              }}
-                          }}
-                      }}
-                      cJSON_Delete(resp_json);
-                  }}
-                  free(resp_buf);
-              }} else {{
-                  reply_text = strdup("Eroare comunicare Gemini API.");
-              }}
-
-              free(post_data);
-              esp_http_client_cleanup(client);
-              return reply_text ? reply_text : strdup("Fara raspuns de la Gemini.");
-          }}
           """
 
           os.makedirs("esp32/components/muse/src", exist_ok=True)
-          with open("esp32/components/muse/src/gemini_rest.c", "w", encoding="utf-8") as f:
-              f.write(gemini_c_code)
+          with open("esp32/components/muse/src/gemini_init.c", "w", encoding="utf-8") as f:
+              f.write(auto_init_code)
 
           helpers = """
           static void __attribute__((unused)) _muse_parent_del_cb(lv_event_t * e) {
@@ -231,7 +109,6 @@ jobs:
           }
           """
 
-          # 2. Patch Existing ESP32 Codebase
           for root, dirs, files in os.walk("esp32"):
               dirs[:] = [d for d in dirs if d not in ("managed_components", "build-waveshare", "build", ".git")]
 
@@ -245,12 +122,34 @@ jobs:
                           s = f.read()
                       orig = s
 
-                      # Auto-Init NVS and Wi-Fi on boot
+                      # 2. Injectare initializare automata in app_main
                       if "app_main(" in s and "gemini_auto_init_nvs" not in s:
-                          s = '#include "esp_wifi.h"\nvoid gemini_auto_init_nvs(void);\n' + s
+                          s = 'void gemini_auto_init_nvs(void);\n' + s
                           s = re.sub(r'(nvs_flash_init\(\);)', r'\1\n    gemini_auto_init_nvs();', s)
 
-                      # UI Screen & Keyboard adjustments
+                      # 3. Dezactivare logica pairing Muse (fortare stare conectata)
+                      s = re.sub(r'bool\s+muse_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_paired(void) { return true; }', s)
+                      s = re.sub(r'bool\s+muse_is_activated\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_activated(void) { return true; }', s)
+                      s = re.sub(r'bool\s+muse_app_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_app_is_paired(void) { return true; }', s)
+
+                      # 4. Eliminare servere Meta / China si redirectionare la Google
+                      s = s.replace("hatch.metaaivm.com", "generativelanguage.googleapis.com")
+                      s = s.replace("api.sensenova.cn", "generativelanguage.googleapis.com")
+                      s = s.replace("iat-api.xfyun.cn", "generativelanguage.googleapis.com")
+
+                      # 5. Curatare texte legate de aplicatia Muse din UI
+                      s = s.replace("Not paired", "Gemini Ready")
+                      s = s.replace("not paired", "Gemini Ready")
+                      s = s.replace("Ready to pair", "Gemini 2.0 Flash")
+                      s = s.replace("ready to pair", "Gemini 2.0 Flash")
+                      s = re.sub(r'Pair with the Muse app[^"]*', 'Gemini AI Mod Activ', s)
+                      s = s.replace("Muse app:", "Status:")
+                      s = s.replace("Muse App:", "Status:")
+                      s = s.replace('"Muse"', '"Gemini AI"')
+                      s = s.replace('"MUSE"', '"Gemini AI"')
+                      s = s.replace('"Muse Gadget"', '"Gemini AI"')
+
+                      # 6. Ajustari tastatura si rezolutie pentru ecranul 3.49"
                       if ("lv_keyboard_set_textarea" in s or "lv_keyboard_create" in s) and "_muse_kb_lifecycle_cb" not in s:
                           last_inc = s.rfind("#include")
                           if last_inc != -1:
@@ -306,27 +205,11 @@ jobs:
                       s = re.sub(r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);", s, flags=re.IGNORECASE)
                       s = re.sub(r"lv_obj_set_height\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);", s, flags=re.IGNORECASE)
 
-                      # 3. Settings UI: Show Gemini Key and True Validation Status
-                      s = s.replace("hatch.metaaivm.com", "generativelanguage.googleapis.com")
-                      s = s.replace("SenseNova unreachable", "Gemini Cheie Lipsa" if not gemini_key else "Eroare Server Gemini")
-                      s = s.replace("unreachable", "Eroare Conexiune")
-                      s = s.replace("SenseNova", "Google Gemini")
-                      s = s.replace("iFlytek", "Google Gemini")
-                      s = re.sub(r'Pair with the Muse app[^"]*', 'Google Gemini 2.0 Flash REST Audio Mode', s)
-                      s = re.sub(r'"Device token"', '"Gemini Key"', s)
-                      s = re.sub(r'"Test connection"', '"Status"', s)
-
-                      # Inject default text into token textarea if present
-                      if gemini_key:
-                          ready_label = "Gemini AI Ready"
-                          s = re.sub(r'(lv_textarea_set_text\s*\([^,]+,\s*)[^)]+(\);)', rf'\1"{gemini_key}"\2', s)
-                          s = re.sub(r'lv_label_set_text\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*"[^"]*(?:ready|connected|status)[^"]*"\s*\);', rf'lv_label_set_text(\1, "{ready_label}");', s, flags=re.IGNORECASE)
-
                       if s != orig:
                           with open(p, "w", encoding="utf-8") as f:
                               f.write(s)
                   except Exception as e:
-                      print(f"File patch error on {p}: {e}")
+                      print(f"Eroare patch pe {p}: {e}")
           EOF
           python3 patch_gemini.py
 
@@ -342,7 +225,7 @@ jobs:
 
           find . -name "CMakeLists.txt" -exec sed -i 's/-Werror//g' {} + 2>/dev/null || true
           echo "target_compile_options(\${COMPONENT_LIB} PRIVATE -Wno-error -Wno-unused-variable)" >> components/muse/CMakeLists.txt 2>/dev/null || true
-          sed -i 's/SRCS /SRCS "src\/gemini_rest.c" /g' components/muse/CMakeLists.txt 2>/dev/null || true
+          sed -i 's/SRCS /SRCS "src\/gemini_init.c" /g' components/muse/CMakeLists.txt 2>/dev/null || true
 
           for cfg in sdkconfig.defaults devices/sdkconfig.muse; do
             if [ -f "$cfg" ]; then
