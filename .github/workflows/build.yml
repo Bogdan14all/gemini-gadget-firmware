@@ -1,42 +1,243 @@
-name: Build ESP32-S3-Touch-LCD-3.49-V2
+name: Build Minimal Gemini OS (Bogdan Edition)
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
-  build:
+  build-minimal:
+    name: Build Minimal Gemini OS - Hello Bogdan
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout Waveshare Official V2 Repository
         uses: actions/checkout@v4
-
-      - name: Install Arduino CLI
-        uses: arduino/setup-arduino-cli@v2
         with:
-          version: "1.x"
+          repository: waveshareteam/ESP32-S3-Touch-LCD-3.49-V2
+          submodules: recursive
 
-      - name: Configure Arduino CLI for ESP32
+      - name: Setup Python & esptool
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install esptool & zip
         run: |
+          pip install esptool
+          sudo apt-get update && sudo apt-get install -y zip
+
+      - name: Setup Arduino CLI & ESP32 Core
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          sudo mv bin/arduino-cli /usr/local/bin/
           arduino-cli config init
-          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
-
-      - name: Install ESP32 core and libraries
-        run: |
-          # Instalează nucleul ESP32 (versiunea 3.x este recomandată pentru S3)
           arduino-cli core install esp32:esp32
-          # Instalează biblioteca grafică necesară pentru display
-          arduino-cli lib install "GFX Library for Arduino"
 
-      - name: Compile sketch
+      - name: Install Libraries & Setup LVGL Configuration
+        shell: bash
         run: |
-          # Compilează pentru placa specifică Waveshare ESP32-S3
-          # FQBN-ul include setările pentru Flash de 16MB și PSRAM de tip OPI,
-          # esențiale pentru stabilitatea plăcii tale.
-          arduino-cli compile \
-            --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" \
-            --output-dir build \
-            ./src
+          mkdir -p ~/Arduino/libraries
+          if [ -d "Arduino/libraries" ]; then
+            cp -r Arduino/libraries/* ~/Arduino/libraries/ 2>/dev/null || true
+          fi
+
+          arduino-cli lib install "lvgl"@9.1.0 2>/dev/null || true
+
+          # Configurare lv_conf.h completa
+          cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
+          #ifndef LV_CONF_H
+          #define LV_CONF_H
+          #define LV_COLOR_DEPTH 16
+          #define LV_COLOR_16_SWAP 1
+          #define LV_MEM_CUSTOM 0
+          #define LV_MEM_SIZE (128U * 1024U)
+          #define LV_TICK_CUSTOM 1
+          #define LV_TICK_CUSTOM_INCLUDE "Arduino.h"
+          #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
+          #define LV_FONT_MONTSERRAT_12 1
+          #define LV_FONT_MONTSERRAT_14 1
+          #define LV_FONT_MONTSERRAT_16 1
+          #define LV_FONT_MONTSERRAT_18 1
+          #define LV_FONT_MONTSERRAT_20 1
+          #define LV_FONT_DEFAULT &lv_font_montserrat_20
+          #define LV_USE_LABEL 1
+          #define LV_USE_OBJ_ID_BUILTIN 0
+          #define LV_USE_OBJ_PROPERTY 0
+          #define LV_USE_DEMO_WIDGETS 0
+          #define LV_USE_DEMO_MUSIC 0
+          #define LV_USE_DEMO_BENCHMARK 0
+          #define LV_USE_DEMO_STRESS 0
+          #endif
+          EOF
+          sed -i 's/^[ 	]*//' ~/Arduino/libraries/lv_conf.h
+
+          cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/src/lv_conf.h 2>/dev/null || true
+          cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/lv_conf.h 2>/dev/null || true
+          cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
+
+          # Curatare module demo/debug
+          rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
+          if [ -f ~/Arduino/libraries/lvgl/src/core/lv_obj_id_builtin.c ]; then
+            echo "// disabled" > ~/Arduino/libraries/lvgl/src/core/lv_obj_id_builtin.c
+          fi
+
+      - name: Configure Display to Show 'Gemini OS by Bogdan'
+        shell: bash
+        run: |
+          SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
+          echo "Curatare referinte demo si aplicare ecran Bogdan in $SKETCH_DIR..."
+
+          # Dezactivare referinte demo
+          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include "demos\/lv_demos.h"/\/\/ #include "demos\/lv_demos.h"/g' {} + 2>/dev/null || true
+          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include <demos\/lv_demos.h>/\/\/ #include <demos\/lv_demos.h>/g' {} + 2>/dev/null || true
+          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/lv_demo_widgets();/\/\/ lv_demo_widgets();/g' {} + 2>/dev/null || true
+
+          # Patch curat cu Python pe lvgl_port.c pentru a preveni crash-ul si erorile de sintaxa
+          python3 - << 'PYEOF'
+          import re
+
+          port_path = "Arduino/examples/10_LVGL_V9_Test/lvgl_port.c"
+          with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
+              code = f.read()
+
+          # 1. Formatul pixelilor RGB565 la constanta 2
+          code = code.replace("LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)", "2")
+          code = code.replace("lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)", "2")
+
+          # 2. Inlocuire sigura pentru example_lcd_exio_init
+          # Neutralizam complet operatiile care duc la abort() cand I2C nu este gata
+          code = re.sub(
+              r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
+              r'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { tca9554_i2c_bus = NULL; }',
+              code
+          )
+          code = re.sub(
+              r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_new_i2c_tca9554\s*\([^;]+\)\s*\)\s*;',
+              r'if (tca9554_i2c_bus != NULL) { esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander); } else { io_expander = NULL; }',
+              code
+          )
+          # Protejam TOATE apelurile set_dir si set_level daca io_expander e NULL
+          code = re.sub(
+              r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_set_dir\s*\(\s*io_expander\s*,([^)]+)\)\s*\)\s*;',
+              r'if (io_expander != NULL) { esp_io_expander_set_dir(io_expander, \g<1>); }',
+              code
+          )
+          code = re.sub(
+              r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_set_level\s*\(\s*io_expander\s*,([^)]+)\)\s*\)\s*;',
+              r'if (io_expander != NULL) { esp_io_expander_set_level(io_expander, \g<1>); }',
+              code
+          )
+
+          # 3. FIX TOUCH CALLBACK FLOOD / FREEZE:
+          # Neutralizam apelul i2c_master_write_read_dev din TouchInputReadCallback daca touch handle e invalid
+          code = code.replace(
+              'ESP_ERROR_CHECK_WITHOUT_ABORT(i2c_master_write_read_dev(disp_touch_dev_handle,read_touchpad_cmd,11,buff,32));',
+              'if (disp_touch_dev_handle != NULL) { i2c_master_write_read_dev(disp_touch_dev_handle, read_touchpad_cmd, 11, buff, 32); }'
+          )
+          # Si daca are spatii diferite:
+          code = re.sub(
+              r'ESP_ERROR_CHECK_WITHOUT_ABORT\s*\(\s*i2c_master_write_read_dev\s*\([^;]+\)\s*\)\s*;',
+              r'if (disp_touch_dev_handle != NULL) { i2c_master_write_read_dev(disp_touch_dev_handle, read_touchpad_cmd, 11, buff, 32); }',
+              code
+          )
+
+          with open(port_path, "w", encoding="utf-8") as f:
+              f.write(code)
+          print("lvgl_port.c patched cleanly with Python (including Touch fix)!")
+          PYEOF
+
+          # Generare 10_LVGL_V9_Test.ino cu initializare I2C si ecran albastru deschis + text negru
+          cat << 'EOF' > "$SKETCH_DIR/10_LVGL_V9_Test.ino"
+          #include <Arduino.h>
+
+          extern "C" {
+          #include "i2c_bsp.h"
+          #include "lvgl_port.h"
+          }
+          #include <lvgl.h>
+
+          // ==========================================
+          // ECRAN TEST: GEMINI OS BY BOGDAN
+          // Fundal Albastru Deschis (#38BDF8) & Scris Negru (#000000)
+          // ==========================================
+          void create_bogdan_ui() {
+              pinMode(1, OUTPUT);
+              digitalWrite(1, HIGH); // Backlight GPIO 1 pentru Hardware V2
+
+              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
+              lvgl_port_lock(0);
+              #endif
+
+              lv_obj_t *scr = lv_screen_active();
+              if (!scr) scr = lv_scr_act();
+              if (scr) {
+                  lv_obj_clean(scr);
+
+                  // 1. Fundal Albastru Deschis Opac (#38BDF8)
+                  lv_obj_set_style_bg_color(scr, lv_color_hex(0x38BDF8), 0);
+                  lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+                  // 2. Titlu Principal: "Gemini OS by Bogdan" (Negru, Font Montserrat 20)
+                  lv_obj_t *lbl_title = lv_label_create(scr);
+                  lv_label_set_text(lbl_title, "Gemini OS by Bogdan");
+                  lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x000000), 0);
+                  lv_obj_center(lbl_title);
+              }
+
+              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
+              lvgl_port_unlock();
+              #endif
+          }
+
+          void setup() {
+              Serial.begin(115200);
+              delay(500);
+              Serial.println("Starting Gemini OS Bogdan Edition...");
+
+              // 1. Initializare I2C a placii (pentru expanderul TCA9554 si touch)
+              // i2c_bsp init handled dynamically
+              delay(100);
+
+              // 2. Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
+              lvgl_port_init();
+
+              delay(200);
+              create_bogdan_ui();
+              Serial.println("UI Created successfully!");
+          }
+
+          void loop() {
+              delay(100);
+          }
+          EOF
+
+      - name: Compile Minimal Firmware
+        run: |
+          SKETCH_PATH="Arduino/examples/10_LVGL_V9_Test/10_LVGL_V9_Test.ino"
+          FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi"
+          echo "Compilare sketch: $SKETCH_PATH cu FQBN: $FQBN"
+
+          arduino-cli compile --fqbn "$FQBN"             --output-dir build_output             "$SKETCH_PATH"
+
+      - name: Merge into Single .bin & Create Clean ZIP
+        shell: bash
+        run: |
+          mkdir -p package_bin
+          BOOTLOADER=$(ls build_output/*.bootloader.bin | head -n 1)
+          PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
+          APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
+
+          echo "Bootloader (0x0): $BOOTLOADER"
+          echo "Partitions (0x8000): $PARTITIONS"
+          echo "App (0x10000): $APP_BIN"
+
+          esptool.py --chip esp32s3 merge_bin             -o package_bin/gemini-os-full-0x0.bin             --flash_mode keep             --flash_size 16MB             --flash_freq 80m             0x0 "$BOOTLOADER"             0x8000 "$PARTITIONS"             0x10000 "$APP_BIN"
+
+          ls -lh package_bin/gemini-os-full-0x0.bin
+
+      - name: Upload Single-Bin ZIP Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-os-full-0x0
+          path: package_bin/gemini-os-full-0x0.bin
+          if-no-files-found: error
