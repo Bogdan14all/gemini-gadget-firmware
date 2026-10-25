@@ -22,7 +22,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           submodules: recursive
 
-      - name: Clean Source, Compact UI & Gemini Native Engine
+      - name: Clean Source, Exact 620x120 & 620x50 Layout & Gemini Engine
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -39,6 +39,7 @@ jobs:
 
           find esp32/ -name "led_status.c" -exec sed -i 's/#error.*SPI flash pin.*/\/\/ bypassed SPI flash pin/' {} + 2>/dev/null || true
 
+          # 1. Motor Gemini nativ C cu functie dedicata de layout pentru Tastatura si Input Box
           cat << 'EOF' > esp32/components/muse/src/gemini_engine.c
           #include <stdio.h>
           #include <string.h>
@@ -53,6 +54,7 @@ jobs:
           #include "esp_heap_caps.h"
           #include "freertos/FreeRTOS.h"
           #include "freertos/task.h"
+          #include "lvgl.h"
 
           static const char *TAG_G = "GEMINI_CORE";
           EOF
@@ -68,6 +70,69 @@ jobs:
               void *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
               if (!ptr) ptr = malloc(size);
               return ptr;
+          }
+
+          void gemini_fix_keypad(lv_obj_t *kb, lv_obj_t *ta) {
+              if (!kb) return;
+
+              lv_obj_t *parent = lv_obj_get_parent(kb);
+              if (!parent) parent = lv_scr_act();
+
+              if (parent != lv_scr_act()) {
+                  lv_obj_set_size(parent, 640, 172);
+                  lv_obj_set_pos(parent, 0, 0);
+                  lv_obj_set_style_pad_all(parent, 0, 0);
+                  lv_obj_clear_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
+                  lv_obj_set_layout(parent, 0);
+              }
+
+              // Daca ta nu este transmis, il cautam sau il cream automat de la zero
+              if (!ta) {
+                  ta = lv_keyboard_get_textarea(kb);
+              }
+              if (!ta) {
+                  ta = lv_textarea_create(parent);
+                  lv_keyboard_set_textarea(kb, ta);
+              } else {
+                  if (lv_obj_get_parent(ta) != parent) {
+                      lv_obj_set_parent(ta, parent);
+                  }
+              }
+
+              // 1. Input Box: exact 620 x 50, centrat la x=10, y=1
+              if (ta) {
+                  lv_obj_set_size(ta, 620, 50);
+                  lv_obj_set_pos(ta, 10, 1);
+                  lv_obj_set_style_bg_color(ta, lv_color_hex(0x18181B), 0);
+                  lv_obj_set_style_bg_opa(ta, LV_OPA_COVER, 0);
+                  lv_obj_set_style_border_color(ta, lv_color_hex(0x3B82F6), 0);
+                  lv_obj_set_style_border_width(ta, 2, 0);
+                  lv_obj_set_style_radius(ta, 4, 0);
+                  lv_obj_set_style_text_color(ta, lv_color_hex(0xFFFFFF), 0);
+                  lv_obj_set_style_text_font(ta, &lv_font_montserrat_12, 0);
+                  lv_obj_set_style_pad_all(ta, 6, 0);
+                  lv_textarea_set_password_mode(ta, false);
+                  lv_textarea_set_one_line(ta, false);
+                  lv_obj_clear_flag(ta, LV_OBJ_FLAG_HIDDEN);
+                  lv_obj_clear_flag(ta, LV_OBJ_FLAG_SCROLLABLE);
+              }
+
+              // 2. Tastatura: exact 620 x 120, centrat la x=10, y=52 (50 + 1 + 1 = 52)
+              lv_obj_set_size(kb, 620, 120);
+              lv_obj_set_pos(kb, 10, 52);
+              lv_obj_set_style_pad_all(kb, 1, LV_PART_MAIN);
+              lv_obj_set_style_pad_row(kb, 1, LV_PART_MAIN);
+              lv_obj_set_style_pad_column(kb, 1, LV_PART_MAIN);
+              lv_obj_set_style_pad_all(kb, 1, LV_PART_ITEMS);
+              lv_obj_set_style_pad_row(kb, 1, LV_PART_ITEMS);
+              lv_obj_set_style_pad_column(kb, 1, LV_PART_ITEMS);
+              lv_obj_set_style_text_font(kb, &lv_font_montserrat_12, LV_PART_ITEMS);
+              lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
+              lv_obj_clear_flag(kb, LV_OBJ_FLAG_SCROLLABLE);
+
+              if (ta) {
+                  lv_obj_move_foreground(ta);
+              }
           }
 
           void gemini_auto_init_nvs(void) {
@@ -192,10 +257,9 @@ jobs:
           }
           EOF
 
+          # 2. Patch pe toate fisierele C/C++: conectare gemini_fix_keypad si micsorare generala UI
           python3 - << 'PYEOF'
           import os, re
-
-          gemini_key = os.environ.get("GEMINI_KEY", "").strip()
 
           for root, dirs, files in os.walk("esp32/components/muse"):
               for file in files:
@@ -207,67 +271,35 @@ jobs:
                       content = f.read()
                   orig = content
 
-                  # 1. Reparare layout tastatura si casuta de text in muse_keypad.c (fara a reparenta)
-                  def patch_kb_set_ta(m):
-                      kb = m.group(1).strip()
-                      ta = m.group(2).strip()
-                      return (
-                          f"lv_keyboard_set_textarea({kb}, {ta});\n"
-                          f"    if ({ta}) {{\n"
-                          f"        lv_obj_set_size({ta}, 620, 36);\n"
-                          f"        lv_obj_align({ta}, LV_ALIGN_TOP_MID, 0, 2);\n"
-                          f"        lv_obj_set_style_bg_color({ta}, lv_color_hex(0x18181B), 0);\n"
-                          f"        lv_obj_set_style_bg_opa({ta}, LV_OPA_COVER, 0);\n"
-                          f"        lv_obj_set_style_border_color({ta}, lv_color_hex(0x3B82F6), 0);\n"
-                          f"        lv_obj_set_style_border_width({ta}, 2, 0);\n"
-                          f"        lv_obj_set_style_radius({ta}, 4, 0);\n"
-                          f"        lv_obj_set_style_text_color({ta}, lv_color_hex(0xFFFFFF), 0);\n"
-                          f"        lv_obj_set_style_text_font({ta}, &lv_font_montserrat_12, 0);\n"
-                          f"        lv_obj_set_style_pad_all({ta}, 4, 0);\n"
-                          f"        lv_textarea_set_password_mode({ta}, false);\n"
-                          f"        lv_textarea_set_one_line({ta}, true);\n"
-                          f"        lv_obj_clear_flag({ta}, LV_OBJ_FLAG_HIDDEN);\n"
-                          f"        lv_obj_move_foreground({ta});\n"
-                          f"    }}\n"
-                          f"    if ({kb}) {{\n"
-                          f"        lv_obj_t *__cont = lv_obj_get_parent({kb});\n"
-                          f"        if (__cont) {{\n"
-                          f"            lv_obj_set_size(__cont, 640, 172);\n"
-                          f"            lv_obj_set_pos(__cont, 0, 0);\n"
-                          f"            lv_obj_set_style_pad_all(__cont, 0, 0);\n"
-                          f"            lv_obj_clear_flag(__cont, LV_OBJ_FLAG_SCROLLABLE);\n"
-                          f"        }}\n"
-                          f"        lv_obj_set_size({kb}, 640, 130);\n"
-                          f"        lv_obj_align({kb}, LV_ALIGN_BOTTOM_MID, 0, 0);\n"
-                          f"        lv_obj_set_style_pad_all({kb}, 1, LV_PART_MAIN);\n"
-                          f"        lv_obj_set_style_pad_row({kb}, 1, LV_PART_MAIN);\n"
-                          f"        lv_obj_set_style_pad_column({kb}, 1, LV_PART_MAIN);\n"
-                          f"        lv_obj_set_style_pad_all({kb}, 1, LV_PART_ITEMS);\n"
-                          f"        lv_obj_set_style_text_font({kb}, &lv_font_montserrat_12, LV_PART_ITEMS);\n"
-                          f"        lv_obj_clear_flag({kb}, LV_OBJ_FLAG_HIDDEN);\n"
-                          f"        lv_obj_clear_flag({kb}, LV_OBJ_FLAG_SCROLLABLE);\n"
-                          f"        if ({ta}) lv_obj_move_foreground({ta});\n"
-                          f"    }}"
+                  # Legare apel layout tastatura + input box
+                  if "keyboard" in content or "keypad" in file.lower():
+                      if "gemini_fix_keypad" not in content:
+                          content = "extern void gemini_fix_keypad(void *kb, void *ta);\n" + content
+
+                      content = re.sub(
+                          r'lv_keyboard_set_textarea\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([a-zA-Z0-9_>.-]+)\s*\);',
+                          r'lv_keyboard_set_textarea(\1, \2); gemini_fix_keypad(\1, \2);',
+                          content
+                      )
+                      content = re.sub(
+                          r'([a-zA-Z0-9_>.-]+)\s*=\s*lv_keyboard_create\s*\(([^)]+)\);',
+                          r'\1 = lv_keyboard_create(\2); gemini_fix_keypad(\1, NULL);',
+                          content
                       )
 
-                  content = re.sub(
-                      r'lv_keyboard_set_textarea\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([a-zA-Z0-9_>.-]+)\s*\);',
-                      patch_kb_set_ta,
-                      content
-                  )
-
-                  # 2. Reducere globala fonturi la Montserrat 12
+                  # Micsorare generala UI pentru ecranul 172px:
+                  # a. Toate fonturile mari devin Montserrat 12
                   content = re.sub(r'&lv_font_montserrat_(?:14|16|18|20|24)', '&lv_font_montserrat_12', content)
 
-                  # 3. Comprimare randuri setari la 32 px inaltime
-                  content = re.sub(r'lv_obj_set_height\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*(?:[4-9][0-9]|1[0-9]{2})\s*\);', r'lv_obj_set_height(\1, 32);', content)
-                  content = re.sub(r'lv_obj_set_style_pad_top\s*\(\s*([^,]+)\s*,\s*[5-9][0-9]*\s*,\s*0\s*\);', r'lv_obj_set_style_pad_top(\1, 2, 0);', content)
-                  content = re.sub(r'lv_obj_set_style_pad_bottom\s*\(\s*([^,]+)\s*,\s*[5-9][0-9]*\s*,\s*0\s*\);', r'lv_obj_set_style_pad_bottom(\1, 2, 0);', content)
+                  # b. Randurile din setari se reduc de la 60px la 30px
+                  content = re.sub(r'lv_obj_set_height\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*(?:[4-9][0-9]|1[0-9]{2})\s*\);', r'lv_obj_set_height(\1, 30);', content)
+                  content = re.sub(r'lv_obj_set_style_pad_top\s*\(\s*([^,]+)\s*,\s*[5-9][0-9]*\s*,\s*0\s*\);', r'lv_obj_set_style_pad_top(\1, 1, 0);', content)
+                  content = re.sub(r'lv_obj_set_style_pad_bottom\s*\(\s*([^,]+)\s*,\s*[5-9][0-9]*\s*,\s*0\s*\);', r'lv_obj_set_style_pad_bottom(\1, 1, 0);', content)
 
-                  # 4. Reducere inaltime bara de titlu/antet
-                  content = re.sub(r'lv_obj_set_height\s*\(\s*([^,;]*header[^,;]*)\s*,\s*[0-9]+\s*\);', r'lv_obj_set_height(\1, 24);', content, flags=re.IGNORECASE)
+                  # c. Antetul / titlul ferestrelor se reduce la 22px
+                  content = re.sub(r'lv_obj_set_height\s*\(\s*([^,;]*header[^,;]*)\s*,\s*[0-9]+\s*\);', r'lv_obj_set_height(\1, 22);', content, flags=re.IGNORECASE)
 
-                  # 5. Inlocuire etichete chinezesti / Muse cu Gemini
+                  # Eliminare Muse & servere chinezesti
                   content = content.replace('"MUSE"', '"GEMINI AI"')
                   content = content.replace('"Muse"', '"Gemini AI"')
                   content = content.replace('"VM ID"', '"Model"')
@@ -289,7 +321,6 @@ jobs:
                   if "settings" in file.lower():
                       content = content.replace('"Not set"', '"Configurat"')
 
-                  # 6. Bypass pairing
                   content = re.sub(r'bool\s+muse_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_paired(void) { return true; }', content)
                   content = re.sub(r'bool\s+muse_is_activated\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_activated(void) { return true; }', content)
                   content = re.sub(r'bool\s+muse_app_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_app_is_paired(void) { return true; }', content)
