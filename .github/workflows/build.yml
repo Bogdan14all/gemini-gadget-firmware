@@ -1,21 +1,17 @@
 name: Setup Clean Gemini Firmware
-
 on:
-  workflow_dispatch:
-
+workflow_dispatch:
 permissions:
-  contents: write
-
+contents: write
 jobs:
-  import-and-build:
-    name: Import Eatin, Purge iFlytek and Build
-    runs-on: ubuntu-latest
-    container:
-      image: espressif/idf:v6.0.1
-    steps:
-      - name: Safe Git Directory
-        run: git config --global --add safe.directory '*'
-
+import-and-build:
+name: Import Eatin, Purge iFlytek and Build
+runs-on: ubuntu-latest
+container:
+image: espressif/idf:v6.0.1
+steps:
+- name: Safe Git Directory
+run: git config --global --add safe.directory '*'
       - name: Checkout User Repository
         uses: actions/checkout@v4
         with:
@@ -315,10 +311,10 @@ jobs:
                   orig = content
 
                   content = re.sub(r'&lv_font_montserrat_(?:14|16|18|20|24)', '&lv_font_montserrat_12', content)
-                  content = re.sub(r'lv_obj_set_height\s*\\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*(?:|1{2})\s*\\);', r'lv_obj_set_height(\1, 30);', content)
-                  content = re.sub(r'lv_obj_set_style_pad_top\s*\\(\s*([^,]+)\s*,\s**\s*,\s*0\s*\\);', r'lv_obj_set_style_pad_top(\1, 1, 0);', content)
-                  content = re.sub(r'lv_obj_set_style_pad_bottom\s*\\(\s*([^,]+)\s*,\s**\s*,\s*0\s*\\);', r'lv_obj_set_style_pad_bottom(\1, 1, 0);', content)
-                  content = re.sub(r'lv_obj_set_height\s*\\(\s*([^,;]*header[^,;]*)\s*,\s*+\s*\\);', r'lv_obj_set_height(\1, 22);', content, flags=re.IGNORECASE)
+                  content = re.sub(r'lv_obj_set_height\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*(?:|1{2})\s*\);', r'lv_obj_set_height(\1, 30);', content)
+                  content = re.sub(r'lv_obj_set_style_pad_top\s*\(\s*([^,]+)\s*,\s**\s*,\s*0\s*\);', r'lv_obj_set_style_pad_top(\1, 1, 0);', content)
+                  content = re.sub(r'lv_obj_set_style_pad_bottom\s*\(\s*([^,]+)\s*,\s**\s*,\s*0\s*\);', r'lv_obj_set_style_pad_bottom(\1, 1, 0);', content)
+                  content = re.sub(r'lv_obj_set_height\s*\(\s*([^,;]*header[^,;]*)\s*,\s*+\s*\);', r'lv_obj_set_height(\1, 22);', content, flags=re.IGNORECASE)
 
                   content = content.replace('"MUSE"', '"GEMINI AI"')
                   content = content.replace('"Muse"', '"Gemini AI"')
@@ -341,9 +337,9 @@ jobs:
                   if "settings" in file.lower():
                       content = content.replace('"Not set"', '"Configurat"')
 
-                  content = re.sub(r'bool\s+muse_is_paired\s*\\([^)]*\\)\s*\{[^}]*\}', 'bool muse_is_paired(void) { return true; }', content)
-                  content = re.sub(r'bool\s+muse_is_activated\s*\\([^)]*\\)\s*\{[^}]*\}', 'bool muse_is_activated(void) { return true; }', content)
-                  content = re.sub(r'bool\s+muse_app_is_paired\s*\\([^)]*\\)\s*\{[^}]*\}', 'bool muse_app_is_paired(void) { return true; }', content)
+                  content = re.sub(r'bool\s+muse_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_paired(void) { return true; }', content)
+                  content = re.sub(r'bool\s+muse_is_activated\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_activated(void) { return true; }', content)
+                  content = re.sub(r'bool\s+muse_app_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_app_is_paired(void) { return true; }', content)
 
                   if content != orig:
                       with open(p, "w", encoding="utf-8") as f:
@@ -425,4 +421,3 @@ jobs:
           name: firmware-waveshare-349-bin
           path: package_bin/
           if-no-files-found: error
-```
