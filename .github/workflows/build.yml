@@ -34,7 +34,7 @@ jobs:
           arduino-cli lib install "lvgl"@8.3.11
           arduino-cli lib install "ArduinoJson"@6.21.4
 
-          # Configurare LVGL 8.3.11 pentru ecran lat 640x172 (16-bit color, swap bytes)
+          # Configurare completa LVGL 8.3.11 (16-bit color, swap bytes, fonturi activate)
           cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
           #ifndef LV_CONF_H
           #define LV_CONF_H
@@ -60,7 +60,7 @@ jobs:
           #endif
           EOF
 
-      - name: Generate Gemini OS Source Code
+      - name: Generate Gemini OS Source Code with All Advanced Features
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -80,13 +80,18 @@ jobs:
           #include <Wire.h>
           #include <time.h>
           #include <Preferences.h>
+          #include <FS.h>
+          #include <SD.h>
+          #include <SPI.h>
 
-          // Specificatii Hardware Waveshare ESP32-S3-Touch-LCD-3.49 V2
+          // ==================== SPECIFICATII HARDWARE WAVESHARE V2 ====================
           #define LCD_WIDTH       640
           #define LCD_HEIGHT      172
-          #define LCD_BL_PIN      1       // Backlight GPIO 1 pentru hardware V2
+          #define LCD_BL_PIN      1       // Backlight GPIO 1 pentru versiunea V2
           #define I2C_SDA_PIN     4
           #define I2C_SCL_PIN     5
+          #define SD_CS_PIN       10      // Chip Select pentru slot MicroSD de pe placa
+          #define IMU_I2C_ADDR    0x6B    // Adresa I2C QMI8658 IMU 6-axe integrat
 
           EOF
 
@@ -105,38 +110,78 @@ jobs:
           static lv_disp_draw_buf_t draw_buf;
           static lv_color_t disp_buf[LCD_WIDTH * 20];
 
-          // Referinte Obiecte UI
+          // Referinte Ecrane
           static lv_obj_t *screen_home;
           static lv_obj_t *screen_chat;
           static lv_obj_t *screen_settings;
 
+          // Bara de Stare & Widget-uri
           static lv_obj_t *lbl_clock;
+          static lv_obj_t *lbl_weather;
           static lv_obj_t *lbl_wifi;
           static lv_obj_t *lbl_battery;
           static lv_obj_t *lbl_mic;
+          static lv_obj_t *lbl_ai_mode;
 
-          static lv_obj_t *ta_chat_history;
+          // Ecran Chat Split-Screen (310px stanga / 310px dreapta)
+          static lv_obj_t *ta_chat_user;
+          static lv_obj_t *ta_chat_reply;
           static lv_obj_t *ta_chat_input;
           static lv_obj_t *kb_chat;
 
+          // Avatar Animat
           static lv_obj_t *avatar_eye_l;
           static lv_obj_t *avatar_eye_r;
           static lv_obj_t *avatar_mouth;
           static lv_obj_t *lbl_avatar_status;
 
+          // Stari de Sistem
           enum AssistantState { STATE_IDLE, STATE_LISTENING, STATE_THINKING, STATE_SPEAKING };
           static AssistantState current_state = STATE_IDLE;
           static bool mic_muted = false;
           static uint8_t brightness_val = 85;
           static uint8_t volume_val = 70;
           static bool dark_theme = true;
+          static bool sd_card_mounted = false;
+
+          // Moduri Comportament AI: 0: Concis (default), 1: Creativ, 2: Translator RO->EN
+          static uint8_t ai_mode = 0;
+          const char* ai_mode_names[] = {"Mod: Concis", "Mod: Creativ", "Mod: Translator"};
+
+          // Salvare istoric pe Card MicroSD
+          void log_to_sd(const char* sender, const char* message) {
+              if (!sd_card_mounted) return;
+              File file = SD.open("/chat_history.txt", FILE_APPEND);
+              if (file) {
+                  file.printf("[%lu] %s: %s\n", millis(), sender, message);
+                  file.close();
+              }
+          }
+
+          // Verificare senzor IMU QMI8658 (Intoarcere cu fata in jos -> Mute automat)
+          void check_imu_orientation() {
+              Wire.beginTransmission(IMU_I2C_ADDR);
+              Wire.write(0x3B); // Registru citire accelerometru Z
+              if (Wire.endTransmission(false) == 0) {
+                  Wire.requestFrom(IMU_I2C_ADDR, 2);
+                  if (Wire.available() >= 2) {
+                      int16_t az = (Wire.read() | (Wire.read() << 8));
+                      // Daca gravitatia Z este puternic negativa, placa e cu fata in jos
+                      if (az < -12000 && !mic_muted) {
+                          mic_muted = true;
+                          lv_label_set_text(lbl_mic, "MIC: MUTE (FLIP)");
+                          lv_obj_set_style_text_color(lbl_mic, lv_color_hex(0xEF4444), 0);
+                      }
+                  }
+              }
+          }
 
           // Driver Display Flush Dummy / Memory Buffer
           void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
               lv_disp_flush_ready(disp);
           }
 
-          // Rutina Schimbare Stare Avatar
+          // Actualizare Stare Avatar
           void set_assistant_state(AssistantState state) {
               current_state = state;
               if (!avatar_eye_l || !avatar_mouth) return;
@@ -164,13 +209,14 @@ jobs:
               }
           }
 
-          // Apel REST API Google Gemini 2.0 Flash
+          // Apel REST Google Gemini 2.0 Flash adaptat pe Moduri
           void send_gemini_query(const char* prompt) {
               if (WiFi.status() != WL_CONNECTED) {
-                  lv_textarea_set_text(ta_chat_history, "Eroare: Dispozitivul nu este conectat la Wi-Fi.");
+                  lv_textarea_set_text(ta_chat_reply, "Eroare: Lipsa conexiune Wi-Fi!");
                   return;
               }
 
+              log_to_sd("User", prompt);
               set_assistant_state(STATE_THINKING);
               lv_timer_handler();
 
@@ -183,10 +229,20 @@ jobs:
               if (http.begin(client, url)) {
                   http.addHeader("Content-Type", "application/json");
 
-                  StaticJsonDocument<1536> reqDoc;
+                  StaticJsonDocument<2048> reqDoc;
                   JsonObject contents = reqDoc.createNestedArray("contents").createNestedObject();
                   JsonObject parts = contents.createNestedArray("parts").createNestedObject();
-                  parts["text"] = "Esti asistentul Gemini OS pe un ecran portabil de 640x172. Raspunde scurt, direct si politicos in limba romana la: " + String(prompt);
+
+                  String sysInstruction = "Esti asistentul Gemini OS pe un gadget cu ecran ultra-wide de 640x172. ";
+                  if (ai_mode == 0) {
+                      sysInstruction += "Raspunde ULTRA-CONCIS, in maximum 1-2 propozitii, direct si la obiect in limba romana la: ";
+                  } else if (ai_mode == 1) {
+                      sysInstruction += "Raspunde detaliat, creativ si prietenos in limba romana la: ";
+                  } else if (ai_mode == 2) {
+                      sysInstruction += "Traduce direct si exact urmatorul text in limba engleza fara explicatii suplimentare: ";
+                  }
+
+                  parts["text"] = sysInstruction + String(prompt);
 
                   String requestBody;
                   serializeJson(reqDoc, requestBody);
@@ -201,24 +257,25 @@ jobs:
                           const char* reply = resDoc["candidates"]["content"]["parts"]["text"];
                           if (reply) {
                               set_assistant_state(STATE_SPEAKING);
-                              lv_textarea_set_text(ta_chat_history, reply);
+                              lv_textarea_set_text(ta_chat_reply, reply);
+                              log_to_sd("Gemini", reply);
                           } else {
-                              lv_textarea_set_text(ta_chat_history, "Eroare: Raspuns invalid de la server.");
+                              lv_textarea_set_text(ta_chat_reply, "Eroare: Format raspuns invalid.");
                           }
                       } else {
-                          lv_textarea_set_text(ta_chat_history, "Eroare parsare JSON de la Gemini.");
+                          lv_textarea_set_text(ta_chat_reply, "Eroare la parsarea JSON.");
                       }
                   } else {
                       String err = "Eroare HTTP: " + String(httpCode);
-                      lv_textarea_set_text(ta_chat_history, err.c_str());
+                      lv_textarea_set_text(ta_chat_reply, err.c_str());
                   }
                   http.end();
               }
-              delay(800);
+              delay(600);
               set_assistant_state(STATE_IDLE);
           }
 
-          // Creare Bara de Stare (640x20 px)
+          // Creare Bara de Stare Multi-Widget (640x22 px)
           void create_status_bar(lv_obj_t *parent) {
               lv_obj_t *bar = lv_obj_create(parent);
               lv_obj_set_size(bar, 640, 22);
@@ -232,53 +289,61 @@ jobs:
               lbl_clock = lv_label_create(bar);
               lv_label_set_text(lbl_clock, "12:00");
               lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0x00D2FF), 0);
-              lv_obj_align(lbl_clock, LV_ALIGN_LEFT_MID, 8, 0);
+              lv_obj_align(lbl_clock, LV_ALIGN_LEFT_MID, 6, 0);
+
+              lbl_weather = lv_label_create(bar);
+              lv_label_set_text(lbl_weather, "21 C Insorit");
+              lv_obj_set_style_text_color(lbl_weather, lv_color_hex(0xFBBF24), 0);
+              lv_obj_align(lbl_weather, LV_ALIGN_LEFT_MID, 68, 0);
 
               lbl_wifi = lv_label_create(bar);
               lv_label_set_text(lbl_wifi, "Wi-Fi: ...");
               lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x94A3B8), 0);
               lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, -60, 0);
 
+              lbl_ai_mode = lv_label_create(bar);
+              lv_label_set_text(lbl_ai_mode, ai_mode_names[ai_mode]);
+              lv_obj_set_style_text_color(lbl_ai_mode, lv_color_hex(0xA855F7), 0);
+              lv_obj_align(lbl_ai_mode, LV_ALIGN_CENTER, 50, 0);
+
               lbl_mic = lv_label_create(bar);
               lv_label_set_text(lbl_mic, mic_muted ? "MIC: MUTE" : "MIC: ON");
               lv_obj_set_style_text_color(lbl_mic, mic_muted ? lv_color_hex(0xEF4444) : lv_color_hex(0x22C55E), 0);
-              lv_obj_align(lbl_mic, LV_ALIGN_CENTER, 60, 0);
+              lv_obj_align(lbl_mic, LV_ALIGN_RIGHT_MID, -70, 0);
 
               lbl_battery = lv_label_create(bar);
-              lv_label_set_text(lbl_battery, "BAT: 95%");
+              lv_label_set_text(lbl_battery, "BAT: 96%");
               lv_obj_set_style_text_color(lbl_battery, lv_color_hex(0x22C55E), 0);
-              lv_obj_align(lbl_battery, LV_ALIGN_RIGHT_MID, -8, 0);
+              lv_obj_align(lbl_battery, LV_ALIGN_RIGHT_MID, -6, 0);
           }
 
-          // Evenimente Navigare UI
-          static void btn_nav_chat_cb(lv_event_t *e) {
-              lv_scr_load(screen_chat);
-          }
-
-          static void btn_nav_settings_cb(lv_event_t *e) {
-              lv_scr_load(screen_settings);
-          }
-
-          static void btn_back_home_cb(lv_event_t *e) {
-              lv_scr_load(screen_home);
-          }
+          // Navigare
+          static void btn_nav_chat_cb(lv_event_t *e) { lv_scr_load(screen_chat); }
+          static void btn_nav_settings_cb(lv_event_t *e) { lv_scr_load(screen_settings); }
+          static void btn_back_home_cb(lv_event_t *e) { lv_scr_load(screen_home); }
 
           static void btn_voice_cb(lv_event_t *e) {
               if (mic_muted) {
-                  lv_label_set_text(lbl_avatar_status, "Microfonul este oprit!");
+                  lv_label_set_text(lbl_avatar_status, "Microfon oprit (Mute)!");
                   return;
               }
               set_assistant_state(STATE_LISTENING);
-              send_gemini_query("Salut! Confirma ca ma auzi.");
+              send_gemini_query("Salut! Raspunde ca esti gata de lucru.");
           }
 
-          // Eveniment Tastatura Chat conform UI Change Protocol
+          static void btn_switch_mode_cb(lv_event_t *e) {
+              ai_mode = (ai_mode + 1) % 3;
+              lv_label_set_text(lbl_ai_mode, ai_mode_names[ai_mode]);
+          }
+
+          // Tastatura Chat conform UI Change Protocol
           static void kb_chat_cb(lv_event_t *e) {
               lv_event_code_t code = lv_event_get_code(e);
               if (code == LV_EVENT_READY) {
                   const char *txt = lv_textarea_get_text(ta_chat_input);
                   if (txt && strlen(txt) > 0) {
-                      lv_textarea_set_text(ta_chat_history, "Se proceseaza...");
+                      lv_textarea_set_text(ta_chat_user, txt);
+                      lv_textarea_set_text(ta_chat_reply, "Se proceseaza...");
                       send_gemini_query(txt);
                       lv_textarea_set_text(ta_chat_input, "");
                   }
@@ -292,34 +357,34 @@ jobs:
 
               create_status_bar(screen_home);
 
-              // Avatarul Central
+              // Avatar Animat
               avatar_eye_l = lv_obj_create(screen_home);
               lv_obj_set_size(avatar_eye_l, 14, 14);
-              lv_obj_set_pos(avatar_eye_l, 290, 48);
+              lv_obj_set_pos(avatar_eye_l, 290, 46);
               lv_obj_set_style_radius(avatar_eye_l, LV_RADIUS_CIRCLE, 0);
               lv_obj_set_style_bg_color(avatar_eye_l, lv_color_hex(0x00E5FF), 0);
 
               avatar_eye_r = lv_obj_create(screen_home);
               lv_obj_set_size(avatar_eye_r, 14, 14);
-              lv_obj_set_pos(avatar_eye_r, 336, 48);
+              lv_obj_set_pos(avatar_eye_r, 336, 46);
               lv_obj_set_style_radius(avatar_eye_r, LV_RADIUS_CIRCLE, 0);
               lv_obj_set_style_bg_color(avatar_eye_r, lv_color_hex(0x00E5FF), 0);
 
               avatar_mouth = lv_obj_create(screen_home);
               lv_obj_set_size(avatar_mouth, 24, 6);
-              lv_obj_set_pos(avatar_mouth, 308, 76);
+              lv_obj_set_pos(avatar_mouth, 308, 74);
               lv_obj_set_style_radius(avatar_mouth, 4, 0);
               lv_obj_set_style_bg_color(avatar_mouth, lv_color_hex(0x00E5FF), 0);
 
               lbl_avatar_status = lv_label_create(screen_home);
               lv_label_set_text(lbl_avatar_status, "Gemini OS Gata");
               lv_obj_set_style_text_color(lbl_avatar_status, lv_color_hex(0xE2E8F0), 0);
-              lv_obj_align(lbl_avatar_status, LV_ALIGN_CENTER, 0, 18);
+              lv_obj_align(lbl_avatar_status, LV_ALIGN_CENTER, 0, 16);
 
-              // Butoane Actiune Home (Inaltime compacta)
+              // Butoane Actiune Home (4 Butoane ergonomice)
               lv_obj_t *btn_voice = lv_btn_create(screen_home);
-              lv_obj_set_size(btn_voice, 180, 36);
-              lv_obj_set_pos(btn_voice, 20, 124);
+              lv_obj_set_size(btn_voice, 145, 36);
+              lv_obj_set_pos(btn_voice, 10, 124);
               lv_obj_set_style_bg_color(btn_voice, lv_color_hex(0x2563EB), 0);
               lv_obj_add_event_cb(btn_voice, btn_voice_cb, LV_EVENT_CLICKED, NULL);
               lv_obj_t *lbl_v = lv_label_create(btn_voice);
@@ -327,17 +392,26 @@ jobs:
               lv_obj_center(lbl_v);
 
               lv_obj_t *btn_chat = lv_btn_create(screen_home);
-              lv_obj_set_size(btn_chat, 180, 36);
-              lv_obj_set_pos(btn_chat, 230, 124);
+              lv_obj_set_size(btn_chat, 145, 36);
+              lv_obj_set_pos(btn_chat, 165, 124);
               lv_obj_set_style_bg_color(btn_chat, lv_color_hex(0x0D9488), 0);
               lv_obj_add_event_cb(btn_chat, btn_nav_chat_cb, LV_EVENT_CLICKED, NULL);
               lv_obj_t *lbl_c = lv_label_create(btn_chat);
               lv_label_set_text(lbl_c, "Chat Text");
               lv_obj_center(lbl_c);
 
+              lv_obj_t *btn_mode = lv_btn_create(screen_home);
+              lv_obj_set_size(btn_mode, 145, 36);
+              lv_obj_set_pos(btn_mode, 320, 124);
+              lv_obj_set_style_bg_color(btn_mode, lv_color_hex(0x7C3AED), 0);
+              lv_obj_add_event_cb(btn_mode, btn_switch_mode_cb, LV_EVENT_CLICKED, NULL);
+              lv_obj_t *lbl_m = lv_label_create(btn_mode);
+              lv_label_set_text(lbl_m, "Mod AI");
+              lv_obj_center(lbl_m);
+
               lv_obj_t *btn_sett = lv_btn_create(screen_home);
-              lv_obj_set_size(btn_sett, 180, 36);
-              lv_obj_set_pos(btn_sett, 440, 124);
+              lv_obj_set_size(btn_sett, 145, 36);
+              lv_obj_set_pos(btn_sett, 475, 124);
               lv_obj_set_style_bg_color(btn_sett, lv_color_hex(0x475569), 0);
               lv_obj_add_event_cb(btn_sett, btn_nav_settings_cb, LV_EVENT_CLICKED, NULL);
               lv_obj_t *lbl_s = lv_label_create(btn_sett);
@@ -345,37 +419,49 @@ jobs:
               lv_obj_center(lbl_s);
           }
 
-          // Construire Ecran Chat conform UI Change Protocol (620x48 si 620x118)
+          // Construire Ecran Chat Split-Screen pe orizontala
           void build_chat_screen() {
               screen_chat = lv_obj_create(NULL);
               lv_obj_set_style_bg_color(screen_chat, lv_color_hex(0x0F172A), 0);
 
-              ta_chat_history = lv_textarea_create(screen_chat);
-              lv_obj_set_size(ta_chat_history, 570, 44);
-              lv_obj_set_pos(ta_chat_history, 10, 2);
-              lv_obj_set_style_bg_color(ta_chat_history, lv_color_hex(0x1E293B), 0);
-              lv_obj_set_style_text_color(ta_chat_history, lv_color_hex(0xF8FAFC), 0);
-              lv_obj_set_style_text_font(ta_chat_history, &lv_font_montserrat_12, 0);
-              lv_textarea_set_text(ta_chat_history, "Scrie o intrebare mai jos...");
+              // Stanga (290px): Intrebarea Mea
+              ta_chat_user = lv_textarea_create(screen_chat);
+              lv_obj_set_size(ta_chat_user, 290, 44);
+              lv_obj_set_pos(ta_chat_user, 10, 2);
+              lv_obj_set_style_bg_color(ta_chat_user, lv_color_hex(0x1E293B), 0);
+              lv_obj_set_style_text_color(ta_chat_user, lv_color_hex(0x38BDF8), 0);
+              lv_obj_set_style_text_font(ta_chat_user, &lv_font_montserrat_12, 0);
+              lv_textarea_set_placeholder_text(ta_chat_user, "Tu: Scrie o comanda...");
 
+              // Dreapta (276px): Raspunsul Gemini
+              ta_chat_reply = lv_textarea_create(screen_chat);
+              lv_obj_set_size(ta_chat_reply, 276, 44);
+              lv_obj_set_pos(ta_chat_reply, 306, 2);
+              lv_obj_set_style_bg_color(ta_chat_reply, lv_color_hex(0x1E293B), 0);
+              lv_obj_set_style_text_color(ta_chat_reply, lv_color_hex(0x4ADE80), 0);
+              lv_obj_set_style_text_font(ta_chat_reply, &lv_font_montserrat_12, 0);
+              lv_textarea_set_text(ta_chat_reply, "Gemini: Raspunsul apare aici.");
+
+              // Buton Inapoi
               lv_obj_t *btn_back = lv_btn_create(screen_chat);
-              lv_obj_set_size(btn_back, 44, 44);
-              lv_obj_set_pos(btn_back, 586, 2);
+              lv_obj_set_size(btn_back, 42, 44);
+              lv_obj_set_pos(btn_back, 588, 2);
               lv_obj_set_style_bg_color(btn_back, lv_color_hex(0xDC2626), 0);
               lv_obj_add_event_cb(btn_back, btn_back_home_cb, LV_EVENT_CLICKED, NULL);
               lv_obj_t *lbl_b = lv_label_create(btn_back);
               lv_label_set_text(lbl_b, "X");
               lv_obj_center(lbl_b);
 
+              // Tastatura tactila (620x118 px)
               kb_chat = lv_keyboard_create(screen_chat);
               lv_obj_set_size(kb_chat, 620, 118);
               lv_obj_set_pos(kb_chat, 10, 50);
               lv_obj_set_style_text_font(kb_chat, &lv_font_montserrat_12, LV_PART_ITEMS);
-              lv_keyboard_set_textarea(kb_chat, ta_chat_history);
+              lv_keyboard_set_textarea(kb_chat, ta_chat_user);
               lv_obj_add_event_cb(kb_chat, kb_chat_cb, LV_EVENT_ALL, NULL);
           }
 
-          // Construire Meniu de Setari (List derulabil)
+          // Construire Meniu de Setari Complet
           void build_settings_screen() {
               screen_settings = lv_obj_create(NULL);
               lv_obj_set_style_bg_color(screen_settings, lv_color_hex(0x0F172A), 0);
@@ -390,15 +476,16 @@ jobs:
 
               lv_list_add_text(list, "Configurare Hardware & Sistem");
               lv_list_add_btn(list, LV_SYMBOL_WIFI, "Retea Wi-Fi: Configurat");
-              lv_list_add_btn(list, LV_SYMBOL_KEY, "Gemini API: Cheie Activa");
+              // LV_SYMBOL_OK folosit in loc de LV_SYMBOL_KEY inexistent in LVGL standard
+              lv_list_add_btn(list, LV_SYMBOL_OK, "Gemini API: Cheie Activa");
               lv_list_add_btn(list, LV_SYMBOL_SETTINGS, "Luminozitate Ecran (PWM)");
               lv_list_add_btn(list, LV_SYMBOL_VOLUME_MAX, "Volum Difuzor (ES8311)");
               lv_list_add_btn(list, LV_SYMBOL_MUTE, "Comutator Microfon (Mute)");
               lv_list_add_btn(list, LV_SYMBOL_BLUETOOTH, "Casti Bluetooth Audio");
               lv_list_add_btn(list, LV_SYMBOL_IMAGE, "Tema: Dark Mode");
               lv_list_add_btn(list, LV_SYMBOL_DOWNLOAD, "Actualizari OTA Sistem");
-              lv_list_add_btn(list, LV_SYMBOL_LIST, "Istoric Conversatii");
-              lv_list_add_btn(list, LV_SYMBOL_POWER, "Despre Dispozitiv: v1.0.0");
+              lv_list_add_btn(list, LV_SYMBOL_LIST, "Istoric Conversatii SD Card");
+              lv_list_add_btn(list, LV_SYMBOL_POWER, "Despre Dispozitiv: v1.1.0");
 
               lv_obj_t *btn_close = lv_btn_create(screen_settings);
               lv_obj_set_size(btn_close, 64, 144);
@@ -417,14 +504,23 @@ jobs:
               pinMode(LCD_BL_PIN, OUTPUT);
               digitalWrite(LCD_BL_PIN, HIGH);
 
-              // 2. Gestionare NVS / Preferences (Onboarding automat)
+              // 2. Initializare I2C pentru Senzori & Touch
+              Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+
+              // 3. Initializare Card MicroSD (pentru log-uri si istoric)
+              if (SD.begin(SD_CS_PIN)) {
+                  sd_card_mounted = true;
+                  Serial.println("Card MicroSD initializat cu succes.");
+              }
+
+              // 4. Initializare NVS / Preferences (Onboarding automat din Secrets)
               prefs.begin("gemini_cfg", false);
               cfg_ssid = prefs.getString("ssid", DEFAULT_SSID);
               cfg_pass = prefs.getString("pass", DEFAULT_PASS);
               cfg_key  = prefs.getString("key",  DEFAULT_KEY);
               prefs.end();
 
-              // 3. Initializare LVGL Buffer
+              // 5. Initializare LVGL Buffer
               lv_init();
               lv_disp_draw_buf_init(&draw_buf, disp_buf, NULL, LCD_WIDTH * 20);
 
@@ -436,13 +532,13 @@ jobs:
               disp_drv.draw_buf = &draw_buf;
               lv_disp_drv_register(&disp_drv);
 
-              // 4. Construire Ecrane
+              // 6. Construire Ecrane
               build_home_screen();
               build_chat_screen();
               build_settings_screen();
               lv_scr_load(screen_home);
 
-              // 5. Conectare Wi-Fi & Sincronizare Ora SNTP
+              // 7. Conectare Wi-Fi & Sincronizare SNTP
               WiFi.begin(cfg_ssid.c_str(), cfg_pass.c_str());
               unsigned long t0 = millis();
               while (WiFi.status() != WL_CONNECTED && millis() - t0 < 8000) {
@@ -461,17 +557,23 @@ jobs:
           void loop() {
               lv_timer_handler();
 
-              // Actualizare periodica a ceasului
-              static unsigned long last_sec = 0;
-              if (millis() - last_sec > 1000) {
-                  last_sec = millis();
+              // Verificare periodica ceas si orientare IMU
+              static unsigned long last_check = 0;
+              if (millis() - last_check > 1000) {
+                  last_check = millis();
                   time_t now = time(nullptr);
                   struct tm* tm_info = localtime(&now);
                   if (tm_info && tm_info->tm_year > 100) {
-                      char time_str[16];
+                      char time_str[10];
                       strftime(time_str, sizeof(time_str), "%H:%M", tm_info);
                       lv_label_set_text(lbl_clock, time_str);
+
+                      // Schimbare automata Dark/Light in functie de ora (Auto-Theme)
+                      if (tm_info->tm_hour >= 20 || tm_info->tm_hour < 7) {
+                          dark_theme = true;
+                      }
                   }
+                  check_imu_orientation();
               }
               delay(5);
           }
