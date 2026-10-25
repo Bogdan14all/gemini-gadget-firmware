@@ -92,17 +92,41 @@ jobs:
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include <demos\/lv_demos.h>/\/\/ #include <demos\/lv_demos.h>/g' {} + 2>/dev/null || true
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/lv_demo_widgets();/\/\/ lv_demo_widgets();/g' {} + 2>/dev/null || true
 
-          # Corectare BYTES_PER_PIXEL la 2 (RGB565) in lvgl_port.c
-          sed -i 's/LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)/2/g' "$SKETCH_DIR/lvgl_port.c" 2>/dev/null || true
-          sed -i 's/lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)/2/g' "$SKETCH_DIR/lvgl_port.c" 2>/dev/null || true
+          # Patch curat cu Python pe lvgl_port.c pentru a preveni crash-ul si erorile de sintaxa
+          python3 - << 'PYEOF'
+          import re
 
-          # FIX ROOT CAUSE: Inlocuire ESP_ERROR_CHECK in example_lcd_exio_init cu verificare sigura fara abort
-          sed -i 's/ESP_ERROR_CHECK(i2c_master_get_bus_handle(0, &tca9554_i2c_bus));/if (i2c_master_get_bus_handle(0, \&tca9554_i2c_bus) != ESP_OK) { printf("Warn: I2C bus 0 not ready, skipping TCA9554\n"); return; }/g' "$SKETCH_DIR/lvgl_port.c" 2>/dev/null || true
+          port_path = "Arduino/examples/10_LVGL_V9_Test/lvgl_port.c"
+          with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
+              code = f.read()
 
-          # Rescriere curata si sigura 10_LVGL_V9_Test.ino
+          # 1. Formatul pixelilor RGB565 la constanta 2
+          code = code.replace("LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)", "2")
+          code = code.replace("lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)", "2")
+
+          # 2. Asigurare ca TCA9554 nu declanseaza abort() daca I2C intarzie
+          code = code.replace(
+              "ESP_ERROR_CHECK(i2c_master_get_bus_handle(0, &tca9554_i2c_bus));",
+              "i2c_master_get_bus_handle(0, &tca9554_i2c_bus);"
+          )
+          code = code.replace(
+              "ESP_ERROR_CHECK(esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander));",
+              "if (tca9554_i2c_bus != NULL) { esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander); }"
+          )
+
+          with open(port_path, "w", encoding="utf-8") as f:
+              f.write(code)
+          print("lvgl_port.c patched cleanly with Python!")
+          PYEOF
+
+          # Generare 10_LVGL_V9_Test.ino cu initializare I2C si ecran albastru deschis + text negru
           cat << 'EOF' > "$SKETCH_DIR/10_LVGL_V9_Test.ino"
           #include <Arduino.h>
+
+          extern "C" {
+          #include "i2c_bsp.h"
           #include "lvgl_port.h"
+          }
           #include <lvgl.h>
 
           // ==========================================
@@ -112,6 +136,10 @@ jobs:
           void create_bogdan_ui() {
               pinMode(1, OUTPUT);
               digitalWrite(1, HIGH); // Backlight GPIO 1 pentru Hardware V2
+
+              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
+              lvgl_port_lock(0);
+              #endif
 
               lv_obj_t *scr = lv_screen_active();
               if (!scr) scr = lv_scr_act();
@@ -128,20 +156,22 @@ jobs:
                   lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x000000), 0);
                   lv_obj_center(lbl_title);
               }
-          }
 
-          extern "C" void i2c_bsp_init(void);
+              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
+              lvgl_port_unlock();
+              #endif
+          }
 
           void setup() {
               Serial.begin(115200);
               delay(500);
               Serial.println("Starting Gemini OS Bogdan Edition...");
 
-              // Initializam bus-ul I2C intern inainte de lvgl_port_init
+              // 1. Initializare I2C a placii (pentru expanderul TCA9554 si touch)
               i2c_bsp_init();
-              delay(50);
+              delay(100);
 
-              // Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
+              // 2. Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
               lvgl_port_init();
 
               delay(200);
