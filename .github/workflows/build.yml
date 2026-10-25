@@ -585,7 +585,7 @@ jobs:
             --output-dir build_output \
             gemini_os
 
-      - name: Package Single Monolithic Binary at 0x0
+      - name: Package Firmware & Create Downloadable ZIP Archive
         shell: bash
         run: |
           mkdir -p package_bin
@@ -598,7 +598,7 @@ jobs:
           echo "Partitions: $PARTITIONS"
           echo "App: $APP_BIN"
 
-          # Imbinare automata la offset-urile native ESP32-S3
+          # 1. Imbinare automata la offset-urile native ESP32-S3 (0x0)
           esptool.py --chip esp32s3 merge_bin \
             -o package_bin/gemini-os-full-0x0.bin \
             --flash_mode keep \
@@ -608,9 +608,40 @@ jobs:
             0x8000 "$PARTITIONS" \
             0x10000 "$APP_BIN"
 
-      - name: Upload Single Monolithic Binary Artifact
+          # 2. Copiere fisiere individuale
+          cp "$BOOTLOADER" package_bin/bootloader.bin 2>/dev/null || true
+          cp "$PARTITIONS" package_bin/partitions.bin 2>/dev/null || true
+          cp "$APP_BIN" package_bin/app.bin 2>/dev/null || true
+
+          # 3. Instructiuni clare de flashing
+          cat << 'EOF' > package_bin/INSTRUCTIUNI_FLASH.txt
+          ==================================================
+          GEMINI OS - WAVESHARE ESP32-S3-TOUCH-LCD-3.49 V2
+          ==================================================
+
+          VARIANTA SIMPLA (RECOMANDATA):
+          In ESP Flash Download Tool sau Web Flasher:
+          - Adauga DOAR fisierul: gemini-os-full-0x0.bin
+          - La adresa: 0x0
+          - Flash Mode: DIO / KEEP
+          - Flash Size: 16MB
+
+          VARIANTA CLASICA (MULTI-BIN):
+          - bootloader.bin -> 0x0
+          - partitions.bin -> 0x8000
+          - app.bin        -> 0x10000
+          ==================================================
+          EOF
+
+          # 4. Creare arhiva ZIP explicita
+          cd package_bin
+          zip -r ../gemini-os-waveshare-v2-firmware.zip ./*
+          cd ..
+          cp gemini-os-waveshare-v2-firmware.zip package_bin/
+
+      - name: Upload Firmware Artifacts (ZIP Download)
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-os-waveshare-v2-full-0x0
-          path: package_bin/gemini-os-full-0x0.bin
+          name: gemini-os-waveshare-v2-firmware
+          path: package_bin/
           if-no-files-found: error
