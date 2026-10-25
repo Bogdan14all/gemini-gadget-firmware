@@ -147,11 +147,9 @@ jobs:
           PYEOF
 
           # Generare 10_LVGL_V9_Test.ino cu initializare I2C si ecran albastru deschis + text negru
-                    cat << 'EOF' > "$SKETCH_DIR/10_LVGL_V9_Test.ino"
+          cat << 'EOF' > "$SKETCH_DIR/10_LVGL_V9_Test.ino"
           #include <Arduino.h>
           #include <WiFi.h>
-          #include "soc/soc.h"
-          #include "soc/rtc_cntl_reg.h"
 
           extern "C" {
           #include "i2c_bsp.h"
@@ -159,12 +157,35 @@ jobs:
           }
           #include <lvgl.h>
 
+          // Datele retelei Wi-Fi locale
           const char* ssid = "TP-Link_2.4G_9318_Guest";
           const char* password = "revelion";
 
-          void build_bogdan_screen(const char* ip_address) {
+          lv_obj_t *lbl_wifi = NULL;
+
+          // Callback executat sincron in task-ul LVGL (100% thread-safe)
+          static void wifi_timer_cb(lv_timer_t * timer) {
+              if (WiFi.status() == WL_CONNECTED) {
+                  if (lbl_wifi) {
+                      String ip_msg = "IP: " + WiFi.localIP().toString();
+                      lv_label_set_text(lbl_wifi, ip_msg.c_str());
+                  }
+                  Serial.println("WiFi Conectat cu succes! IP: " + WiFi.localIP().toString());
+                  lv_timer_delete(timer);
+              }
+          }
+
+          // ==========================================
+          // ECRAN TEST: GEMINI OS BY BOGDAN + WI-FI
+          // Fundal Albastru Deschis (#38BDF8) & Scris Negru (#000000)
+          // ==========================================
+          void create_bogdan_ui() {
               pinMode(1, OUTPUT);
               digitalWrite(1, HIGH); // Backlight GPIO 1 pentru Hardware V2
+
+              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
+              lvgl_port_lock(0);
+              #endif
 
               lv_obj_t *scr = lv_screen_active();
               if (!scr) scr = lv_scr_act();
@@ -175,83 +196,58 @@ jobs:
                   lv_obj_set_style_bg_color(scr, lv_color_hex(0x38BDF8), 0);
                   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-                  // 2. Titlu Linia 1: "Gemini OS" (Montserrat 18, incadrare perfecta in 172px)
+                  // 2. Titlu Linia 1: "Gemini OS" (Montserrat 18)
                   lv_obj_t *lbl_title = lv_label_create(scr);
                   lv_label_set_text(lbl_title, "Gemini OS");
                   lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x000000), 0);
                   lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_18, 0);
-                  lv_obj_align(lbl_title, LV_ALIGN_CENTER, 0, -42);
+                  lv_obj_align(lbl_title, LV_ALIGN_CENTER, 0, -36);
 
                   // 3. Titlu Linia 2: "by Bogdan" (Montserrat 14)
                   lv_obj_t *lbl_sub = lv_label_create(scr);
                   lv_label_set_text(lbl_sub, "by Bogdan");
-                  lv_obj_set_style_text_color(lbl_sub, lv_color_hex(0x0F172A), 0);
+                  lv_obj_set_style_text_color(lbl_sub, lv_color_hex(0x000000), 0);
                   lv_obj_set_style_text_font(lbl_sub, &lv_font_montserrat_14, 0);
-                  lv_obj_align(lbl_sub, LV_ALIGN_CENTER, 0, -18);
+                  lv_obj_align(lbl_sub, LV_ALIGN_CENTER, 0, -14);
 
                   // 4. Stare Wi-Fi
-                  lv_obj_t *lbl_wifi = lv_label_create(scr);
-                  lv_label_set_text(lbl_wifi, "Wi-Fi: Conectat!");
+                  lbl_wifi = lv_label_create(scr);
+                  lv_label_set_text(lbl_wifi, "Wi-Fi: Conectare...");
                   lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x0284C7), 0);
                   lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_12, 0);
-                  lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 15);
+                  lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 18);
 
-                  // 5. Adresa IP alocata de router
-                  lv_obj_t *lbl_ip = lv_label_create(scr);
-                  lv_label_set_text(lbl_ip, ip_address);
-                  lv_obj_set_style_text_color(lbl_ip, lv_color_hex(0x000000), 0);
-                  lv_obj_set_style_text_font(lbl_ip, &lv_font_montserrat_12, 0);
-                  lv_obj_align(lbl_ip, LV_ALIGN_CENTER, 0, 38);
+                  // Timer LVGL la fiecare 500ms pentru detectare Wi-Fi
+                  lv_timer_create(wifi_timer_cb, 500, NULL);
               }
+
+              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
+              lvgl_port_unlock();
+              #endif
           }
 
           void setup() {
-              // 1. DEZACTIVARE HARDWARE BROWNOUT DETECTOR LA BOOT
-              WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
-
               Serial.begin(115200);
               delay(500);
               Serial.println("Starting Gemini OS Bogdan Edition...");
 
-              // 2. Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
+              // 1. Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
+              delay(100);
               lvgl_port_init();
-              delay(200);
 
-              // 3. Afisam ecranul initial imediat
-              build_bogdan_screen("Conectare Wi-Fi...");
+              delay(200);
+              create_bogdan_ui();
               Serial.println("UI Created successfully!");
 
-              // 4. Reducem puterea de transmisie Wi-Fi pentru a preveni caderile de tensiune pe USB/Baterie
-              WiFi.setTxPower(WIFI_POWER_11dBm);
+              // 2. Pornire Wi-Fi cu Tx Power redus (evita Brownout)
               WiFi.mode(WIFI_STA);
+              WiFi.setTxPower(WIFI_POWER_8_5dBm);
               WiFi.begin(ssid, password);
-
-              Serial.print("Connecting to WiFi: ");
-              Serial.println(ssid);
-
-              int retry = 0;
-              while (WiFi.status() != WL_CONNECTED && retry < 20) {
-                  delay(500);
-                  Serial.print(".");
-                  retry++;
-              }
-
-              String ip_str = "";
-              if (WiFi.status() == WL_CONNECTED) {
-                  ip_str = WiFi.localIP().toString();
-                  Serial.println("\nWiFi Connected! IP: " + ip_str);
-              } else {
-                  ip_str = "Conexiune esuata";
-                  Serial.println("\nWiFi Connection Failed!");
-              }
-
-              // 5. Reconstruim ecranul cu IP-ul obtinut
-              build_bogdan_screen(ip_str.c_str());
+              Serial.println("Connecting to WiFi: " + String(ssid));
           }
 
           void loop() {
-              digitalWrite(1, HIGH);
-              delay(1000);
+              delay(100);
           }
           EOF
 
