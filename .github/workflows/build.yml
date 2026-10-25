@@ -26,24 +26,23 @@ jobs:
       - name: Install Project Libraries
         run: |
           mkdir -p ~/Arduino/libraries
-          # Copiere librarii interne daca exista in repo
           if [ -d "Arduino/libraries" ]; then
             cp -r Arduino/libraries/* ~/Arduino/libraries/ 2>/dev/null || true
           fi
-          # Instalare LVGL si ArduinoJson
           arduino-cli lib install "lvgl"@8.3.11
           arduino-cli lib install "ArduinoJson"@6.21.4
 
-      - name: Locate and Compile Demo Sketch
+      - name: Locate and Compile Display/LVGL Demo
         run: |
-          SKETCH_PATH=$(find Arduino -name "*.ino" | head -n 1)
+          # Cautam explicit exemplul cu LCD / LVGL / Display
+          SKETCH_PATH=$(find Arduino -type f -name "*.ino" | grep -Ei "lcd|lvgl|display|demo|touch" | head -n 1)
           if [ -z "$SKETCH_PATH" ]; then
-            echo "Nu s-a gasit niciun fisier .ino in Arduino/"
-            exit 1
+            SKETCH_PATH=$(find Arduino -type f -name "*.ino" | grep -v "05_WIFI_AP" | head -n 1)
           fi
-          echo "Compilare sketch: $SKETCH_PATH"
+          echo "Compilare sketch identificat: $SKETCH_PATH"
 
-          arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,MSYS=qio_opi,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M,PSRAM=opi \
+          # FQBN corectat pentru ESP32-S3 (16MB Flash, Octal PSRAM OPI)
+          arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M,PSRAM=opi \
             --output-dir build_output \
             "$SKETCH_PATH"
 
