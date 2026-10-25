@@ -22,7 +22,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           submodules: recursive
 
-      - name: Import Upstream Code & Decouple iFlytek
+      - name: Patch UI Layout, Gemini Credentials & Clean Chinese Stack
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -37,13 +37,12 @@ jobs:
             rm -rf temp_upstream
           fi
 
-          # 2. Creare director necesar pentru modulul Gemini
           mkdir -p esp32/components/muse/src
 
-          # 3. Neutralizare eroare pin flash SPI din led_status.c
+          # 2. Neutralizare eroare pin flash SPI din led_status.c
           find esp32/ -name "led_status.c" -exec sed -i 's/#error.*SPI flash pin.*/\/\/ bypassed SPI flash pin/' {} + 2>/dev/null || true
 
-          # 4. Creare gemini_engine.c stabil (scriere NVS curata, fara apeluri de Wi-Fi inainte de initializarea stivei)
+          # 3. Creare motor REST nativ C pentru Gemini 2.0 Flash
           cat << 'EOF' > esp32/components/muse/src/gemini_engine.c
           #include <stdio.h>
           #include <string.h>
@@ -77,18 +76,18 @@ jobs:
 
           void gemini_auto_init_nvs(void) {
               nvs_handle_t h;
-              // Salvare credentiale Wi-Fi
               if (nvs_open("wifi", NVS_READWRITE, &h) == ESP_OK) {
                   nvs_set_str(h, "ssid", W_SSID);
                   nvs_set_str(h, "password", W_PASS);
                   nvs_commit(h);
                   nvs_close(h);
               }
-              // Salvare cheie Gemini si marcare activ
               if (nvs_open("muse", NVS_READWRITE, &h) == ESP_OK) {
                   nvs_set_str(h, "token", G_KEY);
                   nvs_set_str(h, "device_token", G_KEY);
                   nvs_set_str(h, "api_key", G_KEY);
+                  nvs_set_str(h, "vm_id", "gemini-2.0-flash");
+                  nvs_set_str(h, "server", "generativelanguage.googleapis.com");
                   nvs_set_u8(h, "paired", 1);
                   nvs_set_u8(h, "activated", 1);
                   nvs_commit(h);
@@ -197,30 +196,84 @@ jobs:
           }
           EOF
 
-          # 5. Dezactivare pairing Muse si servere vechi
-          find esp32/components/muse/ -type f \( -name "*.c" -o -name "*.cpp" \) | while read -r f; do
-            sed -i 's/bool muse_is_paired.*/bool muse_is_paired(void) { return true; }/g' "$f"
-            sed -i 's/bool muse_is_activated.*/bool muse_is_activated(void) { return true; }/g' "$f"
-            sed -i 's/bool muse_app_is_paired.*/bool muse_app_is_paired(void) { return true; }/g' "$f"
-            sed -i 's/hatch.metaaivm.com/generativelanguage.googleapis.com/g' "$f"
-            sed -i 's/iat-api.xfyun.cn/generativelanguage.googleapis.com/g' "$f"
-            sed -i 's/api.sensenova.cn/generativelanguage.googleapis.com/g' "$f"
-            sed -i 's/讯飞拒绝连接/Eroare Server/g' "$f"
-          done
+          # 4. Modificare chirurgicala pentru afisaj split Tastatura + Input Box & Inlocuire elemente UI chinezesti
+          python3 - << 'PYEOF'
+          import os, re
 
-          # 6. Conectare precisa in app_main doar dupa nvs_flash_init
+          gemini_key = os.environ.get("GEMINI_KEY", "").strip()
+
+          for root, dirs, files in os.walk("esp32/components/muse"):
+              for file in files:
+                  if not file.endswith((".c", ".cpp", ".h")):
+                      continue
+                  p = os.path.join(root, file)
+                  with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                      content = f.read()
+                  orig = content
+
+                  # Redenumire etichete si adaptare completa la Google Gemini
+                  content = content.replace('"MUSE"', '"GEMINI AI"')
+                  content = content.replace('"Muse"', '"Gemini AI"')
+                  content = content.replace('"VM ID"', '"Model"')
+                  content = content.replace('"Device token"', '"Gemini Key"')
+                  content = content.replace("iFlytek • SenseNova", "Google Gemini 2.0")
+                  content = content.replace("iFlytek + SenseNova", "Google Gemini 2.0")
+                  content = content.replace("iFlytek", "Google Gemini")
+                  content = content.replace("SenseNova", "Google Gemini")
+                  content = content.replace("讯飞拒绝连接", "Eroare Gemini")
+                  content = content.replace("讯飞", "Gemini")
+                  content = content.replace("Pair with the Muse app", "Gemini 2.0 Flash Standalone")
+                  content = content.replace("Reset pairing", "Gemini Ready")
+
+                  # Pre-populare model si cheie daca structura este goala
+                  if "muse_settings" in file:
+                      content = content.replace('"iat-api.xfyun.cn"', '"generativelanguage.googleapis.com"')
+                      content = content.replace('"api.sensenova.cn"', '"generativelanguage.googleapis.com"')
+                      content = content.replace('"hatch.metaaivm.com"', '"generativelanguage.googleapis.com"')
+
+                  # Solutie pentru casuta de input si tastatura (afisaj impartit pe ecranul 640x172)
+                  # Plaseaza Input Box in stanga (205px) si Tastatura in dreapta (415px)
+                  def fix_kb_call(m):
+                      kb = m.group(1).strip()
+                      ta = m.group(2).strip()
+                      return (
+                          f"lv_keyboard_set_textarea({kb}, {ta});\n"
+                          f"    if ({kb} && {ta}) {{\n"
+                          f"        lv_obj_set_size({ta}, 205, 140);\n"
+                          f"        lv_obj_align({ta}, LV_ALIGN_LEFT_MID, 10, 0);\n"
+                          f"        lv_textarea_set_password_mode({ta}, false);\n"
+                          f"        lv_obj_clear_flag({ta}, LV_OBJ_FLAG_HIDDEN);\n"
+                          f"        lv_obj_set_size({kb}, 415, 172);\n"
+                          f"        lv_obj_align({kb}, LV_ALIGN_RIGHT_MID, 0, 0);\n"
+                          f"        lv_obj_clear_flag({kb}, LV_OBJ_FLAG_HIDDEN);\n"
+                          f"    }}"
+                      )
+
+                  content = re.sub(r'lv_keyboard_set_textarea\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([a-zA-Z0-9_>.-]+)\s*\);', fix_kb_call, content)
+
+                  # Bypass permanent asociere Muse
+                  content = re.sub(r'bool\s+muse_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_paired(void) { return true; }', content)
+                  content = re.sub(r'bool\s+muse_is_activated\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_activated(void) { return true; }', content)
+                  content = re.sub(r'bool\s+muse_app_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_app_is_paired(void) { return true; }', content)
+
+                  if content != orig:
+                      with open(p, "w", encoding="utf-8") as f:
+                          f.write(content)
+          PYEOF
+
+          # 5. Conectare precisa in app_main
           APP_MAIN_FILE=$(grep -rnwl "esp32" -e "app_main" | head -n 1)
           if [ -n "$APP_MAIN_FILE" ] && ! grep -q "gemini_auto_init_nvs" "$APP_MAIN_FILE"; then
             sed -i '1s/^/void gemini_auto_init_nvs(void);\n/' "$APP_MAIN_FILE"
             sed -i '/nvs_flash_init();/a \    gemini_auto_init_nvs();' "$APP_MAIN_FILE"
           fi
 
-          # 7. Salvare permanenta in repository
+          # 6. Salvare permanenta pe branch-ul main
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
           git checkout -B main || true
           git add esp32/
-          git commit -m "Fix bootloop and enforce native .bin files" || true
+          git commit -m "Split Wi-Fi keyboard layout and purge Chinese UI references" || true
           git push origin main || true
 
       - name: Build Native Firmware
@@ -240,7 +293,7 @@ jobs:
 
           idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" build
 
-      - name: Package Firmware Files (.bin)
+      - name: Package Standard Firmware Files (.bin)
         shell: bash
         run: |
           mkdir -p package_bin
