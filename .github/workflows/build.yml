@@ -19,7 +19,7 @@ jobs:
           repository: Eatin/muse-gadget-waveshare-349
           submodules: recursive
 
-      - name: Configure Gemini Engine and Side-by-Side UI
+      - name: Integrate Auto-WiFi, Preloaded Gemini Key & Screen Text Output
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -30,6 +30,12 @@ jobs:
 
           find esp32/ -name "led_status.c" -exec sed -i 's/#error.*SPI flash pin.*/\/\/ bypassed SPI flash pin/' {} + 2>/dev/null || true
 
+          # 1. Creare modul nativ C gemini_engine.c:
+          # - Salveaza automat SSID, Parola si Gemini API Key in NVS la boot
+          # - Conecteaza automat Wi-Fi la pornire
+          # - Testeaza automat cheia Gemini pe IP_EVENT_STA_GOT_IP
+          # - Preia audio PCM de la microfon, genereaza WAV Base64 si trimite catre Gemini 2.0 Flash REST
+          # - Extrage raspunsul text JSON si il afiseaza direct pe ecran prin LVGL
           cat << 'EOF' > esp32/components/muse/src/gemini_engine.c
           #include <stdio.h>
           #include <string.h>
@@ -41,6 +47,8 @@ jobs:
           #include "mbedtls/base64.h"
           #include "nvs_flash.h"
           #include "nvs.h"
+          #include "esp_wifi.h"
+          #include "esp_event.h"
           #include "esp_heap_caps.h"
           #include "freertos/FreeRTOS.h"
           #include "freertos/task.h"
@@ -55,20 +63,69 @@ jobs:
           EOF
 
           cat << 'EOF' >> esp32/components/muse/src/gemini_engine.c
+          extern void gemini_display_response_text(const char *text);
+
           static void* safe_alloc(size_t size) {
               void *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
               if (!ptr) ptr = malloc(size);
               return ptr;
           }
 
+          static void gemini_auto_test_task(void *pvParameters) {
+              vTaskDelay(pdMS_TO_TICKS(3000));
+              if (!G_KEY || strlen(G_KEY) < 10) {
+                  ESP_LOGW(TAG_G, "Cheie Gemini lipsa in GitHub Secrets!");
+                  gemini_display_response_text("Eroare: Cheia Gemini lipseste.");
+                  vTaskDelete(NULL);
+                  return;
+              }
+
+              char url[320];
+              snprintf(url, sizeof(url), "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash?key=%s", G_KEY);
+
+              esp_http_client_config_t config = {
+                  .url = url,
+                  .method = HTTP_METHOD_GET,
+                  .crt_bundle_attach = esp_crt_bundle_attach,
+                  .timeout_ms = 8000,
+                  .buffer_size = 1024,
+              };
+              esp_http_client_handle_t client = esp_http_client_init(&config);
+              esp_err_t err = esp_http_client_perform(client);
+              int status = esp_http_client_get_status_code(client);
+              esp_http_client_cleanup(client);
+
+              if (err == ESP_OK && status == 200) {
+                  ESP_LOGI(TAG_G, "Cheie Gemini validata cu succes (HTTP 200).");
+                  gemini_display_response_text("Gemini 2.0 Flash Conectat!");
+              } else {
+                  ESP_LOGE(TAG_G, "Validare cheie esuata: HTTP %d", status);
+                  char err_msg[64];
+                  snprintf(err_msg, sizeof(err_msg), "Eroare Gemini (HTTP %d)", status);
+                  gemini_display_response_text(err_msg);
+              }
+              vTaskDelete(NULL);
+          }
+
+          static void ip_event_handler(void* arg, esp_event_base_t event_base,
+                                      int32_t event_id, void* event_data) {
+              if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+                  ESP_LOGI(TAG_G, "Wi-Fi Conectat cu IP. Validare automata Gemini...");
+                  gemini_display_response_text("Wi-Fi Conectat. Validare Gemini...");
+                  xTaskCreate(gemini_auto_test_task, "g_test", 4096, NULL, 5, NULL);
+              }
+          }
+
           void gemini_auto_init_nvs(void) {
               nvs_handle_t h;
+              // 1. Salvare automata Wi-Fi
               if (nvs_open("wifi", NVS_READWRITE, &h) == ESP_OK) {
                   nvs_set_str(h, "ssid", W_SSID);
                   nvs_set_str(h, "password", W_PASS);
                   nvs_commit(h);
                   nvs_close(h);
               }
+              // 2. Salvare automata token Gemini
               if (nvs_open("muse", NVS_READWRITE, &h) == ESP_OK) {
                   nvs_set_str(h, "token", G_KEY);
                   nvs_set_str(h, "device_token", G_KEY);
@@ -80,6 +137,17 @@ jobs:
                   nvs_commit(h);
                   nvs_close(h);
               }
+
+              // 3. Conectare Wi-Fi automata imediata la pornire
+              wifi_config_t wcfg;
+              memset(&wcfg, 0, sizeof(wcfg));
+              strncpy((char*)wcfg.sta.ssid, W_SSID, sizeof(wcfg.sta.ssid));
+              strncpy((char*)wcfg.sta.password, W_PASS, sizeof(wcfg.sta.password));
+              wcfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+              esp_wifi_set_config(WIFI_IF_STA, &wcfg);
+
+              esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL, NULL);
+              esp_wifi_connect();
           }
 
           typedef struct {
@@ -90,6 +158,8 @@ jobs:
           static void gemini_process_audio_task(void *arg) {
               audio_task_args_t *args = (audio_task_args_t*)arg;
               if (!args) { vTaskDelete(NULL); return; }
+
+              gemini_display_response_text("Se proceseaza audio...");
 
               size_t wav_len = 44 + args->pcm_len;
               uint8_t *wav_buf = (uint8_t*)safe_alloc(wav_len);
@@ -138,7 +208,7 @@ jobs:
                       cJSON_AddItemToArray(parts, audio_part);
 
                       cJSON *text_part = cJSON_CreateObject();
-                      cJSON_AddStringToObject(text_part, "text", "Raspunde direct si scurt in limba romana.");
+                      cJSON_AddStringToObject(text_part, "text", "Raspunde direct si concis in limba romana.");
                       cJSON_AddItemToArray(parts, text_part);
 
                       char *post_data = cJSON_PrintUnformatted(root);
@@ -153,7 +223,7 @@ jobs:
                               .url = url,
                               .method = HTTP_METHOD_POST,
                               .crt_bundle_attach = esp_crt_bundle_attach,
-                              .timeout_ms = 18000,
+                              .timeout_ms = 22000,
                               .buffer_size = 4096,
                               .buffer_size_tx = 4096,
                           };
@@ -161,7 +231,50 @@ jobs:
                           esp_http_client_set_header(client, "Content-Type", "application/json");
                           esp_http_client_set_post_field(client, post_data, strlen(post_data));
 
-                          esp_http_client_perform(client);
+                          esp_err_t err = esp_http_client_perform(client);
+                          int status = esp_http_client_get_status_code(client);
+
+                          if (err == ESP_OK && status == 200) {
+                              int clen = esp_http_client_get_content_length(client);
+                              if (clen <= 0) clen = 8192;
+                              char *resp_buf = (char*)safe_alloc(clen + 1);
+                              if (resp_buf) {
+                                  int read_bytes = esp_http_client_read(client, resp_buf, clen);
+                                  resp_buf[read_bytes > 0 ? read_bytes : 0] = '\0';
+
+                                  cJSON *resp_json = cJSON_Parse(resp_buf);
+                                  char *gemini_answer = NULL;
+                                  if (resp_json) {
+                                      cJSON *cands = cJSON_GetObjectItem(resp_json, "candidates");
+                                      if (cands && cJSON_GetArraySize(cands) > 0) {
+                                          cJSON *c0 = cJSON_GetArrayItem(cands, 0);
+                                          cJSON *cnt = cJSON_GetObjectItem(c0, "content");
+                                          if (cnt) {
+                                              cJSON *pts = cJSON_GetObjectItem(cnt, "parts");
+                                              if (pts && cJSON_GetArraySize(pts) > 0) {
+                                                  cJSON *p0 = cJSON_GetArrayItem(pts, 0);
+                                                  cJSON *txt = cJSON_GetObjectItem(p0, "text");
+                                                  if (txt && txt->valuestring) {
+                                                      gemini_answer = strdup(txt->valuestring);
+                                                  }
+                                              }
+                                          }
+                                      }
+                                      cJSON_Delete(resp_json);
+                                  }
+                                  if (gemini_answer) {
+                                      gemini_display_response_text(gemini_answer);
+                                      free(gemini_answer);
+                                  } else {
+                                      gemini_display_response_text("Gemini nu a returnat text.");
+                                  }
+                                  free(resp_buf);
+                              }
+                          } else {
+                              char err_buf[64];
+                              snprintf(err_buf, sizeof(err_buf), "Eroare Gemini (HTTP %d)", status);
+                              gemini_display_response_text(err_buf);
+                          }
                           free(post_data);
                           esp_http_client_cleanup(client);
                       }
@@ -185,10 +298,41 @@ jobs:
           }
           EOF
 
+          # 2. Patch-uirea surselor existente:
+          # - Inserare eticheta LVGL pentru afisarea textului pe ecranul 640x172
+          # - Redirectionarea callback-urilor audio catre gemini_dispatch_audio
+          # - Pastrarea layout-ului tastaturii Side-by-Side (205px stanga, 415px dreapta)
           python3 - << 'PYEOF'
           import os, re
 
           helpers = """
+          #include "lvgl.h"
+
+          static lv_obj_t *s_gemini_label = NULL;
+
+          void gemini_display_response_text(const char *text) {
+              if (!text) return;
+              lv_obj_t *scr = lv_scr_act();
+              if (!scr) return;
+              if (!s_gemini_label) {
+                  s_gemini_label = lv_label_create(scr);
+                  lv_obj_set_size(s_gemini_label, 620, 160);
+                  lv_obj_set_pos(s_gemini_label, 10, 6);
+                  lv_obj_set_style_bg_color(s_gemini_label, lv_color_hex(0x0F172A), 0);
+                  lv_obj_set_style_bg_opa(s_gemini_label, LV_OPA_80, 0);
+                  lv_obj_set_style_border_color(s_gemini_label, lv_color_hex(0x3B82F6), 0);
+                  lv_obj_set_style_border_width(s_gemini_label, 2, 0);
+                  lv_obj_set_style_radius(s_gemini_label, 8, 0);
+                  lv_obj_set_style_text_color(s_gemini_label, lv_color_hex(0xFFFFFF), 0);
+                  lv_obj_set_style_text_font(s_gemini_label, &lv_font_montserrat_12, 0);
+                  lv_obj_set_style_pad_all(s_gemini_label, 8, 0);
+                  lv_label_set_long_mode(s_gemini_label, LV_LABEL_LONG_WRAP);
+              }
+              lv_label_set_text(s_gemini_label, text);
+              lv_obj_clear_flag(s_gemini_label, LV_OBJ_FLAG_HIDDEN);
+              lv_obj_move_foreground(s_gemini_label);
+          }
+
           static void __attribute__((unused)) _muse_parent_del_cb(lv_event_t * e) {
               lv_obj_t * target = (lv_obj_t *)lv_event_get_user_data(e);
               if (target) {
@@ -202,18 +346,10 @@ jobs:
               lv_obj_t * kb = lv_event_get_target(e);
               lv_obj_t * ta = (lv_obj_t *)lv_event_get_user_data(e);
               if (code == LV_EVENT_CANCEL) {
-                  if (kb) {
-                      lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
-                  }
+                  if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
               } else if (code == LV_EVENT_READY) {
-                  if (ta) {
-                      lv_obj_add_flag(ta, LV_OBJ_FLAG_HIDDEN);
-                      lv_obj_del_async(ta);
-                  }
-                  if (kb) {
-                      lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
-                      lv_obj_del_async(kb);
-                  }
+                  if (ta) { lv_obj_add_flag(ta, LV_OBJ_FLAG_HIDDEN); lv_obj_del_async(ta); }
+                  if (kb) { lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN); lv_obj_del_async(kb); }
               }
           }
 
@@ -248,11 +384,7 @@ jobs:
                       s = re.sub(r"\bint\s+w\s*=\s*muse_board->width[^;]*;", "__attribute__((unused)) int w = 415;", s)
                       s = re.sub(r"\bint\s+h\s*=\s*muse_board->height[^;]*;", "__attribute__((unused)) int h = 172;", s)
 
-                      s = re.sub(
-                          r"lv_textarea_set_password_mode\s*\(\s*([^,;]+)\s*,\s*[^)]+\s*\);",
-                          r"lv_textarea_set_password_mode(\1, false); lv_textarea_set_password_show_time(\1, 0);",
-                          s
-                      )
+                      s = re.sub(r"lv_textarea_set_password_mode\s*\(\s*([^,;]+)\s*,\s*[^)]+\s*\);", r"lv_textarea_set_password_mode(\1, false); lv_textarea_set_password_show_time(\1, 0);", s)
 
                       def patch_list_btn(m):
                           v = m.group(1).strip()
@@ -270,6 +402,7 @@ jobs:
                       s = re.sub(r"(lv_obj_set_style_pad_row\s*\([^,]+,\s*)(?:[4-9]|[1-9][0-9])(\s*,)", r"\g<1>2\2", s)
                       s = re.sub(r"&lv_font_montserrat_(?:14|16|18|20|22|24|28)", r"&lv_font_montserrat_12", s)
 
+                      # Layout Side-by-Side: Textarea stanga (205px), Tastatura dreapta (415px)
                       def patch_kb_ta(m):
                           kb = m.group(1).strip()
                           ta = m.group(2).strip()
@@ -316,6 +449,7 @@ jobs:
                       s = re.sub(r"lv_obj_set_size\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);", s, flags=re.IGNORECASE)
                       s = re.sub(r"lv_obj_set_height\s*\(\s*([^,;]*(?:kb|keyboard)[^,;]*)\s*,[^;]+;", r"lv_obj_set_size(\1, 415, 172); lv_obj_align(\1, LV_ALIGN_RIGHT_MID, 0, 0);", s, flags=re.IGNORECASE)
 
+                      # Redenumiri UI
                       s = s.replace('"MUSE"', '"GEMINI AI"')
                       s = s.replace('"Muse"', '"Gemini AI"')
                       s = s.replace('"VM ID"', '"Model"')
@@ -340,6 +474,13 @@ jobs:
                       s = re.sub(r'bool\s+muse_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_paired(void) { return true; }', s)
                       s = re.sub(r'bool\s+muse_is_activated\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_activated(void) { return true; }', s)
                       s = re.sub(r'bool\s+muse_app_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_app_is_paired(void) { return true; }', s)
+
+                      # Legare captura audio microfon la gemini_dispatch_audio
+                      if "voice" in file.lower() or "audio" in file.lower() or "record" in file.lower():
+                          if "gemini_dispatch_audio" not in s:
+                              s = "extern void gemini_dispatch_audio(const uint8_t *pcm_data, size_t pcm_len);\n" + s
+                          s = re.sub(r'(?:ws_client_send_bin|muse_cn_send_audio|audio_send_pcm)\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\);',
+                                     r'gemini_dispatch_audio((const uint8_t*)\1, (size_t)\2);', s)
 
                       if s != orig:
                           with open(p, "w", encoding="utf-8") as f:
