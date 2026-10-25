@@ -22,20 +22,12 @@ jobs:
 
       - name: Install Graphic and JSON Libraries
         run: |
+          mkdir -p ~/Arduino/libraries
           arduino-cli lib install "lvgl"@8.3.11
           arduino-cli lib install "ArduinoJson"@6.21.4
 
-      - name: Generate Complete Gemini OS Application
-        shell: bash
-        env:
-          GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
-          WIFI_SSID: ${{ secrets.WIFI_SSID || 'TP-Link_2.4G_9318_Guest' }}
-          WIFI_PASSWORD: ${{ secrets.WIFI_PASSWORD || 'revelion' }}
-        run: |
-          mkdir -p gemini_os
-
-          # 1. Configurare lv_conf.h pentru afisaj 16-bit color si fonturi
-          cat << 'EOF' > gemini_os/lv_conf.h
+          # LVGL cauta lv_conf.h langa directorul lvgl (~/Arduino/libraries/)
+          cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
           #ifndef LV_CONF_H
           #define LV_CONF_H
           #define LV_COLOR_DEPTH 16
@@ -55,7 +47,16 @@ jobs:
           #endif
           EOF
 
-          # 2. Generare cod sursa complet C++ / Arduino
+      - name: Generate Complete Gemini OS Application
+        shell: bash
+        env:
+          GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+          WIFI_SSID: ${{ secrets.WIFI_SSID || 'TP-Link_2.4G_9318_Guest' }}
+          WIFI_PASSWORD: ${{ secrets.WIFI_PASSWORD || 'revelion' }}
+        run: |
+          mkdir -p gemini_os
+          cp ~/Arduino/libraries/lv_conf.h gemini_os/lv_conf.h
+
           cat << 'EOF' > gemini_os/gemini_os.ino
           #include <Arduino.h>
           #include <WiFi.h>
@@ -67,7 +68,6 @@ jobs:
 
           EOF
 
-          # Injectare date secrete Wi-Fi si Gemini
           cat << EOF >> gemini_os/gemini_os.ino
           const char* ssid = "${WIFI_SSID}";
           const char* password = "${WIFI_PASSWORD}";
@@ -86,7 +86,6 @@ jobs:
           static lv_obj_t *kb;
           static lv_obj_t *lbl_status;
 
-          // Rutina apel Gemini 2.0 Flash REST API
           void call_gemini(const char* prompt) {
               if (WiFi.status() != WL_CONNECTED) {
                   lv_textarea_set_text(ta_chat, "Eroare: Wi-Fi neconectat!");
@@ -97,7 +96,7 @@ jobs:
               lv_timer_handler();
 
               WiFiClientSecure client;
-              client.setInsecure(); // Utilizare conexiune securizata
+              client.setInsecure();
 
               HTTPClient http;
               String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + String(gemini_api_key);
@@ -125,10 +124,10 @@ jobs:
                               lv_textarea_set_text(ta_chat, reply);
                               lv_label_set_text(lbl_status, "Conectat");
                           } else {
-                              lv_textarea_set_text(ta_chat, "Raspuns invalid primit de la API.");
+                              lv_textarea_set_text(ta_chat, "Raspuns invalid de la API.");
                           }
                       } else {
-                          lv_textarea_set_text(ta_chat, "Eroare la parsarea JSON.");
+                          lv_textarea_set_text(ta_chat, "Eroare parsare JSON.");
                       }
                   } else {
                       String err = "Eroare HTTP: " + String(httpCode);
@@ -139,11 +138,8 @@ jobs:
               }
           }
 
-          // Eveniment tastatura LVGL (Enter / Submit)
           static void kb_event_cb(lv_event_t * e) {
               lv_event_code_t code = lv_event_get_code(e);
-              lv_obj_t * target_kb = lv_event_get_target(e);
-
               if (code == LV_EVENT_READY) {
                   const char * txt = lv_textarea_get_text(ta_chat);
                   if (txt && strlen(txt) > 0) {
@@ -152,18 +148,15 @@ jobs:
               }
           }
 
-          // Initializare Interfata Utilizator (Ecran 640 x 172)
           void build_ui() {
               lv_obj_t *scr = lv_scr_act();
               lv_obj_set_style_bg_color(scr, lv_color_hex(0x101216), 0);
 
-              // Bara de stare sus
               lbl_status = lv_label_create(scr);
               lv_label_set_text(lbl_status, "Initializare Wi-Fi...");
               lv_obj_set_style_text_color(lbl_status, lv_color_hex(0x00D2FF), 0);
               lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 10, 4);
 
-              // Zona de text dialog (Stanga: 260px latime, 140px inaltime)
               ta_chat = lv_textarea_create(scr);
               lv_obj_set_size(ta_chat, 260, 138);
               lv_obj_align(ta_chat, LV_ALIGN_BOTTOM_LEFT, 10, -6);
@@ -172,7 +165,6 @@ jobs:
               lv_obj_set_style_text_color(ta_chat, lv_color_hex(0xFFFFFF), 0);
               lv_obj_set_style_border_color(ta_chat, lv_color_hex(0x3B4252), 0);
 
-              // Tastatura tactila completa (Dreapta: 350px latime, 138px inaltime)
               kb = lv_keyboard_create(scr);
               lv_obj_set_size(kb, 350, 138);
               lv_obj_align(kb, LV_ALIGN_BOTTOM_RIGHT, -10, -6);
@@ -188,11 +180,9 @@ jobs:
           void setup() {
               Serial.begin(115200);
 
-              // Activare iluminare ecran Waveshare V2
               pinMode(LCD_BL_PIN, OUTPUT);
               digitalWrite(LCD_BL_PIN, HIGH);
 
-              // Initializare buffer si driver grafic LVGL
               lv_init();
               lv_disp_draw_buf_init(&draw_buf, buf, NULL, LCD_WIDTH * 20);
 
@@ -206,7 +196,6 @@ jobs:
 
               build_ui();
 
-              // Conectare automata la retea
               WiFi.begin(ssid, password);
               while (WiFi.status() != WL_CONNECTED && millis() < 12000) {
                   delay(250);
