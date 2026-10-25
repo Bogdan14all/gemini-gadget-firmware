@@ -29,18 +29,21 @@ jobs:
           WIFI_SSID: ${{ secrets.WIFI_SSID || 'TP-Link_2.4G_9318_Guest' }}
           WIFI_PASSWORD: ${{ secrets.WIFI_PASSWORD || 'revelion' }}
         run: |
-          # 1. Daca esp32 nu exista local in repo, il clonam de la Eatin
+          # 1. Clonare structura completa daca nu exista local
           if [ ! -d "esp32" ]; then
             echo "Clonare cod sursa original Waveshare..."
             git clone --recursive https://github.com/Eatin/muse-gadget-waveshare-349.git temp_upstream
-            cp -r temp_upstream/* .
+            cp -a temp_upstream/. .
             rm -rf temp_upstream
           fi
 
-          # 2. Neutralizare eroare pin flash SPI din led_status.c
+          # 2. Creare director necesar pentru modulul Gemini
+          mkdir -p esp32/components/muse/src
+
+          # 3. Neutralizare eroare pin flash SPI din led_status.c
           find esp32/ -name "led_status.c" -exec sed -i 's/#error.*SPI flash pin.*/\/\/ bypassed SPI flash pin/' {} + 2>/dev/null || true
 
-          # 3. Creare gemini_engine.c pur (fara modificari pe interfata grafica sau fonturi)
+          # 4. Creare gemini_engine.c pur (fara dependente de interfata grafica)
           cat << 'EOF' > esp32/components/muse/src/gemini_engine.c
           #include <stdio.h>
           #include <string.h>
@@ -83,7 +86,7 @@ jobs:
                   nvs_commit(h);
                   nvs_close(h);
               }
-              // Salvare token Gemini si marcare activ
+              // Salvare stricta Gemini API Key
               if (nvs_open("muse", NVS_READWRITE, &h) == ESP_OK) {
                   nvs_set_str(h, "token", G_KEY);
                   nvs_set_str(h, "device_token", G_KEY);
@@ -204,8 +207,8 @@ jobs:
           }
           EOF
 
-          # 4. Dezactivare logica de pairing si eliminare endpoint-uri chinezesti din C
-          find esp32/components/muse/src/ -type f -name "*.c" -o -name "*.cpp" | while read -r f; do
+          # 5. Dezactivare logica pairing Muse si servere chinezesti
+          find esp32/components/muse/ -type f \( -name "*.c" -o -name "*.cpp" \) | while read -r f; do
             sed -i 's/bool muse_is_paired.*/bool muse_is_paired(void) { return true; }/g' "$f"
             sed -i 's/bool muse_is_activated.*/bool muse_is_activated(void) { return true; }/g' "$f"
             sed -i 's/bool muse_app_is_paired.*/bool muse_app_is_paired(void) { return true; }/g' "$f"
@@ -215,16 +218,17 @@ jobs:
             sed -i 's/讯飞拒绝连接/Eroare Server/g' "$f"
           done
 
-          # 5. Legare auto_init in app_main
-          MAIN_C=$(find esp32/main/ -name "*.c" | head -n 1)
-          if ! grep -q "gemini_auto_init_nvs" "$MAIN_C"; then
-            sed -i '1s/^/void gemini_auto_init_nvs(void);\n/' "$MAIN_C"
-            sed -i '/nvs_flash_init();/a \    gemini_auto_init_nvs();' "$MAIN_C"
+          # 6. Conectare precisa la app_main
+          APP_MAIN_FILE=$(grep -rnwl "esp32" -e "app_main" | head -n 1)
+          if [ -n "$APP_MAIN_FILE" ] && ! grep -q "gemini_auto_init_nvs" "$APP_MAIN_FILE"; then
+            sed -i '1s/^/void gemini_auto_init_nvs(void);\n/' "$APP_MAIN_FILE"
+            sed -i '/nvs_flash_init();/a \    gemini_auto_init_nvs();' "$APP_MAIN_FILE"
           fi
 
-          # 6. Salvare permanenta in repository
+          # 7. Salvare permanenta in repository
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
+          git checkout -B main || true
           git add esp32/
           git commit -m "Import clean Waveshare 3.49 stack with native Gemini engine" || true
           git push origin main || true
