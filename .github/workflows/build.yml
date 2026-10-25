@@ -89,6 +89,10 @@ jobs:
         with open(sketch_path, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
 
+        # Includem explicit <lvgl.h> la inceputul fisierului .ino
+        if "#include <lvgl.h>" not in content:
+            content = "#include <lvgl.h>\n" + content
+
         custom_screen_func = """
         // ==========================================
         // ECRAN TEST: GEMINI OS BY BOGDAN
