@@ -38,13 +38,8 @@ jobs:
           SKETCH_PATH=$(find Arduino -type f -name "*.ino" | grep -Ei "10_LVGL|lcd|display|demo" | head -n 1)
           echo "Compilare sketch identificat: $SKETCH_PATH"
 
-          # Detectare automata schema de partitii valida pentru 16MB sau huge_app
-          PART_SCHEME=$(arduino-cli board details -b esp32:esp32:esp32s3 | grep -i "PartitionScheme" -A 10 | grep -Ei "huge|16m|default" | head -n 1 | awk '{print $1}')
-          if [ -n "$PART_SCHEME" ]; then
-            FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PartitionScheme=${PART_SCHEME},PSRAM=opi"
-          else
-            FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi"
-          fi
+          # FQBN standard fara PartitionScheme explicit (foloseste automat schema default interna a placii)
+          FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi"
           echo "Utilizare FQBN: $FQBN"
 
           arduino-cli compile --fqbn "$FQBN" \
