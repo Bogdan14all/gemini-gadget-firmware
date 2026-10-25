@@ -8,7 +8,7 @@ jobs:
     name: Build Waveshare 3.49 V2 Gemini Firmware
     runs-on: ubuntu-latest
     container:
-      image: espressif/idf:v6.0.1
+      image: espressif/idf:v5.3.1
     steps:
       - name: Safe Git Directory
         run: git config --global --add safe.directory '*'
@@ -19,7 +19,7 @@ jobs:
           repository: waveshareteam/ESP32-S3-Touch-LCD-3.49-V2
           submodules: recursive
 
-      - name: Integrate Clean Gemini Assistant with Complete Dependencies
+      - name: Integrate Clean Gemini Assistant with Verified IDF Dependencies
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -35,7 +35,7 @@ jobs:
           mkdir -p "$IDF_DIR/main"
 
           if [ -f "$IDF_DIR/main/CMakeLists.txt" ]; then
-            sed -i 's/idf_component_register(/idf_component_register( REQUIRES cJSON esp_http_client nvs_flash esp_wifi esp_event /g' "$IDF_DIR/main/CMakeLists.txt"
+            sed -i 's/idf_component_register(/idf_component_register( REQUIRES json esp_http_client nvs_flash esp_wifi esp_event /g' "$IDF_DIR/main/CMakeLists.txt"
             sed -i 's/SRCS /SRCS "gemini_assistant.c" /g' "$IDF_DIR/main/CMakeLists.txt"
           fi
 
