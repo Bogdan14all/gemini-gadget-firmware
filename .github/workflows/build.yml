@@ -113,7 +113,7 @@ jobs:
                 lv_obj_t *lbl_sub = lv_label_create(scr);
                 lv_label_set_text(lbl_sub, "Boot OK | Waveshare 3.49 V2");
                 lv_obj_set_style_text_color(lbl_sub, lv_color_hex(0x22C55E), 0);
-                lv_obj_align(lbl_sub, LV_ALIGN_CENTER, 0, 32);
+                lv_obj_set_pos(lbl_sub, 210, 110);
             }
         }
         """
