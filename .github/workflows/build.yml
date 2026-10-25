@@ -39,36 +39,32 @@ jobs:
           if [ -d "Arduino/libraries" ]; then
             cp -r Arduino/libraries/* ~/Arduino/libraries/ 2>/dev/null || true
           fi
-          # Instalam LVGL v9
           arduino-cli lib install "lvgl"@9.1.0 2>/dev/null || true
 
-          # Copiem fisierul de configurare lv_conf.h in ~/Arduino/libraries/ (unde il cauta ../../lv_conf.h)
-          # si in toate directoarele sketch-urilor
+          # Copiem fisierul lv_conf.h in ~/Arduino/libraries/ (unde il cauta ../../lv_conf.h)
           if [ -f "Arduino/libraries/lv_conf.h" ]; then
             cp "Arduino/libraries/lv_conf.h" ~/Arduino/libraries/lv_conf.h
           elif [ -f "Arduino/examples/10_LVGL_V9_Test/lv_conf.h" ]; then
             cp "Arduino/examples/10_LVGL_V9_Test/lv_conf.h" ~/Arduino/libraries/lv_conf.h
           else
-            # Generam un lv_conf.h valid pentru LVGL v9 daca nu exista
             cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
-#ifndef LV_CONF_H
-#define LV_CONF_H
-#define LV_COLOR_DEPTH 16
-#define LV_COLOR_16_SWAP 1
-#define LV_MEM_CUSTOM 0
-#define LV_MEM_SIZE (64U * 1024U)
-#define LV_TICK_CUSTOM 1
-#define LV_TICK_CUSTOM_INCLUDE "Arduino.h"
-#define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
-#define LV_FONT_MONTSERRAT_12 1
-#define LV_FONT_MONTSERRAT_14 1
-#define LV_FONT_MONTSERRAT_16 1
-#define LV_USE_LABEL 1
-#endif
-EOF
+            #ifndef LV_CONF_H
+            #define LV_CONF_H
+            #define LV_COLOR_DEPTH 16
+            #define LV_COLOR_16_SWAP 1
+            #define LV_MEM_CUSTOM 0
+            #define LV_MEM_SIZE (64U * 1024U)
+            #define LV_TICK_CUSTOM 1
+            #define LV_TICK_CUSTOM_INCLUDE "Arduino.h"
+            #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
+            #define LV_FONT_MONTSERRAT_12 1
+            #define LV_FONT_MONTSERRAT_14 1
+            #define LV_FONT_MONTSERRAT_16 1
+            #define LV_USE_LABEL 1
+            #endif
+          EOF
           fi
 
-          # Ne asiguram ca e prezent si in directorul librariei lvgl si in cel al sketch-ului
           cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/lv_conf.h 2>/dev/null || true
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
 
@@ -79,10 +75,8 @@ EOF
           echo "Sketch utilizat: $SKETCH_PATH"
           SKETCH_DIR=$(dirname "$SKETCH_PATH")
 
-          # 1. Asigurare compatibilitate driver i2c
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.cpp" -o -name "*.c" \) -exec sed -i 's/driver\/i2c_master.h/driver\/i2c.h/g' {} + 2>/dev/null || true
 
-          # 2. Patch pe sketch pentru a afisa textul: "Gemini OS by Bogdan"
           python3 - << 'PYEOF'
           import os
 
@@ -165,7 +159,6 @@ EOF
           echo "Partitions (0x8000): $PARTITIONS"
           echo "App (0x10000): $APP_BIN"
 
-          # Imbinare automata intr-un singur fisier la 0x0
           esptool.py --chip esp32s3 merge_bin \
             -o package_bin/gemini-os-full-0x0.bin \
             --flash_mode keep \
@@ -175,7 +168,6 @@ EOF
             0x8000 "$PARTITIONS" \
             0x10000 "$APP_BIN"
 
-          # Arhivare: doar fisierul .bin unic in arhiva zip
           cd package_bin
           zip gemini-os-firmware-0x0.zip gemini-os-full-0x0.bin
           cd ..
