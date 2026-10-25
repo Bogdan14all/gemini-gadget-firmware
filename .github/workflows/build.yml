@@ -43,7 +43,7 @@ jobs:
           # 3. Neutralizare eroare pin flash SPI din led_status.c
           find esp32/ -name "led_status.c" -exec sed -i 's/#error.*SPI flash pin.*/\/\/ bypassed SPI flash pin/' {} + 2>/dev/null || true
 
-          # 4. Creare gemini_engine.c pur (fara dependente de interfata grafica)
+          # 4. Creare gemini_engine.c pur
           cat << 'EOF' > esp32/components/muse/src/gemini_engine.c
           #include <stdio.h>
           #include <string.h>
@@ -250,13 +250,27 @@ jobs:
 
           idf.py -B build-waveshare -DIDF_TARGET=esp32s3 -DSDKCONFIG_DEFAULTS="$DEFAULTS" build
 
-      - name: Package Firmware Files
+      - name: Package Firmware Files (Safe Non-Executable Format)
         shell: bash
         run: |
+          . $IDF_PATH/export.sh
           mkdir -p package_bin
-          cp esp32/build-waveshare/bootloader/bootloader.bin package_bin/ 2>/dev/null || true
-          cp esp32/build-waveshare/partition_table/partition-table.bin package_bin/ 2>/dev/null || true
-          cp esp32/build-waveshare/*.bin package_bin/ 2>/dev/null || true
+
+          BOOT_BIN=$(find esp32/build-waveshare -name "bootloader.bin" | head -n 1)
+          PART_BIN=$(find esp32/build-waveshare -name "partition-table.bin" | head -n 1)
+          OTA_BIN=$(find esp32/build-waveshare -name "ota_data_initial.bin" | head -n 1)
+          APP_BIN=$(find esp32/build-waveshare -name "muse-gadget.bin" | head -n 1)
+
+          cp "$BOOT_BIN" package_bin/bootloader.rom
+          cp "$PART_BIN" package_bin/partition-table.rom
+          [ -n "$OTA_BIN" ] && cp "$OTA_BIN" package_bin/ota_data_initial.rom
+          cp "$APP_BIN" package_bin/gemini-gadget.rom
+
+          # Generare binar complet intr-un singur fisier flashabil la adresa 0x0
+          MERGE_ARGS="0x0 $BOOT_BIN 0x10000 $PART_BIN"
+          [ -n "$OTA_BIN" ] && MERGE_ARGS="$MERGE_ARGS 0x1d000 $OTA_BIN"
+          MERGE_ARGS="$MERGE_ARGS 0x20000 $APP_BIN"
+          esptool.py --chip esp32s3 merge_bin -o package_bin/gemini_full_0x0.rom --flash_mode dio --flash_freq 80m --flash_size keep $MERGE_ARGS || true
 
           cat << 'EOF' > package_bin/flasher_args.json
           {
@@ -269,20 +283,10 @@ jobs:
                   "flash_freq": "80m"
               },
               "flash_files" : {
-                  "0x0" : "bootloader.bin",
-                  "0x10000" : "partition-table.bin",
-                  "0x1d000" : "ota_data_initial.bin",
-                  "0x20000" : "muse-gadget.bin"
-              },
-              "bootloader" : { "offset" : "0x0", "file" : "bootloader.bin", "encrypted" : "false" },
-              "partition-table" : { "offset" : "0x10000", "file" : "partition-table.bin", "encrypted" : "false" },
-              "otadata" : { "offset" : "0x1d000", "file" : "ota_data_initial.bin", "encrypted" : "false" },
-              "app" : { "offset" : "0x20000", "file" : "muse-gadget.bin", "encrypted" : "false" },
-              "extra_esptool_args" : {
-                  "after"  : "hard-reset",
-                  "before" : "default-reset",
-                  "stub"   : true,
-                  "chip"   : "esp32s3"
+                  "0x0" : "bootloader.rom",
+                  "0x10000" : "partition-table.rom",
+                  "0x1d000" : "ota_data_initial.rom",
+                  "0x20000" : "gemini-gadget.rom"
               }
           }
           EOF
@@ -290,6 +294,6 @@ jobs:
       - name: Upload Clean Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-waveshare-349
+          name: waveshare-gemini-package
           path: package_bin/
           if-no-files-found: error
