@@ -43,7 +43,7 @@ jobs:
 
           arduino-cli lib install "lvgl"@9.1.0 2>/dev/null || true
 
-          # 1. Configurare lv_conf.h completa si robusta pentru LVGL v9
+          # 1. Configurare lv_conf.h completa: font implicit montserrat_20, cover background
           cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
           #ifndef LV_CONF_H
           #define LV_CONF_H
@@ -54,9 +54,10 @@ jobs:
           #define LV_TICK_CUSTOM 1
           #define LV_TICK_CUSTOM_INCLUDE "Arduino.h"
           #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
-          #define LV_FONT_MONTSERRAT_12 1
           #define LV_FONT_MONTSERRAT_14 1
           #define LV_FONT_MONTSERRAT_16 1
+          #define LV_FONT_MONTSERRAT_20 1
+          #define LV_FONT_DEFAULT &lv_font_montserrat_20
           #define LV_USE_LABEL 1
           #define LV_USE_OBJ_ID_BUILTIN 0
           #define LV_USE_OBJ_PROPERTY 0
@@ -72,14 +73,14 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/lv_conf.h 2>/dev/null || true
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
 
-          # Stergem modulele neutilizate din LVGL care declanseaza scanari libdetect defectuoase
+          # Stergere foldere demo neutilizate
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Configure Display to Show 'Gemini OS by Bogdan'
+      - name: Configure Display (Light Blue Background & Black Text)
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
-          echo "Curatare referinte demo si aplicare ecran Bogdan in $SKETCH_DIR..."
+          echo "Configurare culori si ecran Bogdan in $SKETCH_DIR..."
 
           # Dezactivare referinte demo
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include "demos\/lv_demos.h"/\/\/ #include "demos\/lv_demos.h"/g' {} + 2>/dev/null || true
@@ -90,7 +91,7 @@ jobs:
           sed -i 's/LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)/2/g' "$SKETCH_DIR/lvgl_port.c" 2>/dev/null || true
           sed -i 's/lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)/2/g' "$SKETCH_DIR/lvgl_port.c" 2>/dev/null || true
 
-          # Dezactivare compilare lv_obj_id_builtin.c daca este scanat eronat
+          # Neutralizare modul lv_obj_id_builtin.c
           if [ -f ~/Arduino/libraries/lvgl/src/core/lv_obj_id_builtin.c ]; then
             echo "// disabled" > ~/Arduino/libraries/lvgl/src/core/lv_obj_id_builtin.c
           fi
@@ -107,6 +108,7 @@ jobs:
 
           // ==========================================
           // ECRAN TEST: GEMINI OS BY BOGDAN
+          // Fundal Albastru Deschis (#38BDF8) & Scris Negru (#000000)
           // ==========================================
           void show_bogdan_screen() {
               pinMode(1, OUTPUT);
@@ -116,13 +118,20 @@ jobs:
               if (!scr) scr = lv_scr_act();
               if (scr) {
                   lv_obj_clean(scr);
-                  lv_obj_set_style_bg_color(scr, lv_color_hex(0x0A0E17), 0);
 
-                  // 1. Titlu Centrat: "Gemini OS by Bogdan"
+                  // 1. Fundal Albastru Deschis Opaque (LV_OPA_COVER obligatoriu pentru a picta tot bufferul)
+                  lv_obj_set_style_bg_color(scr, lv_color_hex(0x38BDF8), 0);
+                  lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+                  // 2. Titlu Principal: "Gemini OS by Bogdan" (Text Negru, Font Montserrat 20)
                   lv_obj_t *lbl_title = lv_label_create(scr);
                   lv_label_set_text(lbl_title, "Gemini OS by Bogdan");
-                  lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x00E5FF), 0);
+                  lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x000000), 0);
+                  lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_20, 0);
                   lv_obj_center(lbl_title);
+
+                  // Fortam reimprospatarea imediata
+                  lv_refr_now(NULL);
               }
           }
           '''
@@ -134,6 +143,7 @@ jobs:
               else:
                   content = custom_screen_func + "\n" + content
 
+          # In setup(), apelam show_bogdan_screen() la finalul initializarii
           setup_body_start = content.find("void setup()")
           if setup_body_start != -1:
               brace_start = content.find("{", setup_body_start)
@@ -148,6 +158,13 @@ jobs:
                       i += 1
                   setup_end = i - 1
                   content = content[:setup_end] + "\n    show_bogdan_screen();\n" + content[setup_end:]
+
+          # Ne asiguram ca in loop() se apeleaza lv_timer_handler()
+          loop_body_start = content.find("void loop()")
+          if loop_body_start != -1:
+              brace_start = content.find("{", loop_body_start)
+              if brace_start != -1:
+                  content = content[:brace_start + 1] + "\n    lv_timer_handler(); delay(5);\n" + content[brace_start + 1:]
 
           with open(sketch_path, "w", encoding="utf-8") as f:
               f.write(content)
