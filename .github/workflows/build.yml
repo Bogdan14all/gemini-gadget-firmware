@@ -33,7 +33,8 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
-      - name: Install Project Libraries & Configure lv_conf.h
+      - name: Install Project Libraries & Setup LVGL v9 Configuration
+        shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
           if [ -d "Arduino/libraries" ]; then
@@ -41,41 +42,42 @@ jobs:
           fi
           arduino-cli lib install "lvgl"@9.1.0 2>/dev/null || true
 
-          # Copiem fisierul lv_conf.h in ~/Arduino/libraries/ (unde il cauta ../../lv_conf.h)
-          if [ -f "Arduino/libraries/lv_conf.h" ]; then
-            cp "Arduino/libraries/lv_conf.h" ~/Arduino/libraries/lv_conf.h
-          elif [ -f "Arduino/examples/10_LVGL_V9_Test/lv_conf.h" ]; then
-            cp "Arduino/examples/10_LVGL_V9_Test/lv_conf.h" ~/Arduino/libraries/lv_conf.h
-          else
-            cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
-            #ifndef LV_CONF_H
-            #define LV_CONF_H
-            #define LV_COLOR_DEPTH 16
-            #define LV_COLOR_16_SWAP 1
-            #define LV_MEM_CUSTOM 0
-            #define LV_MEM_SIZE (64U * 1024U)
-            #define LV_TICK_CUSTOM 1
-            #define LV_TICK_CUSTOM_INCLUDE "Arduino.h"
-            #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
-            #define LV_FONT_MONTSERRAT_12 1
-            #define LV_FONT_MONTSERRAT_14 1
-            #define LV_FONT_MONTSERRAT_16 1
-            #define LV_USE_LABEL 1
-            #endif
-          EOF
-          fi
+          python3 -c '
+          conf = """#ifndef LV_CONF_H
+          #define LV_CONF_H
+          #define LV_COLOR_DEPTH 16
+          #define LV_COLOR_16_SWAP 1
+          #define LV_MEM_CUSTOM 0
+          #define LV_MEM_SIZE (128U * 1024U)
+          #define LV_TICK_CUSTOM 1
+          #define LV_TICK_CUSTOM_INCLUDE "Arduino.h"
+          #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
+          #define LV_FONT_MONTSERRAT_12 1
+          #define LV_FONT_MONTSERRAT_14 1
+          #define LV_FONT_MONTSERRAT_16 1
+          #define LV_USE_LABEL 1
+          #define LV_USE_DEMO_WIDGETS 0
+          #endif
+          """
+          import os
+          path = os.path.expanduser("~/Arduino/libraries/lv_conf.h")
+          with open(path, "w") as f:
+              f.write(conf)
+          '
 
           cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/lv_conf.h 2>/dev/null || true
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
 
-      - name: Configure Display to Show 'Gemini OS by Bogdan'
+      - name: Bypass lv_demos.h & Configure 'Gemini OS by Bogdan'
         shell: bash
         run: |
-          SKETCH_PATH="Arduino/examples/10_LVGL_V9_Test/10_LVGL_V9_Test.ino"
-          echo "Sketch utilizat: $SKETCH_PATH"
-          SKETCH_DIR=$(dirname "$SKETCH_PATH")
+          SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
+          echo "Curatare referinte demo si aplicare ecran Bogdan in $SKETCH_DIR..."
 
-          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.cpp" -o -name "*.c" \) -exec sed -i 's/driver\/i2c_master.h/driver\/i2c.h/g' {} + 2>/dev/null || true
+          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include "demos\/lv_demos.h"/\/\/ #include "demos\/lv_demos.h"/g' {} + 2>/dev/null || true
+          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include <demos\/lv_demos.h>/\/\/ #include <demos\/lv_demos.h>/g' {} + 2>/dev/null || true
+          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/lv_demo_widgets();/\/\/ lv_demo_widgets();/g' {} + 2>/dev/null || true
+          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/driver\/i2c_master.h/driver\/i2c.h/g' {} + 2>/dev/null || true
 
           python3 - << 'PYEOF'
           import os
@@ -84,9 +86,9 @@ jobs:
           with open(sketch_path, "r", encoding="utf-8", errors="ignore") as f:
               content = f.read()
 
-          custom_screen_func = """
+          custom_screen_func = '''
           // ==========================================
-          // ECRAN PERSONALIZAT: GEMINI OS BY BOGDAN
+          // ECRAN TEST: GEMINI OS BY BOGDAN
           // ==========================================
           void show_bogdan_screen() {
               pinMode(1, OUTPUT);
@@ -96,19 +98,19 @@ jobs:
               if (!scr) scr = lv_scr_act();
               lv_obj_set_style_bg_color(scr, lv_color_hex(0x0A0E17), 0);
 
-              // 1. Text Principal: "Gemini OS by Bogdan"
+              // 1. Titlu: "Gemini OS by Bogdan"
               lv_obj_t *lbl_title = lv_label_create(scr);
               lv_label_set_text(lbl_title, "Gemini OS by Bogdan");
               lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x00E5FF), 0);
               lv_obj_center(lbl_title);
 
-              // 2. Subtitlu Stare: "Boot OK | Waveshare 3.49 V2"
+              // 2. Subtitlu: "Boot OK | Waveshare 3.49 V2"
               lv_obj_t *lbl_sub = lv_label_create(scr);
               lv_label_set_text(lbl_sub, "Boot OK | Waveshare 3.49 V2");
               lv_obj_set_style_text_color(lbl_sub, lv_color_hex(0x22C55E), 0);
               lv_obj_align(lbl_sub, LV_ALIGN_CENTER, 0, 32);
           }
-          """
+          '''
 
           if "show_bogdan_screen" not in content:
               setup_idx = content.find("void setup()")
@@ -134,7 +136,7 @@ jobs:
 
           with open(sketch_path, "w", encoding="utf-8") as f:
               f.write(content)
-          print("Sketch actualizat cu succes!")
+          print("Patch aplicat cu succes pe sketch!")
           PYEOF
 
       - name: Compile Minimal Firmware
