@@ -24,14 +24,6 @@ jobs:
           pip install esptool
           sudo apt-get update && sudo apt-get install -y zip
 
-      - name: Inspect Available Examples in Waveshare Repo
-        shell: bash
-        run: |
-          echo "=== Toate directoarele si exemplele disponibile ==="
-          find Arduino -maxdepth 3 -type d
-          echo "=== Toate fisierele .ino disponibile ==="
-          find Arduino -type f -name "*.ino"
-
       - name: Setup Arduino CLI & ESP32 Core
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
@@ -104,6 +96,9 @@ jobs:
           sed -i 's/LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)/2/g' "$SKETCH_DIR/lvgl_port.c" 2>/dev/null || true
           sed -i 's/lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)/2/g' "$SKETCH_DIR/lvgl_port.c" 2>/dev/null || true
 
+          # FIX ROOT CAUSE: Inlocuire ESP_ERROR_CHECK in example_lcd_exio_init cu verificare sigura fara abort
+          sed -i 's/ESP_ERROR_CHECK(i2c_master_get_bus_handle(0, &tca9554_i2c_bus));/if (i2c_master_get_bus_handle(0, \&tca9554_i2c_bus) != ESP_OK) { printf("Warn: I2C bus 0 not ready, skipping TCA9554\n"); return; }/g' "$SKETCH_DIR/lvgl_port.c" 2>/dev/null || true
+
           # Rescriere curata si sigura 10_LVGL_V9_Test.ino
           cat << 'EOF' > "$SKETCH_DIR/10_LVGL_V9_Test.ino"
           #include <Arduino.h>
@@ -115,14 +110,8 @@ jobs:
           // Fundal Albastru Deschis (#38BDF8) & Scris Negru (#000000)
           // ==========================================
           void create_bogdan_ui() {
-              // Asigurare backlight aprins ferm pe GPIO 1 (Hardware V2)
               pinMode(1, OUTPUT);
-              digitalWrite(1, HIGH);
-
-              // Utilizam lock pentru sincronizare sigura cu task-ul FreeRTOS LVGL
-              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
-              lvgl_port_lock(0);
-              #endif
+              digitalWrite(1, HIGH); // Backlight GPIO 1 pentru Hardware V2
 
               lv_obj_t *scr = lv_screen_active();
               if (!scr) scr = lv_scr_act();
@@ -139,16 +128,18 @@ jobs:
                   lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x000000), 0);
                   lv_obj_center(lbl_title);
               }
-
-              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
-              lvgl_port_unlock();
-              #endif
           }
+
+          extern "C" void i2c_bsp_init(void);
 
           void setup() {
               Serial.begin(115200);
               delay(500);
               Serial.println("Starting Gemini OS Bogdan Edition...");
+
+              // Initializam bus-ul I2C intern inainte de lvgl_port_init
+              i2c_bsp_init();
+              delay(50);
 
               // Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
               lvgl_port_init();
@@ -159,9 +150,7 @@ jobs:
           }
 
           void loop() {
-              // lvgl_port_init porneste deja un task FreeRTOS dedicat pentru lv_timer_handler()
-              // In loop lasam doar un delay pentru a nu suprasolicita nucleul
-              delay(500);
+              delay(100);
           }
           EOF
 
