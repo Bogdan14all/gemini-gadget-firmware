@@ -59,6 +59,9 @@ jobs:
         #define LV_FONT_MONTSERRAT_16 1
         #define LV_USE_LABEL 1
         #define LV_USE_DEMO_WIDGETS 0
+        #define LV_USE_DEMO_MUSIC 0
+        #define LV_USE_DEMO_BENCHMARK 0
+        #define LV_USE_DEMO_STRESS 0
         #endif
         EOF
         fi
@@ -67,10 +70,8 @@ jobs:
         cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/lv_conf.h 2>/dev/null || true
         cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
 
-        # Demos fallback
-        if [ -d ~/Arduino/libraries/lvgl/demos ]; then
-          cp -r ~/Arduino/libraries/lvgl/demos ~/Arduino/libraries/lvgl/src/ 2>/dev/null || true
-        fi
+        # Stergem complet folderul demos din LVGL pentru a opri arduino-cli sa compileze demo_music
+        rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
     - name: Configure Display to Show "Gemini OS by Bogdan"
       shell: bash
       run: |
