@@ -22,7 +22,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           submodules: recursive
 
-      - name: Clean Source, Exact 620x48 Input & 620x118 Keyboard Layout
+      - name: Clean Source, Exact 620x46 Input & 620x118 Keyboard Layout
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -39,7 +39,7 @@ jobs:
 
           find esp32/ -name "led_status.c" -exec sed -i 's/#error.*SPI flash pin.*/\/\/ bypassed SPI flash pin/' {} + 2>/dev/null || true
 
-          # 1. Rescrierea completa si determinista a modulului muse_keypad.c
+          # 1. Implementare determinista muse_keypad.c pe lv_layer_top()
           cat << 'EOF' > esp32/components/muse/src/muse_keypad.c
           #include "muse_keypad.h"
           #include "esp_log.h"
@@ -68,8 +68,9 @@ jobs:
           void muse_keypad_create(lv_obj_t * parent) {
               if (s_keypad_view) return;
 
-              // Container principal de 640x172 fara scroll si fara layout flex
-              s_keypad_view = lv_obj_create(parent ? parent : lv_scr_act());
+              // Alocare pe stratul superior de sistem (lv_layer_top) pentru stabilitate la navigare
+              lv_obj_t *layer = parent ? parent : lv_layer_top();
+              s_keypad_view = lv_obj_create(layer);
               lv_obj_set_size(s_keypad_view, 640, 172);
               lv_obj_set_pos(s_keypad_view, 0, 0);
               lv_obj_set_style_pad_all(s_keypad_view, 0, 0);
@@ -79,9 +80,9 @@ jobs:
               lv_obj_set_layout(s_keypad_view, 0);
               lv_obj_clear_flag(s_keypad_view, LV_OBJ_FLAG_SCROLLABLE);
 
-              // 1. Unica casuta de text: 620 x 48 px, pozitie X=10, Y=2
+              // 1. Casuta unica de text: 620 x 46 px la X=10, Y=2
               s_ta = lv_textarea_create(s_keypad_view);
-              lv_obj_set_size(s_ta, 620, 48);
+              lv_obj_set_size(s_ta, 620, 46);
               lv_obj_set_pos(s_ta, 10, 2);
               lv_obj_set_style_bg_color(s_ta, lv_color_hex(0x121826), 0);
               lv_obj_set_style_bg_opa(s_ta, LV_OPA_COVER, 0);
@@ -90,21 +91,24 @@ jobs:
               lv_obj_set_style_radius(s_ta, 4, 0);
               lv_obj_set_style_text_color(s_ta, lv_color_hex(0xFFFFFF), 0);
               lv_obj_set_style_text_font(s_ta, &lv_font_montserrat_12, 0);
-              lv_obj_set_style_pad_all(s_ta, 4, 0);
+              lv_obj_set_style_pad_top(s_ta, 6, 0);
+              lv_obj_set_style_pad_bottom(s_ta, 6, 0);
+              lv_obj_set_style_pad_left(s_ta, 8, 0);
+              lv_obj_set_style_pad_right(s_ta, 8, 0);
               lv_textarea_set_password_mode(s_ta, false);
               lv_textarea_set_one_line(s_ta, true);
+              lv_textarea_set_cursor_click_pos(s_ta, true);
+              lv_obj_add_state(s_ta, LV_STATE_FOCUSED);
               lv_obj_clear_flag(s_ta, LV_OBJ_FLAG_SCROLLABLE);
 
-              // 2. Tastatura completa: 620 x 118 px, pozitie X=10, Y=52
+              // 2. Tastatura completa: 620 x 118 px la X=10, Y=52
               s_kb = lv_keyboard_create(s_keypad_view);
               lv_obj_set_size(s_kb, 620, 118);
               lv_obj_set_pos(s_kb, 10, 52);
               lv_obj_set_style_pad_all(s_kb, 1, LV_PART_MAIN);
-              lv_obj_set_style_pad_row(s_kb, 1, LV_PART_MAIN);
+              lv_obj_set_style_pad_row(s_kb, 2, LV_PART_MAIN);
               lv_obj_set_style_pad_column(s_kb, 1, LV_PART_MAIN);
-              lv_obj_set_style_pad_all(s_kb, 1, LV_PART_ITEMS);
-              lv_obj_set_style_pad_row(s_kb, 1, LV_PART_ITEMS);
-              lv_obj_set_style_pad_column(s_kb, 1, LV_PART_ITEMS);
+              lv_obj_set_style_pad_all(s_kb, 0, LV_PART_ITEMS);
               lv_obj_set_style_text_font(s_kb, &lv_font_montserrat_12, LV_PART_ITEMS);
               lv_obj_clear_flag(s_kb, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -116,7 +120,7 @@ jobs:
 
           void muse_keypad_show(lv_obj_t * ta) {
               if (!s_keypad_view) {
-                  muse_keypad_create(lv_scr_act());
+                  muse_keypad_create(lv_layer_top());
               }
               s_target_ta = ta;
               if (s_target_ta && s_ta) {
@@ -140,7 +144,7 @@ jobs:
           }
           EOF
 
-          # 2. Motor nativ Gemini Flash 2.0 (REST, NVS, Audio Dispatch)
+          # 2. Motor nativ Gemini 2.0 Flash
           cat << 'EOF' > esp32/components/muse/src/gemini_engine.c
           #include <stdio.h>
           #include <string.h>
@@ -256,24 +260,26 @@ jobs:
                       cJSON_Delete(root);
                       free(b64_str);
 
-                      char url[320];
-                      snprintf(url, sizeof(url), "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s", G_KEY);
+                      if (post_data) {
+                          char url;
+                          snprintf(url, sizeof(url), "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s", G_KEY);
 
-                      esp_http_client_config_t config = {
-                          .url = url,
-                          .method = HTTP_METHOD_POST,
-                          .crt_bundle_attach = esp_crt_bundle_attach,
-                          .timeout_ms = 18000,
-                          .buffer_size = 4096,
-                          .buffer_size_tx = 4096,
-                      };
-                      esp_http_client_handle_t client = esp_http_client_init(&config);
-                      esp_http_client_set_header(client, "Content-Type", "application/json");
-                      esp_http_client_set_post_field(client, post_data, strlen(post_data));
+                          esp_http_client_config_t config = {
+                              .url = url,
+                              .method = HTTP_METHOD_POST,
+                              .crt_bundle_attach = esp_crt_bundle_attach,
+                              .timeout_ms = 18000,
+                              .buffer_size = 4096,
+                              .buffer_size_tx = 4096,
+                          };
+                          esp_http_client_handle_t client = esp_http_client_init(&config);
+                          esp_http_client_set_header(client, "Content-Type", "application/json");
+                          esp_http_client_set_post_field(client, post_data, strlen(post_data));
 
-                      esp_http_client_perform(client);
-                      free(post_data);
-                      esp_http_client_cleanup(client);
+                          esp_http_client_perform(client);
+                          free(post_data);
+                          esp_http_client_cleanup(client);
+                      }
                   }
                   if (wav_buf) free(wav_buf);
               }
@@ -294,7 +300,7 @@ jobs:
           }
           EOF
 
-          # 3. Compactarea meniurilor UI si eliminarea referintelor chinezesti
+          # 3. Compactare chirurgicala a meniurilor de setari
           python3 - << 'PYEOF'
           import os, re
 
@@ -308,16 +314,12 @@ jobs:
                       content = f.read()
                   orig = content
 
-                  # Font uniform compact Montserrat 12
                   content = re.sub(r'&lv_font_montserrat_(?:14|16|18|20|24)', '&lv_font_montserrat_12', content)
+                  content = re.sub(r'lv_obj_set_height\s*\\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*(?:|1{2})\s*\\);', r'lv_obj_set_height(\1, 30);', content)
+                  content = re.sub(r'lv_obj_set_style_pad_top\s*\\(\s*([^,]+)\s*,\s**\s*,\s*0\s*\\);', r'lv_obj_set_style_pad_top(\1, 1, 0);', content)
+                  content = re.sub(r'lv_obj_set_style_pad_bottom\s*\\(\s*([^,]+)\s*,\s**\s*,\s*0\s*\\);', r'lv_obj_set_style_pad_bottom(\1, 1, 0);', content)
+                  content = re.sub(r'lv_obj_set_height\s*\\(\s*([^,;]*header[^,;]*)\s*,\s*+\s*\\);', r'lv_obj_set_height(\1, 22);', content, flags=re.IGNORECASE)
 
-                  # Randuri compacte de 30px pentru a afisa 4 optiuni pe ecran de 172px
-                  content = re.sub(r'lv_obj_set_height\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*(?:[4-9][0-9]|1[0-9]{2})\s*\);', r'lv_obj_set_height(\1, 30);', content)
-                  content = re.sub(r'lv_obj_set_style_pad_top\s*\(\s*([^,]+)\s*,\s*[5-9][0-9]*\s*,\s*0\s*\);', r'lv_obj_set_style_pad_top(\1, 1, 0);', content)
-                  content = re.sub(r'lv_obj_set_style_pad_bottom\s*\(\s*([^,]+)\s*,\s*[5-9][0-9]*\s*,\s*0\s*\);', r'lv_obj_set_style_pad_bottom(\1, 1, 0);', content)
-                  content = re.sub(r'lv_obj_set_height\s*\(\s*([^,;]*header[^,;]*)\s*,\s*[0-9]+\s*\);', r'lv_obj_set_height(\1, 22);', content, flags=re.IGNORECASE)
-
-                  # Decuplare servicii chineze si redenumire Muse -> Gemini
                   content = content.replace('"MUSE"', '"GEMINI AI"')
                   content = content.replace('"Muse"', '"Gemini AI"')
                   content = content.replace('"VM ID"', '"Model"')
@@ -339,9 +341,9 @@ jobs:
                   if "settings" in file.lower():
                       content = content.replace('"Not set"', '"Configurat"')
 
-                  content = re.sub(r'bool\s+muse_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_paired(void) { return true; }', content)
-                  content = re.sub(r'bool\s+muse_is_activated\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_activated(void) { return true; }', content)
-                  content = re.sub(r'bool\s+muse_app_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_app_is_paired(void) { return true; }', content)
+                  content = re.sub(r'bool\s+muse_is_paired\s*\\([^)]*\\)\s*\{[^}]*\}', 'bool muse_is_paired(void) { return true; }', content)
+                  content = re.sub(r'bool\s+muse_is_activated\s*\\([^)]*\\)\s*\{[^}]*\}', 'bool muse_is_activated(void) { return true; }', content)
+                  content = re.sub(r'bool\s+muse_app_is_paired\s*\\([^)]*\\)\s*\{[^}]*\}', 'bool muse_app_is_paired(void) { return true; }', content)
 
                   if content != orig:
                       with open(p, "w", encoding="utf-8") as f:
@@ -423,3 +425,4 @@ jobs:
           name: firmware-waveshare-349-bin
           path: package_bin/
           if-no-files-found: error
+```
