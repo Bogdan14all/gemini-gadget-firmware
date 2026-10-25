@@ -1,4 +1,3 @@
-
 name: Setup Clean Gemini Firmware
 
 on:
@@ -9,7 +8,7 @@ permissions:
 
 jobs:
   import-and-build:
-    name: Import Eatin, Purge iFlytek and Build
+    name: Import Eatin, Purge iFlytek and Builda
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:v6.0.1
@@ -38,11 +37,13 @@ jobs:
 
           mkdir -p esp32/components/muse/src
 
-          find esp32/ -name "led_status.c" -exec sed -i 's/#error.*SPI flash pin.*/\/\/ bypassed SPI flash pin/' {} + || true
+          find esp32/ -name "led_status.c" -exec sed -i 's/#error.*SPI flash pin.*/\/\/ bypassed SPI flash pin/' {} + 2>/dev/null || true
 
-          # 1. Rescrierea completa a tastaturii in muse_keypad.c (Side-by-Side pe ecran 640x172):
-          # Stanga: Casuta de text 215 x 164 px la X=6, Y=4
-          # Dreapta: Tastatura 405 x 164 px la X=227, Y=4
+          # 1. Rescrierea completa si determinista a tastaturii in muse_keypad.c:
+          # Pe ecranul de 640x172 px (lat dar foarte scund), asezarea stanga-dreapta (Side-by-Side)
+          # garanteaza ca input box-ul NU este acoperit si are inaltime generoasa pentru text si cursor.
+          # Stanga: Casuta de text 215 x 164 px (X=6, Y=4)
+          # Dreapta: Tastatura completa 405 x 164 px (X=227, Y=4)
           cat << 'EOF' > esp32/components/muse/src/muse_keypad.c
           #include "muse_keypad.h"
           #include "esp_log.h"
@@ -71,6 +72,7 @@ jobs:
           void muse_keypad_create(lv_obj_t * parent) {
               if (s_keypad_view) return;
 
+              // Container modal pe lv_layer_top() de 640x172 px cu fundal negru opac
               lv_obj_t *layer = parent ? parent : lv_layer_top();
               s_keypad_view = lv_obj_create(layer);
               lv_obj_set_size(s_keypad_view, 640, 172);
@@ -82,7 +84,7 @@ jobs:
               lv_obj_set_layout(s_keypad_view, 0);
               lv_obj_clear_flag(s_keypad_view, LV_OBJ_FLAG_SCROLLABLE);
 
-              // 1. ZONA STANGA: Casuta de text 215 x 164 px la X=6, Y=4
+              // 1. ZONA STANGA: Casuta de text mare, 215 x 164 px la X=6, Y=4
               s_ta = lv_textarea_create(s_keypad_view);
               lv_obj_set_size(s_ta, 215, 164);
               lv_obj_set_pos(s_ta, 6, 4);
@@ -100,7 +102,7 @@ jobs:
               lv_obj_add_state(s_ta, LV_STATE_FOCUSED);
               lv_obj_clear_flag(s_ta, LV_OBJ_FLAG_SCROLLABLE);
 
-              // 2. ZONA DREAPTA: Tastatura 405 x 164 px la X=227, Y=4
+              // 2. ZONA DREAPTA: Tastatura 405 x 164 px la X=227, Y=4 (gap de 6 px)
               s_kb = lv_keyboard_create(s_keypad_view);
               lv_obj_set_size(s_kb, 405, 164);
               lv_obj_set_pos(s_kb, 227, 4);
@@ -260,7 +262,7 @@ jobs:
                       free(b64_str);
 
                       if (post_data) {
-                          char url;
+                          char url[320];
                           snprintf(url, sizeof(url), "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s", G_KEY);
 
                           esp_http_client_config_t config = {
@@ -314,10 +316,10 @@ jobs:
                   orig = content
 
                   content = re.sub(r'&lv_font_montserrat_(?:14|16|18|20|24)', '&lv_font_montserrat_12', content)
-                  content = re.sub(r'lv_obj_set_height\s*\\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*(?:\d|1\d{2})\s*\\);', r'lv_obj_set_height(\1, 30);', content)
-                  content = re.sub(r'lv_obj_set_style_pad_top\s*\\(\s*([^,]+)\s*,\s*\d+\s*,\s*0\s*\\);', r'lv_obj_set_style_pad_top(\1, 1, 0);', content)
-                  content = re.sub(r'lv_obj_set_style_pad_bottom\s*\\(\s*([^,]+)\s*,\s*\d+\s*,\s*0\s*\\);', r'lv_obj_set_style_pad_bottom(\1, 1, 0);', content)
-                  content = re.sub(r'lv_obj_set_height\s*\\(\s*([^,;]*header[^,;]*)\s*,\s*\d+\s*\\);', r'lv_obj_set_height(\1, 22);', content, flags=re.IGNORECASE)
+                  content = re.sub(r'lv_obj_set_height\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*(?:\d|1\d{2})\s*\);', r'lv_obj_set_height(\1, 30);', content)
+                  content = re.sub(r'lv_obj_set_style_pad_top\s*\(\s*([^,]+)\s*,\s*\d+\s*,\s*0\s*\);', r'lv_obj_set_style_pad_top(\1, 1, 0);', content)
+                  content = re.sub(r'lv_obj_set_style_pad_bottom\s*\(\s*([^,]+)\s*,\s*\d+\s*,\s*0\s*\);', r'lv_obj_set_style_pad_bottom(\1, 1, 0);', content)
+                  content = re.sub(r'lv_obj_set_height\s*\(\s*([^,;]*header[^,;]*)\s*,\s*\d+\s*\);', r'lv_obj_set_height(\1, 22);', content, flags=re.IGNORECASE)
 
                   content = content.replace('"MUSE"', '"GEMINI AI"')
                   content = content.replace('"Muse"', '"Gemini AI"')
@@ -340,9 +342,9 @@ jobs:
                   if "settings" in file.lower():
                       content = content.replace('"Not set"', '"Configurat"')
 
-                  content = re.sub(r'bool\s+muse_is_paired\s*\\([^)]*\\)\s*\{[^}]*\}', 'bool muse_is_paired(void) { return true; }', content)
-                  content = re.sub(r'bool\s+muse_is_activated\s*\\([^)]*\\)\s*\{[^}]*\}', 'bool muse_is_activated(void) { return true; }', content)
-                  content = re.sub(r'bool\s+muse_app_is_paired\s*\\([^)]*\\)\s*\{[^}]*\}', 'bool muse_app_is_paired(void) { return true; }', content)
+                  content = re.sub(r'bool\s+muse_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_paired(void) { return true; }', content)
+                  content = re.sub(r'bool\s+muse_is_activated\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_is_activated(void) { return true; }', content)
+                  content = re.sub(r'bool\s+muse_app_is_paired\s*\([^)]*\)\s*\{[^}]*\}', 'bool muse_app_is_paired(void) { return true; }', content)
 
                   if content != orig:
                       with open(p, "w", encoding="utf-8") as f:
@@ -424,4 +426,3 @@ jobs:
           name: firmware-waveshare-349-bin
           path: package_bin/
           if-no-files-found: error
-```
