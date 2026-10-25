@@ -24,6 +24,14 @@ jobs:
           pip install esptool
           sudo apt-get update && sudo apt-get install -y zip
 
+      - name: Inspect Available Examples in Waveshare Repo
+        shell: bash
+        run: |
+          echo "=== Toate directoarele si exemplele disponibile ==="
+          find Arduino -maxdepth 3 -type d
+          echo "=== Toate fisierele .ino disponibile ==="
+          find Arduino -type f -name "*.ino"
+
       - name: Setup Arduino CLI & ESP32 Core
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
@@ -43,7 +51,7 @@ jobs:
 
           arduino-cli lib install "lvgl"@9.1.0 2>/dev/null || true
 
-          # 1. Configurare lv_conf.h completa: font implicit montserrat_20, cover background
+          # Configurare lv_conf.h completa
           cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
           #ifndef LV_CONF_H
           #define LV_CONF_H
@@ -54,8 +62,10 @@ jobs:
           #define LV_TICK_CUSTOM 1
           #define LV_TICK_CUSTOM_INCLUDE "Arduino.h"
           #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
+          #define LV_FONT_MONTSERRAT_12 1
           #define LV_FONT_MONTSERRAT_14 1
           #define LV_FONT_MONTSERRAT_16 1
+          #define LV_FONT_MONTSERRAT_18 1
           #define LV_FONT_MONTSERRAT_20 1
           #define LV_FONT_DEFAULT &lv_font_montserrat_20
           #define LV_USE_LABEL 1
@@ -73,14 +83,17 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/lv_conf.h 2>/dev/null || true
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
 
-          # Stergere foldere demo neutilizate
+          # Curatare module demo/debug
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
+          if [ -f ~/Arduino/libraries/lvgl/src/core/lv_obj_id_builtin.c ]; then
+            echo "// disabled" > ~/Arduino/libraries/lvgl/src/core/lv_obj_id_builtin.c
+          fi
 
-      - name: Configure Display (Light Blue Background & Black Text)
+      - name: Configure Display to Show 'Gemini OS by Bogdan'
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
-          echo "Configurare culori si ecran Bogdan in $SKETCH_DIR..."
+          echo "Curatare referinte demo si aplicare ecran Bogdan in $SKETCH_DIR..."
 
           # Dezactivare referinte demo
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include "demos\/lv_demos.h"/\/\/ #include "demos\/lv_demos.h"/g' {} + 2>/dev/null || true
@@ -91,85 +104,66 @@ jobs:
           sed -i 's/LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)/2/g' "$SKETCH_DIR/lvgl_port.c" 2>/dev/null || true
           sed -i 's/lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)/2/g' "$SKETCH_DIR/lvgl_port.c" 2>/dev/null || true
 
-          # Neutralizare modul lv_obj_id_builtin.c
-          if [ -f ~/Arduino/libraries/lvgl/src/core/lv_obj_id_builtin.c ]; then
-            echo "// disabled" > ~/Arduino/libraries/lvgl/src/core/lv_obj_id_builtin.c
-          fi
-
-          python3 - << 'PYEOF'
-          import os
-
-          sketch_path = "Arduino/examples/10_LVGL_V9_Test/10_LVGL_V9_Test.ino"
-          with open(sketch_path, "r", encoding="utf-8", errors="ignore") as f:
-              content = f.read()
-
-          custom_screen_func = '''
+          # Rescriere curata si sigura 10_LVGL_V9_Test.ino
+          cat << 'EOF' > "$SKETCH_DIR/10_LVGL_V9_Test.ino"
+          #include <Arduino.h>
+          #include "lvgl_port.h"
           #include <lvgl.h>
 
           // ==========================================
           // ECRAN TEST: GEMINI OS BY BOGDAN
           // Fundal Albastru Deschis (#38BDF8) & Scris Negru (#000000)
           // ==========================================
-          void show_bogdan_screen() {
+          void create_bogdan_ui() {
+              // Asigurare backlight aprins ferm pe GPIO 1 (Hardware V2)
               pinMode(1, OUTPUT);
-              digitalWrite(1, HIGH); // Backlight GPIO 1 pentru Hardware V2
+              digitalWrite(1, HIGH);
+
+              // Utilizam lock pentru sincronizare sigura cu task-ul FreeRTOS LVGL
+              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
+              lvgl_port_lock(0);
+              #endif
 
               lv_obj_t *scr = lv_screen_active();
               if (!scr) scr = lv_scr_act();
               if (scr) {
                   lv_obj_clean(scr);
 
-                  // 1. Fundal Albastru Deschis Opaque (LV_OPA_COVER obligatoriu pentru a picta tot bufferul)
+                  // 1. Fundal Albastru Deschis Opac (#38BDF8)
                   lv_obj_set_style_bg_color(scr, lv_color_hex(0x38BDF8), 0);
                   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-                  // 2. Titlu Principal: "Gemini OS by Bogdan" (Text Negru, Font Montserrat 20)
+                  // 2. Titlu Principal: "Gemini OS by Bogdan" (Negru, Font Montserrat 20)
                   lv_obj_t *lbl_title = lv_label_create(scr);
                   lv_label_set_text(lbl_title, "Gemini OS by Bogdan");
                   lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x000000), 0);
-                  lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_20, 0);
                   lv_obj_center(lbl_title);
-
-                  // Fortam reimprospatarea imediata
-                  lv_refr_now(NULL);
               }
+
+              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
+              lvgl_port_unlock();
+              #endif
           }
-          '''
 
-          if "show_bogdan_screen" not in content:
-              setup_idx = content.find("void setup()")
-              if setup_idx != -1:
-                  content = content[:setup_idx] + custom_screen_func + "\n" + content[setup_idx:]
-              else:
-                  content = custom_screen_func + "\n" + content
+          void setup() {
+              Serial.begin(115200);
+              delay(500);
+              Serial.println("Starting Gemini OS Bogdan Edition...");
 
-          # In setup(), apelam show_bogdan_screen() la finalul initializarii
-          setup_body_start = content.find("void setup()")
-          if setup_body_start != -1:
-              brace_start = content.find("{", setup_body_start)
-              if brace_start != -1:
-                  open_braces = 1
-                  i = brace_start + 1
-                  while i < len(content) and open_braces > 0:
-                      if content[i] == '{':
-                          open_braces += 1
-                      elif content[i] == '}':
-                          open_braces -= 1
-                      i += 1
-                  setup_end = i - 1
-                  content = content[:setup_end] + "\n    show_bogdan_screen();\n" + content[setup_end:]
+              // Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
+              lvgl_port_init();
 
-          # Ne asiguram ca in loop() se apeleaza lv_timer_handler()
-          loop_body_start = content.find("void loop()")
-          if loop_body_start != -1:
-              brace_start = content.find("{", loop_body_start)
-              if brace_start != -1:
-                  content = content[:brace_start + 1] + "\n    lv_timer_handler(); delay(5);\n" + content[brace_start + 1:]
+              delay(200);
+              create_bogdan_ui();
+              Serial.println("UI Created successfully!");
+          }
 
-          with open(sketch_path, "w", encoding="utf-8") as f:
-              f.write(content)
-          print("Patch aplicat cu succes pe sketch!")
-          PYEOF
+          void loop() {
+              // lvgl_port_init porneste deja un task FreeRTOS dedicat pentru lv_timer_handler()
+              // In loop lasam doar un delay pentru a nu suprasolicita nucleul
+              delay(500);
+          }
+          EOF
 
       - name: Compile Minimal Firmware
         run: |
@@ -177,9 +171,7 @@ jobs:
           FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi"
           echo "Compilare sketch: $SKETCH_PATH cu FQBN: $FQBN"
 
-          arduino-cli compile --fqbn "$FQBN" \
-            --output-dir build_output \
-            "$SKETCH_PATH"
+          arduino-cli compile --fqbn "$FQBN"             --output-dir build_output             "$SKETCH_PATH"
 
       - name: Merge into Single .bin & Create Clean ZIP
         shell: bash
@@ -193,14 +185,7 @@ jobs:
           echo "Partitions (0x8000): $PARTITIONS"
           echo "App (0x10000): $APP_BIN"
 
-          esptool.py --chip esp32s3 merge_bin \
-            -o package_bin/gemini-os-full-0x0.bin \
-            --flash_mode keep \
-            --flash_size 16MB \
-            --flash_freq 80m \
-            0x0 "$BOOTLOADER" \
-            0x8000 "$PARTITIONS" \
-            0x10000 "$APP_BIN"
+          esptool.py --chip esp32s3 merge_bin             -o package_bin/gemini-os-full-0x0.bin             --flash_mode keep             --flash_size 16MB             --flash_freq 80m             0x0 "$BOOTLOADER"             0x8000 "$PARTITIONS"             0x10000 "$APP_BIN"
 
           cd package_bin
           zip gemini-os-firmware-0x0.zip gemini-os-full-0x0.bin
