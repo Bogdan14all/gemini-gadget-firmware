@@ -1,17 +1,21 @@
 name: Setup Clean Gemini Firmware
+
 on:
-workflow_dispatch:
+  workflow_dispatch:
+
 permissions:
-contents: write
+  contents: write
+
 jobs:
-import-and-build:
-name: Import Eatin, Purge iFlytek and Build
-runs-on: ubuntu-latest
-container:
-image: espressif/idf:v6.0.1
-steps:
-- name: Safe Git Directory
-run: git config --global --add safe.directory '*'
+  import-and-build:
+    name: Import Eatin, Purge iFlytek and Build
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v6.0.1
+    steps:
+      - name: Safe Git Directory
+        run: git config --global --add safe.directory '*'
+
       - name: Checkout User Repository
         uses: actions/checkout@v4
         with:
@@ -257,7 +261,7 @@ run: git config --global --add safe.directory '*'
                       free(b64_str);
 
                       if (post_data) {
-                          char url;
+                          char url[256];
                           snprintf(url, sizeof(url), "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s", G_KEY);
 
                           esp_http_client_config_t config = {
@@ -311,10 +315,10 @@ run: git config --global --add safe.directory '*'
                   orig = content
 
                   content = re.sub(r'&lv_font_montserrat_(?:14|16|18|20|24)', '&lv_font_montserrat_12', content)
-                  content = re.sub(r'lv_obj_set_height\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*(?:|1{2})\s*\);', r'lv_obj_set_height(\1, 30);', content)
-                  content = re.sub(r'lv_obj_set_style_pad_top\s*\(\s*([^,]+)\s*,\s**\s*,\s*0\s*\);', r'lv_obj_set_style_pad_top(\1, 1, 0);', content)
-                  content = re.sub(r'lv_obj_set_style_pad_bottom\s*\(\s*([^,]+)\s*,\s**\s*,\s*0\s*\);', r'lv_obj_set_style_pad_bottom(\1, 1, 0);', content)
-                  content = re.sub(r'lv_obj_set_height\s*\(\s*([^,;]*header[^,;]*)\s*,\s*+\s*\);', r'lv_obj_set_height(\1, 22);', content, flags=re.IGNORECASE)
+                  content = re.sub(r'lv_obj_set_height\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*(?:[4-9]\d|1\d{2})\s*\);', r'lv_obj_set_height(\1, 30);', content)
+                  content = re.sub(r'lv_obj_set_style_pad_top\s*\(\s*([^,]+)\s*,\s*\d+\s*,\s*0\s*\);', r'lv_obj_set_style_pad_top(\1, 1, 0);', content)
+                  content = re.sub(r'lv_obj_set_style_pad_bottom\s*\(\s*([^,]+)\s*,\s*\d+\s*,\s*0\s*\);', r'lv_obj_set_style_pad_bottom(\1, 1, 0);', content)
+                  content = re.sub(r'lv_obj_set_height\s*\(\s*([^,;]*header[^,;]*)\s*,\s*\d+\s*\);', r'lv_obj_set_height(\1, 22);', content, flags=re.IGNORECASE)
 
                   content = content.replace('"MUSE"', '"GEMINI AI"')
                   content = content.replace('"Muse"', '"Gemini AI"')
