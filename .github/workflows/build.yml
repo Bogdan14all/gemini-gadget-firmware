@@ -22,7 +22,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           submodules: recursive
 
-      - name: Fresh Clone & Apply Flexbox UI & Gemini Engine
+      - name: Clean Source, Compact UI & Native Gemini Integration
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -197,53 +197,48 @@ jobs:
 
           flex_keypad_helper = """
           static void __attribute__((unused)) _gemini_fix_keypad(lv_obj_t *kb, lv_obj_t *ta) {
-              lv_obj_t *cont = NULL;
-              if (kb) cont = lv_obj_get_parent(kb);
-              if (!cont || cont == lv_scr_act()) {
-                  if (ta) cont = lv_obj_get_parent(ta);
-              }
-              if (cont && cont != lv_scr_act()) {
-                  lv_obj_set_size(cont, 640, 172);
-                  lv_obj_set_pos(cont, 0, 0);
-                  lv_obj_set_style_pad_all(cont, 2, 0);
-                  lv_obj_set_style_pad_row(cont, 2, 0);
-                  lv_obj_set_style_pad_column(cont, 0, 0);
-                  lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
-                  lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-              }
               if (ta) {
-                  if (cont && lv_obj_get_parent(ta) != cont) lv_obj_set_parent(ta, cont);
-                  lv_obj_move_to_index(ta, 0);
-                  lv_obj_set_size(ta, 620, 36);
-                  lv_obj_set_style_bg_color(ta, lv_color_hex(0x18181B), 0);
+                  lv_obj_t *scr = lv_scr_act();
+                  lv_obj_set_parent(ta, scr);
+                  lv_obj_set_size(ta, 620, 34);
+                  lv_obj_set_pos(ta, 10, 3);
+                  lv_obj_set_style_bg_color(ta, lv_color_hex(0x121826), 0);
                   lv_obj_set_style_bg_opa(ta, LV_OPA_COVER, 0);
                   lv_obj_set_style_border_color(ta, lv_color_hex(0x3B82F6), 0);
                   lv_obj_set_style_border_width(ta, 2, 0);
+                  lv_obj_set_style_radius(ta, 6, 0);
                   lv_obj_set_style_text_color(ta, lv_color_hex(0xFFFFFF), 0);
                   lv_obj_set_style_text_font(ta, &lv_font_montserrat_12, 0);
                   lv_obj_set_style_pad_all(ta, 4, 0);
                   lv_textarea_set_password_mode(ta, false);
                   lv_textarea_set_one_line(ta, true);
                   lv_obj_clear_flag(ta, LV_OBJ_FLAG_HIDDEN);
-                  lv_obj_move_foreground(ta);
               }
               if (kb) {
-                  if (cont && lv_obj_get_parent(kb) != cont) lv_obj_set_parent(kb, cont);
-                  lv_obj_set_size(kb, 640, 130);
+                  lv_obj_t *scr = lv_scr_act();
+                  lv_obj_set_parent(kb, scr);
+                  lv_obj_set_size(kb, 640, 132);
+                  lv_obj_set_pos(kb, 0, 40);
                   lv_obj_set_style_pad_all(kb, 1, LV_PART_MAIN);
                   lv_obj_set_style_pad_row(kb, 1, LV_PART_MAIN);
                   lv_obj_set_style_pad_column(kb, 1, LV_PART_MAIN);
                   lv_obj_set_style_pad_all(kb, 1, LV_PART_ITEMS);
                   lv_obj_set_style_text_font(kb, &lv_font_montserrat_12, LV_PART_ITEMS);
                   lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
+                  lv_obj_move_foreground(kb);
+              }
+              if (ta) {
+                  lv_obj_move_foreground(ta);
               }
           }
           """
 
           for root, dirs, files in os.walk("esp32/components/muse"):
               for file in files:
-                  if not file.endswith((".c", ".cpp", ".h")):
+                  # STRICT: Modifica exclusiv fisierele de implementare (.c / .cpp) pentru a evita redefinirea din headers
+                  if not file.endswith((".c", ".cpp")):
                       continue
+
                   p = os.path.join(root, file)
                   with open(p, "r", encoding="utf-8", errors="ignore") as f:
                       content = f.read()
@@ -267,17 +262,21 @@ jobs:
                           content
                       )
 
+                  # Reducere fonturi la Montserrat 12
                   content = re.sub(r'&lv_font_montserrat_(?:14|16|18|20|24)', '&lv_font_montserrat_12', content)
+
+                  # Comprimare inaltime randuri de meniu de la 50-80px la 32px
                   content = re.sub(r'lv_obj_set_height\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*(?:[4-9][0-9]|1[0-9]{2})\s*\);', r'lv_obj_set_height(\1, 32);', content)
                   content = re.sub(r'lv_obj_set_style_pad_top\s*\(\s*([^,]+)\s*,\s*[5-9][0-9]*\s*,\s*0\s*\);', r'lv_obj_set_style_pad_top(\1, 2, 0);', content)
                   content = re.sub(r'lv_obj_set_style_pad_bottom\s*\(\s*([^,]+)\s*,\s*[5-9][0-9]*\s*,\s*0\s*\);', r'lv_obj_set_style_pad_bottom(\1, 2, 0);', content)
 
+                  # Inlocuire texte chinezesti si Muse cu Gemini
                   content = content.replace('"MUSE"', '"GEMINI AI"')
                   content = content.replace('"Muse"', '"Gemini AI"')
                   content = content.replace('"VM ID"', '"Model"')
                   content = content.replace('"Device token"', '"Gemini Key"')
                   content = content.replace('"Reset pairing"', '"Gemini Ready"')
-                  content = content.replace('"untested"', '"Ready"')
+                  content = content.replace('"untested"', '"Online"')
                   content = content.replace("iFlytek • SenseNova", "Google Gemini 2.0")
                   content = content.replace("iFlytek + SenseNova", "Google Gemini 2.0")
                   content = content.replace("iFlytek", "Google Gemini")
@@ -312,7 +311,7 @@ jobs:
           cd esp32
 
           find . -name "CMakeLists.txt" -exec sed -i 's/-Werror//g' {} + 2>/dev/null || true
-          echo "target_compile_options(\${COMPONENT_LIB} PRIVATE -Wno-error -Wno-unused-variable)" >> components/muse/CMakeLists.txt 2>/dev/null || true
+          echo "target_compile_options(\${COMPONENT_LIB} PRIVATE -Wno-error -Wno-unused-variable -Wno-unused-function)" >> components/muse/CMakeLists.txt 2>/dev/null || true
           sed -i 's/SRCS /SRCS "src\/gemini_engine.c" /g' components/muse/CMakeLists.txt 2>/dev/null || true
 
           for cfg in sdkconfig.defaults devices/sdkconfig.muse; do
