@@ -24,23 +24,24 @@ jobs:
           pip install esptool
           sudo apt-get update && sudo apt-get install -y zip
 
-      - name: Setup Arduino CLI & ESP32 Core
+      - name: Setup Arduino CLI & ESP32 Core (Fixed Stable 2.0.14)
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
           sudo mv bin/arduino-cli /usr/local/bin/
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32
+          # Instalam strict versiunea 2.0.14 compatibila cu exemplele Waveshare V2
+          arduino-cli core install esp32:esp32@2.0.14
 
-      - name: Install Project Libraries & Setup LVGL v9 Configuration
+      - name: Install Project Libraries & Setup LVGL Configuration
         shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
           if [ -d "Arduino/libraries" ]; then
             cp -r Arduino/libraries/* ~/Arduino/libraries/ 2>/dev/null || true
           fi
-          arduino-cli lib install "lvgl"@9.1.0 2>/dev/null || true
+          arduino-cli lib install "lvgl"@8.3.11 2>/dev/null || true
 
           python3 -c '
           conf = """#ifndef LV_CONF_H
@@ -66,23 +67,37 @@ jobs:
           '
 
           cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/lv_conf.h 2>/dev/null || true
-          cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
 
-      - name: Bypass lv_demos.h & Configure 'Gemini OS by Bogdan'
+      - name: Configure Display to Show 'Gemini OS by Bogdan'
         shell: bash
         run: |
-          SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
-          echo "Curatare referinte demo si aplicare ecran Bogdan in $SKETCH_DIR..."
+          # Identificam exemplul oficial de display
+          SKETCH_PATH=$(find Arduino -type f -name "*.ino" | grep -Ei "10_LVGL|lcd|display|demo" | head -n 1)
+          if [ -z "$SKETCH_PATH" ]; then
+            SKETCH_PATH=$(find Arduino -type f -name "*.ino" | head -n 1)
+          fi
+          echo "Sketch utilizat: $SKETCH_PATH"
+          SKETCH_DIR=$(dirname "$SKETCH_PATH")
+          cp ~/Arduino/libraries/lv_conf.h "$SKETCH_DIR/lv_conf.h" 2>/dev/null || true
 
+          # Curatare referinte demo si I2C
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include "demos\/lv_demos.h"/\/\/ #include "demos\/lv_demos.h"/g' {} + 2>/dev/null || true
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include <demos\/lv_demos.h>/\/\/ #include <demos\/lv_demos.h>/g' {} + 2>/dev/null || true
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/lv_demo_widgets();/\/\/ lv_demo_widgets();/g' {} + 2>/dev/null || true
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/driver\/i2c_master.h/driver\/i2c.h/g' {} + 2>/dev/null || true
 
           python3 - << 'PYEOF'
-          import os
+          import os, glob
 
-          sketch_path = "Arduino/examples/10_LVGL_V9_Test/10_LVGL_V9_Test.ino"
+          ino_files = glob.glob("Arduino/**/*.ino", recursive=True)
+          sketch_path = ""
+          for f in ino_files:
+              if "10_LVGL" in f or "lcd" in f.lower() or "display" in f.lower():
+                  sketch_path = f
+                  break
+          if not sketch_path and ino_files:
+              sketch_path = ino_files[0]
+
           with open(sketch_path, "r", encoding="utf-8", errors="ignore") as f:
               content = f.read()
 
@@ -94,8 +109,7 @@ jobs:
               pinMode(1, OUTPUT);
               digitalWrite(1, HIGH); // Backlight GPIO 1 pentru Hardware V2
 
-              lv_obj_t *scr = lv_screen_active();
-              if (!scr) scr = lv_scr_act();
+              lv_obj_t *scr = lv_scr_act();
               lv_obj_set_style_bg_color(scr, lv_color_hex(0x0A0E17), 0);
 
               // 1. Titlu: "Gemini OS by Bogdan"
@@ -136,12 +150,15 @@ jobs:
 
           with open(sketch_path, "w", encoding="utf-8") as f:
               f.write(content)
-          print("Patch aplicat cu succes pe sketch!")
+          print("Patch aplicat cu succes pe sketch:", sketch_path)
           PYEOF
 
       - name: Compile Minimal Firmware
         run: |
-          SKETCH_PATH="Arduino/examples/10_LVGL_V9_Test/10_LVGL_V9_Test.ino"
+          SKETCH_PATH=$(find Arduino -type f -name "*.ino" | grep -Ei "10_LVGL|lcd|display|demo" | head -n 1)
+          if [ -z "$SKETCH_PATH" ]; then
+            SKETCH_PATH=$(find Arduino -type f -name "*.ino" | head -n 1)
+          fi
           FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi"
           echo "Compilare sketch: $SKETCH_PATH cu FQBN: $FQBN"
 
