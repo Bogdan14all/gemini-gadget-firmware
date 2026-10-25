@@ -22,7 +22,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           submodules: recursive
 
-      - name: Clean Source, Single 620x50 Input Box & Gemini Engine
+      - name: Clean Source, Exact 620x48 Input & 620x118 Keyboard Layout
         shell: bash
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -39,6 +39,108 @@ jobs:
 
           find esp32/ -name "led_status.c" -exec sed -i 's/#error.*SPI flash pin.*/\/\/ bypassed SPI flash pin/' {} + 2>/dev/null || true
 
+          # 1. Rescrierea completa si determinista a modulului muse_keypad.c
+          cat << 'EOF' > esp32/components/muse/src/muse_keypad.c
+          #include "muse_keypad.h"
+          #include "esp_log.h"
+          #include <string.h>
+
+          static const char *TAG = "MUSE_KEYPAD";
+          static lv_obj_t *s_keypad_view = NULL;
+          static lv_obj_t *s_ta = NULL;
+          static lv_obj_t *s_kb = NULL;
+          static lv_obj_t *s_target_ta = NULL;
+
+          static void keypad_event_cb(lv_event_t * e) {
+              lv_event_code_t code = lv_event_get_code(e);
+              if (code == LV_EVENT_READY) {
+                  if (s_target_ta && s_ta) {
+                      lv_textarea_set_text(s_target_ta, lv_textarea_get_text(s_ta));
+                      lv_event_send(s_target_ta, LV_EVENT_VALUE_CHANGED, NULL);
+                      lv_event_send(s_target_ta, LV_EVENT_READY, NULL);
+                  }
+                  muse_keypad_hide();
+              } else if (code == LV_EVENT_CANCEL) {
+                  muse_keypad_hide();
+              }
+          }
+
+          void muse_keypad_create(lv_obj_t * parent) {
+              if (s_keypad_view) return;
+
+              // Container principal de 640x172 fara scroll si fara layout flex
+              s_keypad_view = lv_obj_create(parent ? parent : lv_scr_act());
+              lv_obj_set_size(s_keypad_view, 640, 172);
+              lv_obj_set_pos(s_keypad_view, 0, 0);
+              lv_obj_set_style_pad_all(s_keypad_view, 0, 0);
+              lv_obj_set_style_bg_color(s_keypad_view, lv_color_hex(0x000000), 0);
+              lv_obj_set_style_bg_opa(s_keypad_view, LV_OPA_COVER, 0);
+              lv_obj_set_style_border_width(s_keypad_view, 0, 0);
+              lv_obj_set_layout(s_keypad_view, 0);
+              lv_obj_clear_flag(s_keypad_view, LV_OBJ_FLAG_SCROLLABLE);
+
+              // 1. Unica casuta de text: 620 x 48 px, pozitie X=10, Y=2
+              s_ta = lv_textarea_create(s_keypad_view);
+              lv_obj_set_size(s_ta, 620, 48);
+              lv_obj_set_pos(s_ta, 10, 2);
+              lv_obj_set_style_bg_color(s_ta, lv_color_hex(0x121826), 0);
+              lv_obj_set_style_bg_opa(s_ta, LV_OPA_COVER, 0);
+              lv_obj_set_style_border_color(s_ta, lv_color_hex(0x3B82F6), 0);
+              lv_obj_set_style_border_width(s_ta, 2, 0);
+              lv_obj_set_style_radius(s_ta, 4, 0);
+              lv_obj_set_style_text_color(s_ta, lv_color_hex(0xFFFFFF), 0);
+              lv_obj_set_style_text_font(s_ta, &lv_font_montserrat_12, 0);
+              lv_obj_set_style_pad_all(s_ta, 4, 0);
+              lv_textarea_set_password_mode(s_ta, false);
+              lv_textarea_set_one_line(s_ta, true);
+              lv_obj_clear_flag(s_ta, LV_OBJ_FLAG_SCROLLABLE);
+
+              // 2. Tastatura completa: 620 x 118 px, pozitie X=10, Y=52
+              s_kb = lv_keyboard_create(s_keypad_view);
+              lv_obj_set_size(s_kb, 620, 118);
+              lv_obj_set_pos(s_kb, 10, 52);
+              lv_obj_set_style_pad_all(s_kb, 1, LV_PART_MAIN);
+              lv_obj_set_style_pad_row(s_kb, 1, LV_PART_MAIN);
+              lv_obj_set_style_pad_column(s_kb, 1, LV_PART_MAIN);
+              lv_obj_set_style_pad_all(s_kb, 1, LV_PART_ITEMS);
+              lv_obj_set_style_pad_row(s_kb, 1, LV_PART_ITEMS);
+              lv_obj_set_style_pad_column(s_kb, 1, LV_PART_ITEMS);
+              lv_obj_set_style_text_font(s_kb, &lv_font_montserrat_12, LV_PART_ITEMS);
+              lv_obj_clear_flag(s_kb, LV_OBJ_FLAG_SCROLLABLE);
+
+              lv_keyboard_set_textarea(s_kb, s_ta);
+              lv_obj_add_event_cb(s_kb, keypad_event_cb, LV_EVENT_ALL, NULL);
+
+              lv_obj_add_flag(s_keypad_view, LV_OBJ_FLAG_HIDDEN);
+          }
+
+          void muse_keypad_show(lv_obj_t * ta) {
+              if (!s_keypad_view) {
+                  muse_keypad_create(lv_scr_act());
+              }
+              s_target_ta = ta;
+              if (s_target_ta && s_ta) {
+                  const char *src = lv_textarea_get_text(s_target_ta);
+                  lv_textarea_set_text(s_ta, src ? src : "");
+                  lv_textarea_set_cursor_pos(s_ta, LV_TEXTAREA_CURSOR_LAST);
+              }
+              lv_obj_clear_flag(s_keypad_view, LV_OBJ_FLAG_HIDDEN);
+              lv_obj_move_foreground(s_keypad_view);
+          }
+
+          void muse_keypad_hide(void) {
+              if (s_keypad_view) {
+                  lv_obj_add_flag(s_keypad_view, LV_OBJ_FLAG_HIDDEN);
+              }
+              s_target_ta = NULL;
+          }
+
+          lv_obj_t * muse_keypad_get_view(void) {
+              return s_keypad_view;
+          }
+          EOF
+
+          # 2. Motor nativ Gemini Flash 2.0 (REST, NVS, Audio Dispatch)
           cat << 'EOF' > esp32/components/muse/src/gemini_engine.c
           #include <stdio.h>
           #include <string.h>
@@ -53,7 +155,6 @@ jobs:
           #include "esp_heap_caps.h"
           #include "freertos/FreeRTOS.h"
           #include "freertos/task.h"
-          #include "lvgl.h"
 
           static const char *TAG_G = "GEMINI_CORE";
           EOF
@@ -69,86 +170,6 @@ jobs:
               void *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
               if (!ptr) ptr = malloc(size);
               return ptr;
-          }
-
-          void gemini_fix_keypad(lv_obj_t *kb, lv_obj_t *ta) {
-              if (!kb) return;
-
-              lv_obj_t *parent = lv_obj_get_parent(kb);
-              if (!parent) parent = lv_scr_act();
-
-              if (parent != lv_scr_act()) {
-                  lv_obj_set_size(parent, 640, 172);
-                  lv_obj_set_pos(parent, 0, 0);
-                  lv_obj_set_style_pad_all(parent, 0, 0);
-                  lv_obj_clear_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
-                  lv_obj_set_layout(parent, 0);
-              }
-
-              if (!ta) {
-                  ta = lv_keyboard_get_textarea(kb);
-              }
-              if (!ta && parent) {
-                  uint32_t cnt = lv_obj_get_child_cnt(parent);
-                  for (int32_t i = 0; i < cnt; i++) {
-                      lv_obj_t *c = lv_obj_get_child(parent, i);
-                      if (c != kb && lv_obj_check_type(c, &lv_textarea_class)) {
-                          ta = c;
-                          break;
-                      }
-                  }
-              }
-
-              // Eliminare orice alt textarea duplicat din container
-              if (parent && ta) {
-                  uint32_t cnt = lv_obj_get_child_cnt(parent);
-                  for (int32_t i = (int32_t)cnt - 1; i >= 0; i--) {
-                      lv_obj_t *c = lv_obj_get_child(parent, i);
-                      if (c != ta && c != kb && lv_obj_check_type(c, &lv_textarea_class)) {
-                          lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
-                          lv_obj_del(c);
-                      }
-                  }
-              }
-
-              // 1. Unica casuta de text pastrata: exact 620 x 50, x=10, y=1
-              if (ta) {
-                  if (lv_obj_get_parent(ta) != parent) {
-                      lv_obj_set_parent(ta, parent);
-                  }
-                  lv_obj_set_size(ta, 620, 50);
-                  lv_obj_set_pos(ta, 10, 1);
-                  lv_obj_set_style_bg_color(ta, lv_color_hex(0x18181B), 0);
-                  lv_obj_set_style_bg_opa(ta, LV_OPA_COVER, 0);
-                  lv_obj_set_style_border_color(ta, lv_color_hex(0x3B82F6), 0);
-                  lv_obj_set_style_border_width(ta, 2, 0);
-                  lv_obj_set_style_radius(ta, 4, 0);
-                  lv_obj_set_style_text_color(ta, lv_color_hex(0xFFFFFF), 0);
-                  lv_obj_set_style_text_font(ta, &lv_font_montserrat_12, 0);
-                  lv_obj_set_style_pad_all(ta, 6, 0);
-                  lv_textarea_set_password_mode(ta, false);
-                  lv_textarea_set_one_line(ta, false);
-                  lv_obj_clear_flag(ta, LV_OBJ_FLAG_HIDDEN);
-                  lv_obj_clear_flag(ta, LV_OBJ_FLAG_SCROLLABLE);
-              }
-
-              // 2. Tastatura: exact 620 x 120, x=10, y=52
-              lv_obj_set_size(kb, 620, 120);
-              lv_obj_set_pos(kb, 10, 52);
-              lv_obj_set_style_pad_all(kb, 1, LV_PART_MAIN);
-              lv_obj_set_style_pad_row(kb, 1, LV_PART_MAIN);
-              lv_obj_set_style_pad_column(kb, 1, LV_PART_MAIN);
-              lv_obj_set_style_pad_all(kb, 1, LV_PART_ITEMS);
-              lv_obj_set_style_pad_row(kb, 1, LV_PART_ITEMS);
-              lv_obj_set_style_pad_column(kb, 1, LV_PART_ITEMS);
-              lv_obj_set_style_text_font(kb, &lv_font_montserrat_12, LV_PART_ITEMS);
-              lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
-              lv_obj_clear_flag(kb, LV_OBJ_FLAG_SCROLLABLE);
-
-              if (ta) {
-                  lv_keyboard_set_textarea(kb, ta);
-                  lv_obj_move_foreground(ta);
-              }
           }
 
           void gemini_auto_init_nvs(void) {
@@ -228,7 +249,7 @@ jobs:
                       cJSON_AddItemToArray(parts, audio_part);
 
                       cJSON *text_part = cJSON_CreateObject();
-                      cJSON_AddStringToObject(text_part, "text", "Raspunde scurt in limba romana.");
+                      cJSON_AddStringToObject(text_part, "text", "Raspunde direct si scurt in limba romana.");
                       cJSON_AddItemToArray(parts, text_part);
 
                       char *post_data = cJSON_PrintUnformatted(root);
@@ -273,12 +294,13 @@ jobs:
           }
           EOF
 
+          # 3. Compactarea meniurilor UI si eliminarea referintelor chinezesti
           python3 - << 'PYEOF'
           import os, re
 
           for root, dirs, files in os.walk("esp32/components/muse"):
               for file in files:
-                  if not file.endswith((".c", ".cpp")):
+                  if file == "muse_keypad.c" or not file.endswith((".c", ".cpp")):
                       continue
 
                   p = os.path.join(root, file)
@@ -286,23 +308,16 @@ jobs:
                       content = f.read()
                   orig = content
 
-                  # Legare exclusiva in lv_keyboard_set_textarea fara creare duplicata
-                  if "keyboard" in content or "keypad" in file.lower():
-                      if "gemini_fix_keypad" not in content:
-                          content = "extern void gemini_fix_keypad(void *kb, void *ta);\n" + content
-
-                      content = re.sub(
-                          r'lv_keyboard_set_textarea\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*([a-zA-Z0-9_>.-]+)\s*\);',
-                          r'gemini_fix_keypad(\1, \2);',
-                          content
-                      )
-
+                  # Font uniform compact Montserrat 12
                   content = re.sub(r'&lv_font_montserrat_(?:14|16|18|20|24)', '&lv_font_montserrat_12', content)
+
+                  # Randuri compacte de 30px pentru a afisa 4 optiuni pe ecran de 172px
                   content = re.sub(r'lv_obj_set_height\s*\(\s*([a-zA-Z0-9_>.-]+)\s*,\s*(?:[4-9][0-9]|1[0-9]{2})\s*\);', r'lv_obj_set_height(\1, 30);', content)
                   content = re.sub(r'lv_obj_set_style_pad_top\s*\(\s*([^,]+)\s*,\s*[5-9][0-9]*\s*,\s*0\s*\);', r'lv_obj_set_style_pad_top(\1, 1, 0);', content)
                   content = re.sub(r'lv_obj_set_style_pad_bottom\s*\(\s*([^,]+)\s*,\s*[5-9][0-9]*\s*,\s*0\s*\);', r'lv_obj_set_style_pad_bottom(\1, 1, 0);', content)
                   content = re.sub(r'lv_obj_set_height\s*\(\s*([^,;]*header[^,;]*)\s*,\s*[0-9]+\s*\);', r'lv_obj_set_height(\1, 22);', content, flags=re.IGNORECASE)
 
+                  # Decuplare servicii chineze si redenumire Muse -> Gemini
                   content = content.replace('"MUSE"', '"GEMINI AI"')
                   content = content.replace('"Muse"', '"Gemini AI"')
                   content = content.replace('"VM ID"', '"Model"')
