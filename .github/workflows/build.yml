@@ -146,9 +146,10 @@ jobs:
           print("lvgl_port.c patched cleanly with Python (including Touch fix)!")
           PYEOF
 
-          # Generare 10_LVGL_V9_Test.ino cu initializare I2C si ecran albastru deschis + text negru
+          # Generare 10_LVGL_V9_Test.ino cu initializare I2C, ecran adaptat si conexiune Wi-Fi activa
           cat << 'EOF' > "$SKETCH_DIR/10_LVGL_V9_Test.ino"
           #include <Arduino.h>
+          #include <WiFi.h>
 
           extern "C" {
           #include "i2c_bsp.h"
@@ -156,8 +157,29 @@ jobs:
           }
           #include <lvgl.h>
 
+          // Datele retelei Wi-Fi locale
+          const char* ssid = "TP-Link_2.4G_9318_Guest";
+          const char* password = "revelion";
+
+          lv_obj_t *lbl_wifi_status = NULL;
+
+          // Functie auxiliara pentru actualizarea textului de stare Wi-Fi pe ecran
+          void update_wifi_ui(const char* msg) {
+              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
+              lvgl_port_lock(0);
+              #endif
+
+              if (lbl_wifi_status) {
+                  lv_label_set_text(lbl_wifi_status, msg);
+              }
+
+              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
+              lvgl_port_unlock();
+              #endif
+          }
+
           // ==========================================
-          // ECRAN TEST: GEMINI OS BY BOGDAN
+          // ECRAN TEST: GEMINI OS BY BOGDAN + STATUS WI-FI
           // Fundal Albastru Deschis (#38BDF8) & Scris Negru (#000000)
           // ==========================================
           void create_bogdan_ui() {
@@ -177,11 +199,19 @@ jobs:
                   lv_obj_set_style_bg_color(scr, lv_color_hex(0x38BDF8), 0);
                   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-                  // 2. Titlu Principal: "Gemini OS by Bogdan" (Negru, Font Montserrat 20)
+                  // 2. Titlu Principal (font 18 ajustat vertical pentru a incapea complet)
                   lv_obj_t *lbl_title = lv_label_create(scr);
                   lv_label_set_text(lbl_title, "Gemini OS by Bogdan");
                   lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x000000), 0);
-                  lv_obj_center(lbl_title);
+                  lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_18, 0);
+                  lv_obj_align(lbl_title, LV_ALIGN_CENTER, 0, -22);
+
+                  // 3. Eticheta de stare Wi-Fi sub titlu
+                  lbl_wifi_status = lv_label_create(scr);
+                  lv_label_set_text(lbl_wifi_status, "Wi-Fi: Initializare...");
+                  lv_obj_set_style_text_color(lbl_wifi_status, lv_color_hex(0x0F172A), 0);
+                  lv_obj_set_style_text_font(lbl_wifi_status, &lv_font_montserrat_14, 0);
+                  lv_obj_align(lbl_wifi_status, LV_ALIGN_CENTER, 0, 18);
               }
 
               #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
@@ -192,18 +222,39 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("Starting Gemini OS Bogdan Edition...");
+              Serial.println("Starting Gemini OS Bogdan Edition with Wi-Fi...");
 
-              // 1. Initializare I2C a placii (pentru expanderul TCA9554 si touch)
-              // i2c_bsp init handled dynamically
-              delay(100);
-
-              // 2. Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
+              // 1. Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
               lvgl_port_init();
 
               delay(200);
               create_bogdan_ui();
               Serial.println("UI Created successfully!");
+
+              // 2. Pornire conectare Wi-Fi
+              update_wifi_ui("Wi-Fi: Se conecteaza la TP-Link...");
+              Serial.print("Connecting to WiFi: ");
+              Serial.println(ssid);
+
+              WiFi.mode(WIFI_STA);
+              WiFi.begin(ssid, password);
+
+              int retry = 0;
+              while (WiFi.status() != WL_CONNECTED && retry < 25) {
+                  delay(500);
+                  Serial.print(".");
+                  retry++;
+              }
+
+              if (WiFi.status() == WL_CONNECTED) {
+                  String ip_str = WiFi.localIP().toString();
+                  Serial.println("\nWiFi Connected! IP: " + ip_str);
+                  String status_msg = "Wi-Fi Conectat! IP: " + ip_str;
+                  update_wifi_ui(status_msg.c_str());
+              } else {
+                  Serial.println("\nWiFi Connection Failed!");
+                  update_wifi_ui("Wi-Fi: Conexiune esuata!");
+              }
           }
 
           void loop() {
