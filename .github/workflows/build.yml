@@ -105,13 +105,22 @@ jobs:
           code = code.replace("lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)", "2")
 
           # 2. Asigurare ca TCA9554 nu declanseaza abort() daca I2C intarzie
-          code = code.replace(
-              "ESP_ERROR_CHECK(i2c_master_get_bus_handle(0, &tca9554_i2c_bus));",
-              "i2c_master_get_bus_handle(0, &tca9554_i2c_bus);"
+          # 2. Asigurare ca TCA9554 nu declanseaza abort() daca I2C intarzie
+          code = re.sub(
+              r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
+              r'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { tca9554_i2c_bus = NULL; }',
+              code
           )
-          code = code.replace(
-              "ESP_ERROR_CHECK(esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander));",
-              "if (tca9554_i2c_bus != NULL) { esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander); }"
+          code = re.sub(
+              r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_new_i2c_tca9554\s*\([^;]+\)\s*\)\s*;',
+              r'if (tca9554_i2c_bus != NULL) { esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander); } else { io_expander = NULL; }',
+              code
+          )
+          # Protejam apelurile set_level daca io_expander e NULL
+          code = re.sub(
+              r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_set_level\s*\(\s*io_expander\s*,([^)]+)\)\s*\)\s*;',
+              r'if (io_expander != NULL) { esp_io_expander_set_level(io_expander, \g<1>); }',
+              code
           )
 
           with open(port_path, "w", encoding="utf-8") as f:
@@ -168,7 +177,7 @@ jobs:
               Serial.println("Starting Gemini OS Bogdan Edition...");
 
               // 1. Initializare I2C a placii (pentru expanderul TCA9554 si touch)
-              i2c_bsp_init();
+              // i2c_bsp init handled dynamically
               delay(100);
 
               // 2. Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
