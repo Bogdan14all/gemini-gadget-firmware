@@ -1,11 +1,11 @@
-name: Build Minimal Gemini OS v43 (Bogdan Edition)
+name: Build Minimal Gemini OS v44 (Bogdan Edition - Buttons Fixed)
 
 on:
   workflow_dispatch:
 
 jobs:
   build-minimal:
-    name: Build Minimal Gemini OS - Hello Bogdan
+    name: Build Gemini OS - Buttons Working
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Waveshare Official V2 Repository
@@ -21,7 +21,7 @@ jobs:
 
       - name: Install esptool & zip
         run: |
-          pip install esptool
+          pip install "esptool<5"          # fix: esptool.py există doar în <5
           sudo apt-get update && sudo apt-get install -y zip
 
       - name: Setup Arduino CLI & ESP32 Core
@@ -43,17 +43,13 @@ jobs:
 
           arduino-cli lib install "lvgl"@9.1.0 2>/dev/null || true
 
-          # Configurare lv_conf.h completa
+          # Configurare lv_conf.h – compatibil LVGL 9.1 (nu mai folosim define-uri din v8)
           cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
           #ifndef LV_CONF_H
           #define LV_CONF_H
           #define LV_COLOR_DEPTH 16
-          #define LV_COLOR_16_SWAP 1
-          #define LV_MEM_CUSTOM 0
-          #define LV_MEM_SIZE (128U * 1024U)
-          #define LV_TICK_CUSTOM 1
-          #define LV_TICK_CUSTOM_INCLUDE "Arduino.h"
-          #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
+          #define LV_USE_STDLIB_MALLOC LV_STDLIB_BUILTIN
+          #define LV_MEM_SIZE_KILOBYTES 128
           #define LV_FONT_MONTSERRAT_12 1
           #define LV_FONT_MONTSERRAT_14 1
           #define LV_FONT_MONTSERRAT_16 1
@@ -61,8 +57,6 @@ jobs:
           #define LV_FONT_MONTSERRAT_20 1
           #define LV_FONT_DEFAULT &lv_font_montserrat_20
           #define LV_USE_LABEL 1
-          #define LV_USE_OBJ_ID_BUILTIN 0
-          #define LV_USE_OBJ_PROPERTY 0
           #define LV_USE_DEMO_WIDGETS 0
           #define LV_USE_DEMO_MUSIC 0
           #define LV_USE_DEMO_BENCHMARK 0
@@ -75,47 +69,35 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/lv_conf.h 2>/dev/null || true
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
 
-          # Curatare module demo/debug
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
-          if [ -f ~/Arduino/libraries/lvgl/src/core/lv_obj_id_builtin.c ]; then
-            echo "// disabled" > ~/Arduino/libraries/lvgl/src/core/lv_obj_id_builtin.c
-          fi
 
-      - name: Configure Display to Show 'Gemini OS by Bogdan'
+      - name: Configure Display & Buttons
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
-          echo "Configuring display and hardware drivers in $SKETCH_DIR..."
 
-          # Disable demo references
+          # Dezactivează demo-urile
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include "demos\/lv_demos.h"/\/\/ #include "demos\/lv_demos.h"/g' {} + 2>/dev/null || true
-          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include <demos\/lv_demos.h>/\/\/ #include <demos\/lv_demos.h>/g' {} + 2>/dev/null || true
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/lv_demo_widgets();/\/\/ lv_demo_widgets();/g' {} + 2>/dev/null || true
 
-          # Python patching for drivers and generating clean .ino
           python3 - << 'PYEOF'
           import re, os
 
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
-          # 1. Patch lcd_bl_pwm_bsp.c: Force 100% brightness on LEDC PWM channel 0
+          # 1. Patch lcd_bl_pwm_bsp.c – nu mai forța LEDC, lăsăm driver-ul original
           for root, dirs, files in os.walk(sketch_dir):
               for file in files:
                   if file == "lcd_bl_pwm_bsp.c":
                       bl_path = os.path.join(root, file)
                       with open(bl_path, "r", encoding="utf-8", errors="ignore") as f:
                           bl_c = f.read()
-                      bl_c = re.sub(
-                          r'void\s+setUpduty\s*\(\s*uint16_t\s+duty\s*\)\s*\{[^}]*\}',
-                          'void setUpduty(uint16_t duty) { (void)duty; ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 8191); ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0); }',
-                          bl_c
-                      )
+                      # Elimină orice ledc_stop forțat
                       bl_c = re.sub(r'ledc_stop\s*\([^;]+\);', '// ledc_stop disabled', bl_c)
                       with open(bl_path, "w", encoding="utf-8") as f:
                           f.write(bl_c)
-                      print(f"Patched {bl_path} successfully!")
 
-          # 2. Inspect i2c_bsp.h to find original I2C init function
+          # 2. Detectează funcția de init I2C
           i2c_h_path = f"{sketch_dir}/i2c_bsp.h"
           i2c_init_func = "bsp_i2c_init"
           if os.path.exists(i2c_h_path):
@@ -123,13 +105,13 @@ jobs:
                   h_content = f.read()
               funcs = re.findall(r'(?:esp_err_t|void|int|bool)\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*;', h_content)
               for f_name, f_args in funcs:
-                  if "init" in f_name.lower() or "i2c" in f_name.lower():
+                  if "init" in f_name.lower() and "i2c" in f_name.lower():
                       if f_args.strip() in ("", "void"):
                           i2c_init_func = f_name
                           break
           print(f"Using I2C init function: {i2c_init_func}")
 
-          # 3. Patch lvgl_port.c
+          # 3. Patch lvgl_port.c – elimină ESP_ERROR_CHECK-urile care pot aborta
           port_path = f"{sketch_dir}/lvgl_port.c"
           with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
               code = f.read()
@@ -137,13 +119,6 @@ jobs:
           code = code.replace("LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)", "2")
           code = code.replace("lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)", "2")
 
-          # Safe touch callback
-          safe_touch = "static void TouchInputReadCallback(lv_indev_t * indev_drv, lv_indev_data_t * data) { if (data) { data->state = LV_INDEV_STATE_RELEASED; } }"
-          pattern = r'static\s+void\s+TouchInputReadCallback\s*\([^{]+\{(?:[^{}]*|\{[^{}]*\})*\}'
-          if re.search(pattern, code):
-              code = re.sub(pattern, safe_touch, code, count=1)
-
-          # EXIO init without abort
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
               'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { puts("[EXIO] I2C bus 0 not ready"); tca9554_i2c_bus = NULL; } else { puts("[EXIO] I2C bus 0 acquired!"); }',
@@ -151,7 +126,7 @@ jobs:
           )
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_new_i2c_tca9554\s*\([^;]+\)\s*\)\s*;',
-              'if (tca9554_i2c_bus != NULL) { if (esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander) == ESP_OK) { puts("[EXIO] TCA9554 expander connected at 0x20!"); } else { puts("[EXIO] Failed to connect TCA9554"); io_expander = NULL; } } else { io_expander = NULL; }',
+              'if (tca9554_i2c_bus != NULL) { if (esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander) == ESP_OK) { puts("[EXIO] TCA9554 connected!"); } else { puts("[EXIO] Failed TCA9554"); io_expander = NULL; } } else { io_expander = NULL; }',
               code
           )
           code = re.sub(
@@ -167,9 +142,8 @@ jobs:
 
           with open(port_path, "w", encoding="utf-8") as f:
               f.write(code)
-          print("lvgl_port.c patched successfully!")
 
-          # 4. Generate clean 10_LVGL_V9_Test.ino dynamically
+          # 4. Generează .ino cu suport pentru butoane
           ino_lines = [
               '#include <Arduino.h>',
               '#include <WiFi.h>',
@@ -183,125 +157,126 @@ jobs:
               'const char* ssid = "TP-Link_2.4G_9318_Guest";',
               'const char* password = "revelion";',
               '',
+              '// --- Pini butoane pentru V2 ---',
+              '#define BOOT_BTN 0',
+              '#define PWR_BTN  16',
+              '',
+              '// --- Backlight V2 ---',
+              '#define LCD_BL   42',
+              '',
+              'lv_obj_t *lbl_boot_state = NULL;',
+              'lv_obj_t *lbl_pwr_state  = NULL;',
+              '',
+              'void update_button_labels() {',
+              '    if (lbl_boot_state) {',
+              '        lv_label_set_text(lbl_boot_state, digitalRead(BOOT_BTN) == LOW ? "BOOT: APASAT" : "BOOT: liber");',
+              '    }',
+              '    if (lbl_pwr_state) {',
+              '        lv_label_set_text(lbl_pwr_state, digitalRead(PWR_BTN) == LOW ? "PWR: APASAT" : "PWR: liber");',
+              '    }',
+              '}',
+              '',
               'void create_bogdan_ui() {',
-              '    gpio_reset_pin((gpio_num_t)1);',
-              '    pinMode(1, OUTPUT);',
-              '    digitalWrite(1, HIGH); // Backlight GPIO 1 (V2 Hardware)',
+              '    // Backlight V2: GPIO42, activ-low => LOW = aprins',
+              '    pinMode(LCD_BL, OUTPUT);',
+              '    digitalWrite(LCD_BL, LOW);',
               '',
-              '    gpio_reset_pin((gpio_num_t)43);',
-              '    pinMode(43, OUTPUT);',
-              '    digitalWrite(43, HIGH); // Backlight GPIO 43 (V1 Hardware)',
-              '',
-              '    #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)',
+              '    // Lock LVGL (apel necondiționat – funcția există în lvgl_port.h)',
               '    lvgl_port_lock(0);',
-              '    #endif',
               '',
               '    lv_obj_t *scr = lv_screen_active();',
               '    if (!scr) scr = lv_scr_act();',
               '    if (scr) {',
               '        lv_obj_clean(scr);',
               '',
-              '        // 1. Light Blue Background (#38BDF8)',
               '        lv_obj_set_style_bg_color(scr, lv_color_hex(0x38BDF8), 0);',
               '        lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);',
               '',
-              '        // 2. Title Line 1: "Gemini OS" (Montserrat 18)',
               '        lv_obj_t *lbl_title = lv_label_create(scr);',
               '        lv_label_set_text(lbl_title, "Gemini OS");',
               '        lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x000000), 0);',
               '        lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_18, 0);',
-              '        lv_obj_align(lbl_title, LV_ALIGN_CENTER, 0, -36);',
+              '        lv_obj_align(lbl_title, LV_ALIGN_CENTER, 0, -50);',
               '',
-              '        // 3. Title Line 2: "by Bogdan" (Montserrat 14)',
               '        lv_obj_t *lbl_sub = lv_label_create(scr);',
               '        lv_label_set_text(lbl_sub, "by Bogdan");',
               '        lv_obj_set_style_text_color(lbl_sub, lv_color_hex(0x0F172A), 0);',
               '        lv_obj_set_style_text_font(lbl_sub, &lv_font_montserrat_14, 0);',
-              '        lv_obj_align(lbl_sub, LV_ALIGN_CENTER, 0, -14);',
+              '        lv_obj_align(lbl_sub, LV_ALIGN_CENTER, 0, -28);',
               '',
-              '        // 4. Wi-Fi Status: Montserrat 14 (high readability)',
+              '        // Stare BOOT',
+              '        lbl_boot_state = lv_label_create(scr);',
+              '        lv_label_set_text(lbl_boot_state, "BOOT: liber");',
+              '        lv_obj_set_style_text_color(lbl_boot_state, lv_color_hex(0x000000), 0);',
+              '        lv_obj_set_style_text_font(lbl_boot_state, &lv_font_montserrat_12, 0);',
+              '        lv_obj_align(lbl_boot_state, LV_ALIGN_CENTER, 0, 0);',
+              '',
+              '        // Stare PWR',
+              '        lbl_pwr_state = lv_label_create(scr);',
+              '        lv_label_set_text(lbl_pwr_state, "PWR: liber");',
+              '        lv_obj_set_style_text_color(lbl_pwr_state, lv_color_hex(0x000000), 0);',
+              '        lv_obj_set_style_text_font(lbl_pwr_state, &lv_font_montserrat_12, 0);',
+              '        lv_obj_align(lbl_pwr_state, LV_ALIGN_CENTER, 0, 20);',
+              '',
+              '        // Wi-Fi status (static, nu reflectă realitatea)',
               '        lv_obj_t *lbl_wifi = lv_label_create(scr);',
               '        lv_label_set_text(lbl_wifi, "Wi-Fi: Conectat!");',
               '        lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x0284C7), 0);',
               '        lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_14, 0);',
-              '        lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 18);',
+              '        lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 50);',
               '    }',
               '',
-              '    #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)',
               '    lvgl_port_unlock();',
-              '    #endif',
               '}',
               '',
               'void setup() {',
               '    Serial.begin(115200);',
               '    delay(500);',
-              '    Serial.println("Starting Gemini OS Bogdan Edition...");',
               '',
-              '    // 1. Initialize native I2C Master bus',
-              '    Serial.println("Initializing I2C Master bus...");',
+              '    // Butoane ca intrări cu pull-up intern (active-low)',
+              '    pinMode(BOOT_BTN, INPUT_PULLUP);',
+              '    pinMode(PWR_BTN, INPUT_PULLUP);',
+              '',
               '    ' + i2c_init_func + '();',
               '    delay(50);',
-              '',
-              '    // 2. Initialize Waveshare LVGL display port (AXS15231B QSPI driver + FreeRTOS task)',
-              '    delay(100);',
               '    lvgl_port_init();',
-              '',
-              '    // 3. Force GPIO 1 and GPIO 43 matrix reset to GPIO output',
-              '    gpio_reset_pin((gpio_num_t)1);',
-              '    pinMode(1, OUTPUT);',
-              '    digitalWrite(1, HIGH);',
-              '',
-              '    gpio_reset_pin((gpio_num_t)43);',
-              '    pinMode(43, OUTPUT);',
-              '    digitalWrite(43, HIGH);',
-              '',
               '    delay(200);',
               '    create_bogdan_ui();',
-              '    Serial.println("UI Created successfully!");',
               '',
-              '    // 4. Initialize Wi-Fi in Station mode without sleep',
               '    WiFi.mode(WIFI_STA);',
-              '    WiFi.setTxPower(WIFI_POWER_8_5dBm);',
               '    WiFi.setSleep(false);',
               '    WiFi.begin(ssid, password);',
-              '    Serial.println("Connecting to WiFi: " + String(ssid));',
               '}',
               '',
               'void loop() {',
-              '    // Maintain continuous 3.3V drive on backlight pin',
-              '    gpio_reset_pin((gpio_num_t)1);',
-              '    pinMode(1, OUTPUT);',
-              '    digitalWrite(1, HIGH);',
-              '',
-              '    gpio_reset_pin((gpio_num_t)43);',
-              '    pinMode(43, OUTPUT);',
-              '    digitalWrite(43, HIGH);',
+              '    static unsigned long last_btn_poll = 0;',
+              '    if (millis() - last_btn_poll > 100) {',
+              '        last_btn_poll = millis();',
+              '        lvgl_port_lock(0);',
+              '        update_button_labels();',
+              '        lvgl_port_unlock();',
+              '    }',
               '',
               '    static unsigned long last_beat = 0;',
               '    if (millis() - last_beat > 5000) {',
               '        last_beat = millis();',
-              '        if (WiFi.status() == WL_CONNECTED) {',
-              '            Serial.println("[Heartbeat] Gemini OS Bogdan Edition ruleaza stabil pe Wi-Fi! IP: " + WiFi.localIP().toString());',
-              '        } else {',
-              '            Serial.println("[Heartbeat] Conectare Wi-Fi in desfasurare...");',
-              '        }',
+              '        Serial.println(WiFi.status() == WL_CONNECTED ? "[Heartbeat] Wi-Fi OK" : "[Heartbeat] Wi-Fi...");',
               '    }',
-              '    delay(100);',
+              '    delay(20);',
               '}',
               ''
           ]
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write('\n'.join(ino_lines))
-          print("10_LVGL_V9_Test.ino written successfully!")
+          print("10_LVGL_V9_Test.ino scris cu suport butoane!")
           PYEOF
+
       - name: Compile Minimal Firmware
         run: |
           SKETCH_PATH="Arduino/examples/10_LVGL_V9_Test/10_LVGL_V9_Test.ino"
-          FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi"
-          echo "Compilare sketch: $SKETCH_PATH cu FQBN: $FQBN"
-
-          arduino-cli compile --fqbn "$FQBN"             --output-dir build_output             "$SKETCH_PATH"
+          FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
+          arduino-cli compile --fqbn "$FQBN" --output-dir build_output "$SKETCH_PATH"
 
       - name: Merge into Single .bin & Create Clean ZIP
         shell: bash
@@ -311,11 +286,10 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
 
-          echo "Bootloader (0x0): $BOOTLOADER"
-          echo "Partitions (0x8000): $PARTITIONS"
-          echo "App (0x10000): $APP_BIN"
-
-          esptool.py --chip esp32s3 merge_bin             -o package_bin/gemini-os-full-0x0.bin             --flash_mode keep             --flash_size 16MB             --flash_freq 80m             0x0 "$BOOTLOADER"             0x8000 "$PARTITIONS"             0x10000 "$APP_BIN"
+          esptool --chip esp32s3 merge_bin \
+            -o package_bin/gemini-os-full-0x0.bin \
+            --flash_mode keep --flash_size 16MB --flash_freq 80m \
+            0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
 
           ls -lh package_bin/gemini-os-full-0x0.bin
 
