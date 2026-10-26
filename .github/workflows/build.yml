@@ -1,4 +1,4 @@
-name: Build Gemini OS - Step 2b Audio Loopback (I2C fixed)
+name: Build Gemini OS - Step 2c Audio Loopback (I2C dev handles)
 
 on:
   workflow_dispatch:
@@ -95,7 +95,7 @@ jobs:
                       with open(p, "w", encoding="utf-8") as f:
                           f.write(bl_c)
 
-          # 2. Detecteaza functia I2C init
+          # 2. Detect I2C init function
           i2c_init_func = "bsp_i2c_init"
           for h_path in glob.glob(f"{sketch_dir}/*.h"):
               with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -108,7 +108,7 @@ jobs:
                       break
           print(f"[OK] I2C init = {i2c_init_func}")
 
-          # 3. lvgl_port.c patches
+          # 3. Patch lvgl_port.c
           port_path = f"{sketch_dir}/lvgl_port.c"
           with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
               code = f.read()
@@ -135,7 +135,7 @@ jobs:
           with open(port_path, "w", encoding="utf-8") as f:
               f.write(code)
 
-          # 4. lvgl_port_lock/unlock injection
+          # 4. Inject lock/unlock
           h_path = f"{sketch_dir}/lvgl_port.h"
           with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
               h_content = f.read()
@@ -224,6 +224,10 @@ jobs:
           i2s_chan_handle_t rx_handle = NULL;
           i2c_master_bus_handle_t i2c_bus = NULL;
 
+          i2c_master_dev_handle_t dev_es8311  = NULL;
+          i2c_master_dev_handle_t dev_es7210  = NULL;
+          i2c_master_dev_handle_t dev_tca9554 = NULL;
+
           lv_obj_t *lbl_status = NULL;
           lv_obj_t *bar_level  = NULL;
           lv_obj_t *lbl_peak   = NULL;
@@ -233,42 +237,56 @@ jobs:
 
           bool audio_ready = false;
 
-          // ---------- I2C helpers (ESP-IDF, pe bus 0 existent) ----------
+          // ---------- I2C helpers (ESP-IDF, with device handles) ----------
+          i2c_master_dev_handle_t i2c_get_dev(uint8_t addr) {
+              i2c_master_dev_handle_t *slot = NULL;
+              if (addr == ES8311_ADDR)       slot = &dev_es8311;
+              else if (addr == ES7210_ADDR)  slot = &dev_es7210;
+              else if (addr == TCA9554_ADDR) slot = &dev_tca9554;
+              if (slot == NULL) return NULL;
+              if (*slot != NULL) return *slot;
+
+              i2c_device_config_t cfg = {};
+              cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+              cfg.device_address  = addr;
+              cfg.scl_speed_hz    = 100000;
+
+              if (i2c_master_bus_add_device(i2c_bus, &cfg, slot) != ESP_OK) {
+                  Serial.printf("[I2C] add_device 0x%02X failed\n", addr);
+                  return NULL;
+              }
+              return *slot;
+          }
+
           bool i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val) {
-              if (!i2c_bus) return false;
+              i2c_master_dev_handle_t dev = i2c_get_dev(addr);
+              if (dev == NULL) return false;
               uint8_t buf[2] = { reg, val };
-              return i2c_master_transmit(i2c_bus, addr, buf, 2, 100) == ESP_OK;
+              return i2c_master_transmit(dev, buf, 2, 100) == ESP_OK;
           }
 
           bool i2c_probe(uint8_t addr) {
               if (!i2c_bus) return false;
-              return i2c_master_probe(i2c_bus, addr, 100) == ESP_OK;
+              return i2c_master_probe(i2c_bus, addr, 50) == ESP_OK;
           }
 
           // ---------- TCA9554 ----------
           void tca9554_enable_audio() {
-              if (!i2c_bus) { Serial.println("[TCA] no i2c bus"); return; }
-
               if (!i2c_probe(TCA9554_ADDR)) {
                   Serial.println("[TCA] expander not on bus");
                   return;
               }
-
-              // 0x03 = Configuration register: 0 = output
-              i2c_write_reg(TCA9554_ADDR, 0x03, 0x00);
+              i2c_write_reg(TCA9554_ADDR, 0x03, 0x00);  // all pins = output
               delay(20);
-
-              // 0x01 = Output register: 0xFF = all HIGH (releases codec reset, enables PA)
-              i2c_write_reg(TCA9554_ADDR, 0x01, 0xFF);
+              i2c_write_reg(TCA9554_ADDR, 0x01, 0xFF);  // all pins = HIGH
               delay(100);
-
               Serial.println("[TCA] codecs released from reset (all pins HIGH)");
           }
 
           // ---------- Codecs ----------
           bool es8311_init() {
               if (!i2c_probe(ES8311_ADDR)) {
-                  Serial.println("[ES8311] not found at 0x18");
+                  Serial.println("[ES8311] not on bus");
                   return false;
               }
               i2c_write_reg(ES8311_ADDR, 0x00, 0x1F); delay(20);
@@ -296,7 +314,7 @@ jobs:
               i2c_write_reg(ES8311_ADDR, 0x15, 0x40);
               i2c_write_reg(ES8311_ADDR, 0x16, 0x24);
               i2c_write_reg(ES8311_ADDR, 0x17, 0xBF);
-              i2c_write_reg(ES8311_ADDR, 0x32, 0xBF);  // DAC vol ~-15dB
+              i2c_write_reg(ES8311_ADDR, 0x32, 0xBF);
               i2c_write_reg(ES8311_ADDR, 0x37, 0x08);
               Serial.println("[ES8311] init OK");
               return true;
@@ -304,7 +322,7 @@ jobs:
 
           bool es7210_init() {
               if (!i2c_probe(ES7210_ADDR)) {
-                  Serial.println("[ES7210] not found at 0x40");
+                  Serial.println("[ES7210] not on bus");
                   return false;
               }
               i2c_write_reg(ES7210_ADDR, 0x00, 0xFF); delay(20);
@@ -431,16 +449,16 @@ jobs:
               pinMode(BOOT_BTN, INPUT_PULLUP);
               pinMode(PWR_BTN, INPUT_PULLUP);
 
-              // 1. I2C bus 0 creat de Waveshare BSP (SDA=47, SCL=48)
+              // 1. BSP I2C bus 0
               I2C_INIT_CALL
               delay(50);
 
-              // 2. LVGL + display + touch (folosesc bus 0)
+              // 2. LVGL + display + touch
               lvgl_port_init();
               delay(300);
               build_ui();
 
-              // 3. Obtinem handle-ul bus-ului 0 pentru codecuri
+              // 3. Get bus 0 handle
               if (i2c_master_get_bus_handle(0, &i2c_bus) != ESP_OK) {
                   Serial.println("[I2C] cannot get bus 0");
                   set_status("I2C bus fail");
@@ -448,7 +466,7 @@ jobs:
               }
               Serial.println("[I2C] bus 0 acquired for codecs");
 
-              // 4. Scan rapid: ce e pe bus?
+              // 4. Scan bus
               Serial.println("[I2C] scanning addresses...");
               for (uint8_t a = 1; a < 127; a++) {
                   if (i2c_master_probe(i2c_bus, a, 20) == ESP_OK) {
@@ -456,16 +474,16 @@ jobs:
                   }
               }
 
-              // 5. Scoatem codecurile din reset prin TCA9554
+              // 5. TCA9554 releases codecs from reset
               tca9554_enable_audio();
 
-              // 6. Pornim I2S (MCLK pentru codecuri)
+              // 6. I2S start (MCLK)
               if (!i2s_init()) {
                   set_status("I2S init failed");
                   return;
               }
 
-              // 7. Init codecuri
+              // 7. Init codecs
               bool ok8311 = es8311_init();
               bool ok7210 = es7210_init();
 
