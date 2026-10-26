@@ -1,4 +1,4 @@
-name: Build Minimal Gemini OS v40 (Bogdan Edition)
+name: Build Minimal Gemini OS v41 (Bogdan Edition)
 
 on:
   workflow_dispatch:
@@ -109,7 +109,7 @@ jobs:
                       # Rescriem complet setUpduty sa seteze 100% (duty 8191)
                       bl_c = re.sub(
                           r'void\s+setUpduty\s*\([^)]*\)\s*\{[^}]*\}',
-                          'void setUpduty(uint32_t duty) { ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 8191); ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0); }',
+                          'void setUpduty(uint16_t duty) { ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 8191); ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0); }',
                           bl_c
                       )
                       # Neutralizam ledc_stop complet
