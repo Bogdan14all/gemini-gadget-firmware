@@ -1,11 +1,11 @@
-name: Build Gemini OS - Step 2c Audio Loopback (I2C dev handles)
+name: Build Gemini Live Voice Assistant
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-audio:
-    name: Build - Audio Loopback Test
+  build:
+    name: Build Gemini Live Firmware
     runs-on: ubuntu-latest
 
     steps:
@@ -34,14 +34,16 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
-      - name: Install LVGL 9.1
+      - name: Install Libraries (LVGL, WebSockets, ArduinoJson)
         shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
           if [ -d "Arduino/libraries" ]; then
             cp -r Arduino/libraries/* ~/Arduino/libraries/ 2>/dev/null || true
           fi
-          arduino-cli lib install "lvgl"@9.1.0 2>/dev/null || true
+          arduino-cli lib install "lvgl"@9.1.0
+          arduino-cli lib install "WebSockets"@2.4.1
+          arduino-cli lib install "ArduinoJson"@7.0.4
 
           cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
           #ifndef LV_CONF_H
@@ -69,7 +71,7 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Patch Drivers & Generate Audio Sketch
+      - name: Patch Drivers & Generate Gemini Live Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -84,7 +86,7 @@ jobs:
 
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
-          # 1. lcd_bl_pwm_bsp.c
+          # 1. Patch lcd_bl_pwm_bsp.c
           for root, dirs, files in os.walk(sketch_dir):
               for file in files:
                   if file == "lcd_bl_pwm_bsp.c":
@@ -95,7 +97,7 @@ jobs:
                       with open(p, "w", encoding="utf-8") as f:
                           f.write(bl_c)
 
-          # 2. Detect I2C init function
+          # 2. Detect I2C init
           i2c_init_func = "bsp_i2c_init"
           for h_path in glob.glob(f"{sketch_dir}/*.h"):
               with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -189,8 +191,9 @@ jobs:
           ino = textwrap.dedent(r'''
           #include <Arduino.h>
           #include <WiFi.h>
+          #include <WebSocketsClient.h>
+          #include <ArduinoJson.h>
           #include <driver/i2s_std.h>
-          #include <driver/gpio.h>
           #include <driver/i2c_master.h>
           #include <esp_heap_caps.h>
 
@@ -200,167 +203,112 @@ jobs:
           }
           #include <lvgl.h>
 
-          // ---------- Pini ----------
+          // ---------- PINI ----------
           #define LCD_BL    42
-          #define BOOT_BTN  0
-          #define PWR_BTN   16
-
           #define I2S_MCLK  7
           #define I2S_WS    46
           #define I2S_BCLK  15
           #define I2S_DIN   6
           #define I2S_DOUT  45
 
-          // ---------- I2C ----------
-          #define ES8311_ADDR  0x18
-          #define ES7210_ADDR  0x40
-          #define TCA9554_ADDR 0x20
-
-          // ---------- Audio ----------
-          #define SAMPLE_RATE    24000
-          #define BUFFER_SAMPLES 1024
+          // ---------- AUDIO ----------
+          #define SAMPLE_RATE_MIC   16000   // Gemini input
+          #define SAMPLE_RATE_SPK   24000   // Gemini output
+          #define BUFFER_SAMPLES    512
 
           i2s_chan_handle_t tx_handle = NULL;
           i2s_chan_handle_t rx_handle = NULL;
           i2c_master_bus_handle_t i2c_bus = NULL;
 
-          i2c_master_dev_handle_t dev_es8311  = NULL;
-          i2c_master_dev_handle_t dev_es7210  = NULL;
-          i2c_master_dev_handle_t dev_tca9554 = NULL;
-
-          lv_obj_t *lbl_status = NULL;
-          lv_obj_t *bar_level  = NULL;
-          lv_obj_t *lbl_peak   = NULL;
-
-          const char* ssid = "TP-Link_2.4G_9318_Guest";
+          // ---------- GEMINI ----------
+          const char* ssid     = "TP-Link_2.4G_9318_Guest";
           const char* password = "revelion";
+          const char* api_key  = "YOUR_GEMINI_API_KEY";  // <-- PUNE CHEIA AICI
 
-          bool audio_ready = false;
+          WebSocketsClient webSocket;
+          bool wsConnected = false;
+          bool setupSent = false;
 
-          // ---------- I2C helpers (ESP-IDF, with device handles) ----------
-          i2c_master_dev_handle_t i2c_get_dev(uint8_t addr) {
-              i2c_master_dev_handle_t *slot = NULL;
-              if (addr == ES8311_ADDR)       slot = &dev_es8311;
-              else if (addr == ES7210_ADDR)  slot = &dev_es7210;
-              else if (addr == TCA9554_ADDR) slot = &dev_tca9554;
-              if (slot == NULL) return NULL;
-              if (*slot != NULL) return *slot;
+          // ---------- UI ----------
+          lv_obj_t *lbl_status = NULL;
 
+          // ---------- I2C helpers ----------
+          bool i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val) {
+              if (!i2c_bus) return false;
+              i2c_master_dev_handle_t dev = NULL;
               i2c_device_config_t cfg = {};
               cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
-              cfg.device_address  = addr;
-              cfg.scl_speed_hz    = 100000;
-
-              if (i2c_master_bus_add_device(i2c_bus, &cfg, slot) != ESP_OK) {
-                  Serial.printf("[I2C] add_device 0x%02X failed\n", addr);
-                  return NULL;
-              }
-              return *slot;
-          }
-
-          bool i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val) {
-              i2c_master_dev_handle_t dev = i2c_get_dev(addr);
-              if (dev == NULL) return false;
+              cfg.device_address = addr;
+              cfg.scl_speed_hz = 100000;
+              if (i2c_master_bus_add_device(i2c_bus, &cfg, &dev) != ESP_OK) return false;
               uint8_t buf[2] = { reg, val };
-              return i2c_master_transmit(dev, buf, 2, 100) == ESP_OK;
+              esp_err_t ret = i2c_master_transmit(dev, buf, 2, 100);
+              i2c_master_bus_rm_device(dev);
+              return ret == ESP_OK;
           }
 
-          bool i2c_probe(uint8_t addr) {
-              if (!i2c_bus) return false;
-              return i2c_master_probe(i2c_bus, addr, 50) == ESP_OK;
-          }
-
-          // ---------- TCA9554 ----------
-          void tca9554_enable_audio() {
-              if (!i2c_probe(TCA9554_ADDR)) {
-                  Serial.println("[TCA] expander not on bus");
-                  return;
+          // ---------- Codec init ----------
+          void codec_init() {
+              // TCA9554: scoate codecurile din reset (set all HIGH)
+              if (i2c_bus) {
+                  i2c_write_reg(0x20, 0x03, 0x00);  // all output
+                  delay(10);
+                  i2c_write_reg(0x20, 0x01, 0xFF);  // all HIGH
+                  delay(50);
               }
-              i2c_write_reg(TCA9554_ADDR, 0x03, 0x00);  // all pins = output
-              delay(20);
-              i2c_write_reg(TCA9554_ADDR, 0x01, 0xFF);  // all pins = HIGH
-              delay(100);
-              Serial.println("[TCA] codecs released from reset (all pins HIGH)");
+
+              // ES8311 (DAC)
+              i2c_write_reg(0x18, 0x00, 0x1F); delay(20);
+              i2c_write_reg(0x18, 0x00, 0x00);
+              i2c_write_reg(0x18, 0x01, 0x30);
+              i2c_write_reg(0x18, 0x02, 0x00);
+              i2c_write_reg(0x18, 0x03, 0x10);
+              i2c_write_reg(0x18, 0x04, 0x10);
+              i2c_write_reg(0x18, 0x05, 0x00);
+              i2c_write_reg(0x18, 0x06, 0x03);
+              i2c_write_reg(0x18, 0x07, 0x00);
+              i2c_write_reg(0x18, 0x08, 0xFF);
+              i2c_write_reg(0x18, 0x09, 0x0C);
+              i2c_write_reg(0x18, 0x0A, 0x0C);
+              i2c_write_reg(0x18, 0x0B, 0x00);
+              i2c_write_reg(0x18, 0x0C, 0x00);
+              i2c_write_reg(0x18, 0x0D, 0x01);
+              i2c_write_reg(0x18, 0x0E, 0x02);
+              i2c_write_reg(0x18, 0x0F, 0x00);
+              i2c_write_reg(0x18, 0x10, 0x1F);
+              i2c_write_reg(0x18, 0x11, 0x7F);
+              i2c_write_reg(0x18, 0x12, 0x00);
+              i2c_write_reg(0x18, 0x13, 0x10);
+              i2c_write_reg(0x18, 0x14, 0x1A);
+              i2c_write_reg(0x18, 0x15, 0x40);
+              i2c_write_reg(0x18, 0x16, 0x24);
+              i2c_write_reg(0x18, 0x17, 0xBF);
+              i2c_write_reg(0x18, 0x32, 0xBF);  // DAC vol ~-15dB
+              i2c_write_reg(0x18, 0x37, 0x08);
+
+              // ES7210 (ADC)
+              i2c_write_reg(0x40, 0x00, 0xFF); delay(20);
+              i2c_write_reg(0x40, 0x00, 0x41);
+              i2c_write_reg(0x40, 0x01, 0x1F);
+              i2c_write_reg(0x40, 0x02, 0x00);
+              i2c_write_reg(0x40, 0x08, 0x10);
+              i2c_write_reg(0x40, 0x09, 0x30);
+              i2c_write_reg(0x40, 0x0A, 0x30);
+              i2c_write_reg(0x40, 0x11, 0x60);
+              i2c_write_reg(0x40, 0x12, 0x3F);
+              i2c_write_reg(0x40, 0x13, 0x3F);
+              i2c_write_reg(0x40, 0x14, 0x3F);
+              i2c_write_reg(0x40, 0x15, 0x3F);
           }
 
-          // ---------- Codecs ----------
-          bool es8311_init() {
-              if (!i2c_probe(ES8311_ADDR)) {
-                  Serial.println("[ES8311] not on bus");
-                  return false;
-              }
-              i2c_write_reg(ES8311_ADDR, 0x00, 0x1F); delay(20);
-              i2c_write_reg(ES8311_ADDR, 0x00, 0x00);
-              i2c_write_reg(ES8311_ADDR, 0x01, 0x30);
-              i2c_write_reg(ES8311_ADDR, 0x02, 0x00);
-              i2c_write_reg(ES8311_ADDR, 0x03, 0x10);
-              i2c_write_reg(ES8311_ADDR, 0x04, 0x10);
-              i2c_write_reg(ES8311_ADDR, 0x05, 0x00);
-              i2c_write_reg(ES8311_ADDR, 0x06, 0x03);
-              i2c_write_reg(ES8311_ADDR, 0x07, 0x00);
-              i2c_write_reg(ES8311_ADDR, 0x08, 0xFF);
-              i2c_write_reg(ES8311_ADDR, 0x09, 0x0C);
-              i2c_write_reg(ES8311_ADDR, 0x0A, 0x0C);
-              i2c_write_reg(ES8311_ADDR, 0x0B, 0x00);
-              i2c_write_reg(ES8311_ADDR, 0x0C, 0x00);
-              i2c_write_reg(ES8311_ADDR, 0x0D, 0x01);
-              i2c_write_reg(ES8311_ADDR, 0x0E, 0x02);
-              i2c_write_reg(ES8311_ADDR, 0x0F, 0x00);
-              i2c_write_reg(ES8311_ADDR, 0x10, 0x1F);
-              i2c_write_reg(ES8311_ADDR, 0x11, 0x7F);
-              i2c_write_reg(ES8311_ADDR, 0x12, 0x00);
-              i2c_write_reg(ES8311_ADDR, 0x13, 0x10);
-              i2c_write_reg(ES8311_ADDR, 0x14, 0x1A);
-              i2c_write_reg(ES8311_ADDR, 0x15, 0x40);
-              i2c_write_reg(ES8311_ADDR, 0x16, 0x24);
-              i2c_write_reg(ES8311_ADDR, 0x17, 0xBF);
-              i2c_write_reg(ES8311_ADDR, 0x32, 0xBF);
-              i2c_write_reg(ES8311_ADDR, 0x37, 0x08);
-              Serial.println("[ES8311] init OK");
-              return true;
-          }
-
-          bool es7210_init() {
-              if (!i2c_probe(ES7210_ADDR)) {
-                  Serial.println("[ES7210] not on bus");
-                  return false;
-              }
-              i2c_write_reg(ES7210_ADDR, 0x00, 0xFF); delay(20);
-              i2c_write_reg(ES7210_ADDR, 0x00, 0x41);
-              i2c_write_reg(ES7210_ADDR, 0x01, 0x1F);
-              i2c_write_reg(ES7210_ADDR, 0x02, 0x00);
-              i2c_write_reg(ES7210_ADDR, 0x03, 0x00);
-              i2c_write_reg(ES7210_ADDR, 0x04, 0x00);
-              i2c_write_reg(ES7210_ADDR, 0x05, 0x00);
-              i2c_write_reg(ES7210_ADDR, 0x06, 0x00);
-              i2c_write_reg(ES7210_ADDR, 0x07, 0x00);
-              i2c_write_reg(ES7210_ADDR, 0x08, 0x10);
-              i2c_write_reg(ES7210_ADDR, 0x09, 0x30);
-              i2c_write_reg(ES7210_ADDR, 0x0A, 0x30);
-              i2c_write_reg(ES7210_ADDR, 0x0B, 0x00);
-              i2c_write_reg(ES7210_ADDR, 0x0C, 0x00);
-              i2c_write_reg(ES7210_ADDR, 0x0D, 0x00);
-              i2c_write_reg(ES7210_ADDR, 0x0E, 0x00);
-              i2c_write_reg(ES7210_ADDR, 0x0F, 0x00);
-              i2c_write_reg(ES7210_ADDR, 0x10, 0x00);
-              i2c_write_reg(ES7210_ADDR, 0x11, 0x60);
-              i2c_write_reg(ES7210_ADDR, 0x12, 0x3F);
-              i2c_write_reg(ES7210_ADDR, 0x13, 0x3F);
-              i2c_write_reg(ES7210_ADDR, 0x14, 0x3F);
-              i2c_write_reg(ES7210_ADDR, 0x15, 0x3F);
-              Serial.println("[ES7210] init OK");
-              return true;
-          }
-
+          // ---------- I2S init ----------
           bool i2s_init() {
               i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
               chan_cfg.auto_clear = true;
-              if (i2s_new_channel(&chan_cfg, &tx_handle, &rx_handle) != ESP_OK) {
-                  Serial.println("[I2S] new_channel failed");
-                  return false;
-              }
+              if (i2s_new_channel(&chan_cfg, &tx_handle, &rx_handle) != ESP_OK) return false;
+
               i2s_std_config_t std_cfg = {
-                  .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
+                  .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE_SPK),
                   .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
                   .gpio_cfg = {
                       .mclk = (gpio_num_t)I2S_MCLK,
@@ -372,14 +320,23 @@ jobs:
                   }
               };
               std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
-              if (i2s_channel_init_std_mode(tx_handle, &std_cfg) != ESP_OK) { Serial.println("[I2S] tx init fail"); return false; }
-              if (i2s_channel_init_std_mode(rx_handle, &std_cfg) != ESP_OK) { Serial.println("[I2S] rx init fail"); return false; }
-              if (i2s_channel_enable(tx_handle) != ESP_OK) { Serial.println("[I2S] tx enable fail"); return false; }
-              if (i2s_channel_enable(rx_handle) != ESP_OK) { Serial.println("[I2S] rx enable fail"); return false; }
-              Serial.println("[I2S] init OK (24kHz stereo full-duplex)");
+
+              if (i2s_channel_init_std_mode(tx_handle, &std_cfg) != ESP_OK) return false;
+              if (i2s_channel_init_std_mode(rx_handle, &std_cfg) != ESP_OK) return false;
+              if (i2s_channel_enable(tx_handle) != ESP_OK) return false;
+              if (i2s_channel_enable(rx_handle) != ESP_OK) return false;
+
+              // RX la 16kHz (Gemini input)
+              i2s_channel_disable(rx_handle);
+              i2s_std_clk_config_t rx_clk = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE_MIC);
+              rx_clk.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+              i2s_channel_reconfig_std_clock(rx_handle, &rx_clk);
+              i2s_channel_enable(rx_handle);
+
               return true;
           }
 
+          // ---------- UI ----------
           void build_ui() {
               pinMode(LCD_BL, OUTPUT);
               digitalWrite(LCD_BL, LOW);
@@ -394,41 +351,17 @@ jobs:
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *t = lv_label_create(scr);
-              lv_label_set_text(t, "Audio Loopback");
+              lv_label_set_text(t, "Gemini Live");
               lv_obj_set_style_text_color(t, lv_color_hex(0x38BDF8), 0);
-              lv_obj_set_style_text_font(t, &lv_font_montserrat_18, 0);
-              lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 20);
+              lv_obj_set_style_text_font(t, &lv_font_montserrat_20, 0);
+              lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 30);
 
               lbl_status = lv_label_create(scr);
-              lv_label_set_text(lbl_status, "Initializing...");
+              lv_label_set_text(lbl_status, "Connecting to Wi-Fi...");
               lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_status, LV_ALIGN_TOP_MID, 0, 55);
+              lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_16, 0);
+              lv_obj_align(lbl_status, LV_ALIGN_CENTER, 0, 0);
 
-              bar_level = lv_bar_create(scr);
-              lv_obj_set_size(bar_level, 140, 20);
-              lv_obj_align(bar_level, LV_ALIGN_CENTER, 0, 0);
-              lv_bar_set_range(bar_level, 0, 100);
-              lv_obj_set_style_bg_color(bar_level, lv_color_hex(0x1E293B), LV_PART_MAIN);
-              lv_obj_set_style_bg_color(bar_level, lv_color_hex(0x22C55E), LV_PART_INDICATOR);
-
-              lbl_peak = lv_label_create(scr);
-              lv_label_set_text(lbl_peak, "Peak: 0");
-              lv_obj_set_style_text_color(lbl_peak, lv_color_hex(0x94A3B8), 0);
-              lv_obj_set_style_text_font(lbl_peak, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_peak, LV_ALIGN_CENTER, 0, 40);
-
-              lvgl_port_unlock();
-          }
-
-          void update_level(int level) {
-              if (!lvgl_port_lock(50)) return;
-              if (bar_level) lv_bar_set_value(bar_level, level, LV_ANIM_OFF);
-              if (lbl_peak) {
-                  char b[32];
-                  lv_snprintf(b, sizeof(b), "Peak: %d", level);
-                  lv_label_set_text(lbl_peak, b);
-              }
               lvgl_port_unlock();
           }
 
@@ -436,109 +369,118 @@ jobs:
               if (!lvgl_port_lock(200)) return;
               if (lbl_status) lv_label_set_text(lbl_status, s);
               lvgl_port_unlock();
+              Serial.println(s);
           }
 
-          int16_t *audio_buf = NULL;
-          size_t buf_bytes = 0;
+          // ---------- WebSocket events ----------
+          void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+              switch (type) {
+                  case WStype_CONNECTED:
+                      wsConnected = true;
+                      set_status("Connected. Sending setup...");
+                      // Trimite mesajul de setup
+                      {
+                          StaticJsonDocument<512> doc;
+                          doc["setup"]["model"] = "models/gemini-2.0-flash-live-001";
+                          doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
+                          doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Kore";
+                          String out;
+                          serializeJson(doc, out);
+                          webSocket.sendTXT(out);
+                          setupSent = true;
+                      }
+                      break;
+                  case WStype_DISCONNECTED:
+                      wsConnected = false;
+                      setupSent = false;
+                      set_status("Disconnected");
+                      break;
+                  case WStype_TEXT:
+                      // Răspuns JSON (ex. transcriere, erori)
+                      Serial.printf("[WS] Text: %s\n", payload);
+                      break;
+                  case WStype_BIN:
+                      // Audio PCM 24kHz de la Gemini -> difuzor
+                      {
+                          size_t bytes_written = 0;
+                          i2s_channel_write(tx_handle, payload, length, &bytes_written, 100);
+                      }
+                      break;
+                  case WStype_ERROR:
+                      set_status("WS Error");
+                      break;
+                  default:
+                      break;
+              }
+          }
 
+          // ---------- Setup ----------
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n=== Gemini OS Audio Loopback ===");
+              Serial.println("\n=== Gemini Live Voice Assistant ===");
 
-              pinMode(BOOT_BTN, INPUT_PULLUP);
-              pinMode(PWR_BTN, INPUT_PULLUP);
-
-              // 1. BSP I2C bus 0
+              // I2C init
               I2C_INIT_CALL
               delay(50);
 
-              // 2. LVGL + display + touch
+              // LVGL init
               lvgl_port_init();
               delay(300);
               build_ui();
 
-              // 3. Get bus 0 handle
+              // Get I2C bus handle
               if (i2c_master_get_bus_handle(0, &i2c_bus) != ESP_OK) {
-                  Serial.println("[I2C] cannot get bus 0");
                   set_status("I2C bus fail");
                   return;
               }
-              Serial.println("[I2C] bus 0 acquired for codecs");
 
-              // 4. Scan bus
-              Serial.println("[I2C] scanning addresses...");
-              for (uint8_t a = 1; a < 127; a++) {
-                  if (i2c_master_probe(i2c_bus, a, 20) == ESP_OK) {
-                      Serial.printf("[I2C] found device at 0x%02X\n", a);
-                  }
-              }
+              // Codec init
+              codec_init();
+              delay(100);
 
-              // 5. TCA9554 releases codecs from reset
-              tca9554_enable_audio();
-
-              // 6. I2S start (MCLK)
+              // I2S init
               if (!i2s_init()) {
                   set_status("I2S init failed");
                   return;
               }
 
-              // 7. Init codecs
-              bool ok8311 = es8311_init();
-              bool ok7210 = es7210_init();
-
-              if (!ok8311 || !ok7210) {
-                  set_status("Codec lipsa! Vezi Serial");
-                  return;
-              }
-
-              buf_bytes = BUFFER_SAMPLES * 2 * sizeof(int16_t);
-              audio_buf = (int16_t*) heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-              if (!audio_buf) {
-                  Serial.println("[ERR] PSRAM alloc fail");
-                  set_status("PSRAM alloc fail");
-                  return;
-              }
-              Serial.printf("[I2S] Buffer alocat: %u bytes\n", (unsigned)buf_bytes);
-
-              set_status("Loopback activ - vorbeste!");
-              audio_ready = true;
-
+              // Wi-Fi
               WiFi.mode(WIFI_STA);
               WiFi.setSleep(false);
               WiFi.begin(ssid, password);
+              set_status("Connecting to Wi-Fi...");
+              while (WiFi.status() != WL_CONNECTED) {
+                  delay(500);
+                  Serial.print(".");
+              }
+              Serial.println("\nWi-Fi connected");
+              set_status("Wi-Fi OK. Connecting to Gemini...");
+
+              // WebSocket Gemini Live
+              String url = "/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=" + String(api_key);
+              webSocket.beginSSL("generativelanguage.googleapis.com", 443, url.c_str());
+              webSocket.onEvent(webSocketEvent);
+              webSocket.setReconnectInterval(5000);
+
+              set_status("Ready. Speak!");
           }
 
+          // ---------- Loop ----------
           void loop() {
-              if (!audio_ready) { delay(1000); return; }
+              webSocket.loop();
 
-              size_t bytes_read = 0;
-              esp_err_t err = i2s_channel_read(rx_handle, audio_buf, buf_bytes, &bytes_read, 1000);
-              if (err != ESP_OK || bytes_read == 0) { delay(10); return; }
-
-              int samples = bytes_read / sizeof(int16_t);
-              int32_t peak = 0;
-              for (int i = 0; i < samples; i++) {
-                  int32_t v = audio_buf[i];
-                  if (v < 0) v = -v;
-                  if (v > peak) peak = v;
-              }
-              int level = (peak * 100) / 32768;
-              update_level(level);
-
-              size_t bytes_written = 0;
-              i2s_channel_write(tx_handle, audio_buf, bytes_read, &bytes_written, 1000);
-
-              static unsigned long last_log = 0;
-              if (millis() - last_log > 2000) {
-                  last_log = millis();
-                  if (WiFi.status() == WL_CONNECTED) {
-                      Serial.printf("[LOOP] peak=%d level=%d%% ip=%s\n",
-                          (int)peak, level, WiFi.localIP().toString().c_str());
-                  } else {
-                      Serial.printf("[LOOP] peak=%d level=%d%%\n", (int)peak, level);
+              // Trimite audio de la microfon către Gemini când e conectat și setup trimis
+              if (wsConnected && setupSent) {
+                  static int16_t mic_buf[BUFFER_SAMPLES];
+                  size_t bytes_read = 0;
+                  esp_err_t err = i2s_channel_read(rx_handle, mic_buf, sizeof(mic_buf), &bytes_read, 10);
+                  if (err == ESP_OK && bytes_read > 0) {
+                      webSocket.sendBIN((uint8_t*)mic_buf, bytes_read);
                   }
               }
+
+              delay(5);
           }
           ''').lstrip()
 
@@ -546,7 +488,7 @@ jobs:
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] Audio .ino generat")
+          print("[OK] Gemini Live .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -563,14 +505,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-os-full-0x0.bin \
+            -o package_bin/gemini-live-full-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-os-full-0x0.bin
+          ls -lh package_bin/gemini-live-full-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-os-audio-loopback
-          path: package_bin/gemini-os-full-0x0.bin
+          name: gemini-live-firmware
+          path: package_bin/gemini-live-full-0x0.bin
           if-no-files-found: error
