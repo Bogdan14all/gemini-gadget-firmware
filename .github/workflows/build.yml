@@ -1,4 +1,4 @@
-name: Build Gemini OS - Mic TDM Fixed Test
+name: Build Gemini OS - Mic TDM Fixed
 
 on:
   workflow_dispatch:
@@ -68,7 +68,6 @@ jobs:
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
 
-          # Eliminam referintele la demo-uri
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
             -exec sed -i 's|#include "demos/lv_demos.h"|// #include "demos/lv_demos.h"|g' {} + 2>/dev/null || true
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
@@ -81,7 +80,6 @@ jobs:
 
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
-          # 1. Patch lvgl_port.c (fixes for LVGL 9 and TCA9554)
           port_path = f"{sketch_dir}/lvgl_port.c"
           with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
               code = f.read()
@@ -89,7 +87,6 @@ jobs:
           code = code.replace("LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)", "2")
           code = code.replace("lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)", "2")
           code = code.replace("lv_demo_widgets();", "// lv_demo_widgets();")
-          
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
               'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { puts("[EXIO] bus 0 not ready"); tca9554_i2c_bus = NULL; } else { puts("[EXIO] bus 0 acquired!"); }',
@@ -104,7 +101,6 @@ jobs:
           with open(port_path, "w", encoding="utf-8") as f:
               f.write(code)
 
-          # 2. Inject lock/unlock in lvgl_port
           h_path = f"{sketch_dir}/lvgl_port.h"
           with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
               h_content = f.read()
@@ -146,7 +142,6 @@ jobs:
               with open(port_path, "w", encoding="utf-8") as f:
                   f.write(c_content)
 
-          # 3. Detect I2C init
           i2c_init_func = "bsp_i2c_init"
           for h_path in glob.glob(f"{sketch_dir}/*.h"):
               with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -221,16 +216,22 @@ jobs:
           }
 
           void codec_init() {
-              // TCA9554
-              i2c_write_reg(0x20, 0x03, 0x00); delay(10);
-              i2c_write_reg(0x20, 0x01, 0xFF); delay(50);
-              
-              // ES8311 (pornim MCLK corect, esential pentru ES7210)
+              // 1. Reset ES7210 prin TCA9554 (pin 5)
+              if (i2c_bus) {
+                  // Seteaza pinul 5 ca output
+                  i2c_write_reg(0x20, 0x03, 0x00); delay(10);
+                  // Trage pinul 5 LOW (reset)
+                  i2c_write_reg(0x20, 0x01, 0x00); delay(50);
+                  // Elibereaza reset-ul (pin 5 HIGH)
+                  i2c_write_reg(0x20, 0x01, 0xFF); delay(100);
+              }
+
+              // 2. ES8311 (DAC) - pentru MCLK
               i2c_write_reg(0x18, 0x00, 0x1F); delay(20);
               i2c_write_reg(0x18, 0x00, 0x00);
 
-              // ES7210 (ADC)
-              i2c_write_reg(0x40, 0x00, 0xFF); delay(20);  // Reset
+              // 3. ES7210 (ADC) - Configurare TDM
+              i2c_write_reg(0x40, 0x00, 0xFF); delay(20);  // Reset software
               i2c_write_reg(0x40, 0x00, 0x41);              // Power up
               i2c_write_reg(0x40, 0x01, 0x1F);              // Clock on
               i2c_write_reg(0x40, 0x02, 0x00);              // Mute off
@@ -270,7 +271,7 @@ jobs:
                   return;
               }
               Serial.println("[I2S] TDM started. MCLK generating...");
-              delay(50); // Lasa MCLK sa se stabilizeze
+              delay(100); // Lasa MCLK sa se stabilizeze
 
               // Acum initializam codecurile
               codec_init();
