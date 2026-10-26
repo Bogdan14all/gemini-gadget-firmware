@@ -1,11 +1,11 @@
-name: Build Gemini Live Voice Assistant
+name: Build Gemini OS - Mic Only Test
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Gemini Live Firmware
+    name: Build Mic Test
     runs-on: ubuntu-latest
 
     steps:
@@ -34,7 +34,7 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
-      - name: Install Libraries (LVGL, WebSockets, ArduinoJson)
+      - name: Install LVGL 9.1
         shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
@@ -42,9 +42,6 @@ jobs:
             cp -r Arduino/libraries/* ~/Arduino/libraries/ 2>/dev/null || true
           fi
           arduino-cli lib install "lvgl"@9.1.0
-          # FIX: Upgrade WebSockets la 2.5.2 pentru compatibilitate cu ESP32 Core 3.x
-          arduino-cli lib install "WebSockets"@2.5.2
-          arduino-cli lib install "ArduinoJson"@7.0.4
 
           cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
           #ifndef LV_CONF_H
@@ -52,7 +49,6 @@ jobs:
           #define LV_COLOR_DEPTH 16
           #define LV_USE_STDLIB_MALLOC LV_STDLIB_BUILTIN
           #define LV_MEM_SIZE_KILOBYTES 128
-          #define LV_FONT_MONTSERRAT_12 1
           #define LV_FONT_MONTSERRAT_14 1
           #define LV_FONT_MONTSERRAT_16 1
           #define LV_FONT_MONTSERRAT_18 1
@@ -60,45 +56,24 @@ jobs:
           #define LV_FONT_DEFAULT &lv_font_montserrat_20
           #define LV_USE_LABEL 1
           #define LV_USE_BAR 1
-          #define LV_USE_DEMO_WIDGETS 0
-          #define LV_USE_DEMO_MUSIC 0
-          #define LV_USE_DEMO_BENCHMARK 0
-          #define LV_USE_DEMO_STRESS 0
           #endif
           EOF
           sed -i 's/^[ \t]*//' ~/Arduino/libraries/lv_conf.h
-          cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/src/lv_conf.h 2>/dev/null || true
           cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/lv_conf.h 2>/dev/null || true
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Patch Drivers & Generate Gemini Live Sketch
+      - name: Generate Mic Test Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
-
-          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
-            -exec sed -i 's|#include "demos/lv_demos.h"|// #include "demos/lv_demos.h"|g' {} + 2>/dev/null || true
-          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
-            -exec sed -i 's|lv_demo_widgets();|// lv_demo_widgets();|g' {} + 2>/dev/null || true
 
           python3 - << 'PYEOF'
           import re, os, textwrap, glob
 
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
-          # 1. Patch lcd_bl_pwm_bsp.c
-          for root, dirs, files in os.walk(sketch_dir):
-              for file in files:
-                  if file == "lcd_bl_pwm_bsp.c":
-                      p = os.path.join(root, file)
-                      with open(p, "r", encoding="utf-8", errors="ignore") as f:
-                          bl_c = f.read()
-                      bl_c = re.sub(r'ledc_stop\s*\([^;]+\);', '// ledc_stop disabled', bl_c)
-                      with open(p, "w", encoding="utf-8") as f:
-                          f.write(bl_c)
-
-          # 2. Detect I2C init
+          # Detect I2C init
           i2c_init_func = "bsp_i2c_init"
           for h_path in glob.glob(f"{sketch_dir}/*.h"):
               with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -109,131 +84,29 @@ jobs:
                      and f_args.strip() in ("", "void"):
                       i2c_init_func = f_name
                       break
-          print(f"[OK] I2C init = {i2c_init_func}")
 
-          # 3. Patch lvgl_port.c
-          port_path = f"{sketch_dir}/lvgl_port.c"
-          with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
-              code = f.read()
-
-          code = code.replace("LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)", "2")
-          code = code.replace("lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)", "2")
-          code = re.sub(
-              r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
-              'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { puts("[EXIO] bus 0 not ready"); tca9554_i2c_bus = NULL; } else { puts("[EXIO] bus 0 acquired!"); }',
-              code)
-          code = re.sub(
-              r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_new_i2c_tca9554\s*\([^;]+\)\s*\)\s*;',
-              'if (tca9554_i2c_bus != NULL) { if (esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander) == ESP_OK) { puts("[EXIO] TCA9554 ok"); } else { puts("[EXIO] TCA9554 fail"); io_expander = NULL; } } else { io_expander = NULL; }',
-              code)
-          code = re.sub(
-              r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_set_dir\s*\(\s*io_expander\s*,([^)]+)\)\s*\)\s*;',
-              r'if (io_expander != NULL) { esp_io_expander_set_dir(io_expander, \g<1>); }',
-              code)
-          code = re.sub(
-              r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_set_level\s*\(\s*io_expander\s*,([^)]+)\)\s*\)\s*;',
-              r'if (io_expander != NULL) { esp_io_expander_set_level(io_expander, \g<1>); }',
-              code)
-
-          with open(port_path, "w", encoding="utf-8") as f:
-              f.write(code)
-
-          # 4. Inject lock/unlock
-          h_path = f"{sketch_dir}/lvgl_port.h"
-          with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
-              h_content = f.read()
-          with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
-              c_content = f.read()
-
-          if "lvgl_port_lock" not in h_content:
-              mux_var = None
-              for pat in [r'SemaphoreHandle_t\s+(\w*[Mm]ux\w*)\s*[;=]',
-                          r'SemaphoreHandle_t\s+(\w+)\s*[;=]']:
-                  m = re.search(pat, c_content)
-                  if m:
-                      mux_var = m.group(1)
-                      break
-              if mux_var is None:
-                  mux_var = "lvgl_port_mux"
-                  c_content = re.sub(
-                      r'(#include[^\n]+\n)(?![^\n]*#include)',
-                      r'\1\nstatic SemaphoreHandle_t ' + mux_var + ' = NULL;\n',
-                      c_content, count=1, flags=re.DOTALL)
-                  c_content = re.sub(
-                      r'(esp_err_t\s+lvgl_port_init\s*\([^)]*\)\s*\{)',
-                      r'\1\n    ' + mux_var + ' = xSemaphoreCreateMutex();',
-                      c_content, count=1)
-              c_content += f"""
-
-          bool lvgl_port_lock(uint32_t timeout_ms) {{
-              if ({mux_var} == NULL) return false;
-              return xSemaphoreTake({mux_var}, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
-          }}
-          void lvgl_port_unlock(void) {{
-              if ({mux_var} != NULL) xSemaphoreGive({mux_var});
-          }}
-          """
-              h_content += """
-          #ifdef __cplusplus
-          extern "C" {
-          #endif
-          bool lvgl_port_lock(uint32_t timeout_ms);
-          void lvgl_port_unlock(void);
-          #ifdef __cplusplus
-          }
-          #endif
-          """
-              with open(h_path, "w", encoding="utf-8") as f:
-                  f.write(h_content)
-              with open(port_path, "w", encoding="utf-8") as f:
-                  f.write(c_content)
-
-          # 5. Generate .ino
           ino = textwrap.dedent(r'''
           #include <Arduino.h>
-          #include <WiFi.h>
-          #include <WebSocketsClient.h>
-          #include <ArduinoJson.h>
           #include <driver/i2s_std.h>
+          #include <driver/i2s_tdm.h>
           #include <driver/i2c_master.h>
-          #include <esp_heap_caps.h>
 
           extern "C" {
           #include "i2c_bsp.h"
           #include "lvgl_port.h"
           }
-          #include <lvgl.h>
 
-          // ---------- PINI ----------
-          #define LCD_BL    42
           #define I2S_MCLK  7
           #define I2S_WS    46
           #define I2S_BCLK  15
           #define I2S_DIN   6
           #define I2S_DOUT  45
 
-          // ---------- AUDIO ----------
-          #define SAMPLE_RATE_MIC   16000   // Gemini input
-          #define SAMPLE_RATE_SPK   24000   // Gemini output
-          #define BUFFER_SAMPLES    512
+          #define SAMPLE_RATE_MIC 16000
 
-          i2s_chan_handle_t tx_handle = NULL;
           i2s_chan_handle_t rx_handle = NULL;
           i2c_master_bus_handle_t i2c_bus = NULL;
 
-          // ---------- GEMINI ----------
-          const char* ssid     = "TP-Link_2.4G_9318_Guest";
-          const char* password = "revelion";
-          const char* api_key  = "YOUR_GEMINI_API_KEY";  // <-- PUNE CHEIA AICI
-
-          WebSocketsClient webSocket;
-          bool wsConnected = false;
-          bool setupSent = false;
-
-          // ---------- UI ----------
-          lv_obj_t *lbl_status = NULL;
-
-          // ---------- I2C helpers ----------
           bool i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val) {
               if (!i2c_bus) return false;
               i2c_master_dev_handle_t dev = NULL;
@@ -248,69 +121,39 @@ jobs:
               return ret == ESP_OK;
           }
 
-          // ---------- Codec init ----------
           void codec_init() {
-              // TCA9554: scoate codecurile din reset (set all HIGH)
-              if (i2c_bus) {
-                  i2c_write_reg(0x20, 0x03, 0x00);  // all output
-                  delay(10);
-                  i2c_write_reg(0x20, 0x01, 0xFF);  // all HIGH
-                  delay(50);
-              }
-
-              // ES8311 (DAC)
+              // TCA9554
+              i2c_write_reg(0x20, 0x03, 0x00); delay(10);
+              i2c_write_reg(0x20, 0x01, 0xFF); delay(50);
+              
+              // ES8311 (doar pentru a porni MCLK corect, nu ne intereseaza DAC-ul acum)
               i2c_write_reg(0x18, 0x00, 0x1F); delay(20);
               i2c_write_reg(0x18, 0x00, 0x00);
-              i2c_write_reg(0x18, 0x01, 0x30);
-              i2c_write_reg(0x18, 0x02, 0x00);
-              i2c_write_reg(0x18, 0x03, 0x10);
-              i2c_write_reg(0x18, 0x04, 0x10);
-              i2c_write_reg(0x18, 0x05, 0x00);
-              i2c_write_reg(0x18, 0x06, 0x03);
-              i2c_write_reg(0x18, 0x07, 0x00);
-              i2c_write_reg(0x18, 0x08, 0xFF);
-              i2c_write_reg(0x18, 0x09, 0x0C);
-              i2c_write_reg(0x18, 0x0A, 0x0C);
-              i2c_write_reg(0x18, 0x0B, 0x00);
-              i2c_write_reg(0x18, 0x0C, 0x00);
-              i2c_write_reg(0x18, 0x0D, 0x01);
-              i2c_write_reg(0x18, 0x0E, 0x02);
-              i2c_write_reg(0x18, 0x0F, 0x00);
-              i2c_write_reg(0x18, 0x10, 0x1F);
-              i2c_write_reg(0x18, 0x11, 0x7F);
-              i2c_write_reg(0x18, 0x12, 0x00);
-              i2c_write_reg(0x18, 0x13, 0x10);
-              i2c_write_reg(0x18, 0x14, 0x1A);
-              i2c_write_reg(0x18, 0x15, 0x40);
-              i2c_write_reg(0x18, 0x16, 0x24);
-              i2c_write_reg(0x18, 0x17, 0xBF);
-              i2c_write_reg(0x18, 0x32, 0xBF);  // DAC vol ~-15dB
-              i2c_write_reg(0x18, 0x37, 0x08);
 
               // ES7210 (ADC)
               i2c_write_reg(0x40, 0x00, 0xFF); delay(20);
-              i2c_write_reg(0x40, 0x00, 0x41);
-              i2c_write_reg(0x40, 0x01, 0x1F);
-              i2c_write_reg(0x40, 0x02, 0x00);
-              i2c_write_reg(0x40, 0x08, 0x10);
+              i2c_write_reg(0x40, 0x00, 0x41); // Reset + power up
+              i2c_write_reg(0x40, 0x01, 0x1F); // Clock on
+              i2c_write_reg(0x40, 0x02, 0x00); // Mute off
+              i2c_write_reg(0x40, 0x08, 0x10); // 16-bit
               i2c_write_reg(0x40, 0x09, 0x30);
               i2c_write_reg(0x40, 0x0A, 0x30);
-              i2c_write_reg(0x40, 0x11, 0x60);
-              i2c_write_reg(0x40, 0x12, 0x3F);
-              i2c_write_reg(0x40, 0x13, 0x3F);
-              i2c_write_reg(0x40, 0x14, 0x3F);
-              i2c_write_reg(0x40, 0x15, 0x3F);
+              i2c_write_reg(0x40, 0x11, 0x60); // Mic bias
+              i2c_write_reg(0x40, 0x12, 0xFF); // Gain max
+              i2c_write_reg(0x40, 0x13, 0xFF); // Gain max
           }
 
-          // ---------- I2S init ----------
-          bool i2s_init() {
+          // Folosim TDM mode, esential pentru ES7210
+          bool i2s_init_tdm() {
               i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-              chan_cfg.auto_clear = true;
-              if (i2s_new_channel(&chan_cfg, &tx_handle, &rx_handle) != ESP_OK) return false;
+              if (i2s_new_channel(&chan_cfg, NULL, &rx_handle) != ESP_OK) return false;
 
-              i2s_std_config_t std_cfg = {
-                  .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE_SPK),
-                  .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+              i2s_tdm_config_t tdm_cfg = {
+                  .clk_cfg = I2S_TDM_CLK_DEFAULT_CONFIG(SAMPLE_RATE_MIC),
+                  .slot_cfg = I2S_TDM_PHILIPS_SLOT_DEFAULT_CONFIG(
+                      I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO,
+                      I2S_TDM_SLOT0 | I2S_TDM_SLOT1 | I2S_TDM_SLOT2 | I2S_TDM_SLOT3
+                  ),
                   .gpio_cfg = {
                       .mclk = (gpio_num_t)I2S_MCLK,
                       .bclk = (gpio_num_t)I2S_BCLK,
@@ -320,168 +163,56 @@ jobs:
                       .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false }
                   }
               };
-              std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+              tdm_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
 
-              if (i2s_channel_init_std_mode(tx_handle, &std_cfg) != ESP_OK) return false;
-              if (i2s_channel_init_std_mode(rx_handle, &std_cfg) != ESP_OK) return false;
-              if (i2s_channel_enable(tx_handle) != ESP_OK) return false;
+              if (i2s_channel_init_tdm_mode(rx_handle, &tdm_cfg) != ESP_OK) return false;
               if (i2s_channel_enable(rx_handle) != ESP_OK) return false;
-
-              // RX la 16kHz (Gemini input)
-              i2s_channel_disable(rx_handle);
-              i2s_std_clk_config_t rx_clk = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE_MIC);
-              rx_clk.mclk_multiple = I2S_MCLK_MULTIPLE_256;
-              i2s_channel_reconfig_std_clock(rx_handle, &rx_clk);
-              i2s_channel_enable(rx_handle);
-
               return true;
           }
 
-          // ---------- UI ----------
-          void build_ui() {
-              pinMode(LCD_BL, OUTPUT);
-              digitalWrite(LCD_BL, LOW);
-
-              lvgl_port_lock(1000);
-              lv_obj_t *scr = lv_screen_active();
-              if (!scr) scr = lv_scr_act();
-              if (!scr) { lvgl_port_unlock(); return; }
-
-              lv_obj_clean(scr);
-              lv_obj_set_style_bg_color(scr, lv_color_hex(0x0F172A), 0);
-              lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-
-              lv_obj_t *t = lv_label_create(scr);
-              lv_label_set_text(t, "Gemini Live");
-              lv_obj_set_style_text_color(t, lv_color_hex(0x38BDF8), 0);
-              lv_obj_set_style_text_font(t, &lv_font_montserrat_20, 0);
-              lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 30);
-
-              lbl_status = lv_label_create(scr);
-              lv_label_set_text(lbl_status, "Connecting to Wi-Fi...");
-              lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_16, 0);
-              lv_obj_align(lbl_status, LV_ALIGN_CENTER, 0, 0);
-
-              lvgl_port_unlock();
-          }
-
-          void set_status(const char* s) {
-              if (!lvgl_port_lock(200)) return;
-              if (lbl_status) lv_label_set_text(lbl_status, s);
-              lvgl_port_unlock();
-              Serial.println(s);
-          }
-
-          // ---------- WebSocket events ----------
-          void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
-              switch (type) {
-                  case WStype_CONNECTED:
-                      wsConnected = true;
-                      set_status("Connected. Sending setup...");
-                      // Trimite mesajul de setup
-                      {
-                          StaticJsonDocument<512> doc;
-                          doc["setup"]["model"] = "models/gemini-2.0-flash-live-001";
-                          doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
-                          doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Kore";
-                          String out;
-                          serializeJson(doc, out);
-                          webSocket.sendTXT(out);
-                          setupSent = true;
-                      }
-                      break;
-                  case WStype_DISCONNECTED:
-                      wsConnected = false;
-                      setupSent = false;
-                      set_status("Disconnected");
-                      break;
-                  case WStype_TEXT:
-                      // Răspuns JSON (ex. transcriere, erori)
-                      Serial.printf("[WS] Text: %s\n", payload);
-                      break;
-                  case WStype_BIN:
-                      // Audio PCM 24kHz de la Gemini -> difuzor
-                      {
-                          size_t bytes_written = 0;
-                          i2s_channel_write(tx_handle, payload, length, &bytes_written, 100);
-                      }
-                      break;
-                  case WStype_ERROR:
-                      set_status("WS Error");
-                      break;
-                  default:
-                      break;
-              }
-          }
-
-          // ---------- Setup ----------
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n=== Gemini Live Voice Assistant ===");
+              Serial.println("\n=== Microfon Test (TDM Mode) ===");
 
-              // I2C init
               I2C_INIT_CALL
               delay(50);
 
-              // LVGL init
-              lvgl_port_init();
-              delay(300);
-              build_ui();
-
-              // Get I2C bus handle
               if (i2c_master_get_bus_handle(0, &i2c_bus) != ESP_OK) {
-                  set_status("I2C bus fail");
+                  Serial.println("I2C fail");
                   return;
               }
 
-              // Codec init
               codec_init();
               delay(100);
 
-              // I2S init
-              if (!i2s_init()) {
-                  set_status("I2S init failed");
+              if (!i2s_init_tdm()) {
+                  Serial.println("I2S TDM init fail");
                   return;
               }
 
-              // Wi-Fi
-              WiFi.mode(WIFI_STA);
-              WiFi.setSleep(false);
-              WiFi.begin(ssid, password);
-              set_status("Connecting to Wi-Fi...");
-              while (WiFi.status() != WL_CONNECTED) {
-                  delay(500);
-                  Serial.print(".");
-              }
-              Serial.println("\nWi-Fi connected");
-              set_status("Wi-Fi OK. Connecting to Gemini...");
-
-              // WebSocket Gemini Live
-              String url = "/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=" + String(api_key);
-              webSocket.beginSSL("generativelanguage.googleapis.com", 443, url.c_str());
-              webSocket.onEvent(webSocketEvent);
-              webSocket.setReconnectInterval(5000);
-
-              set_status("Ready. Speak!");
+              Serial.println("I2S TDM OK. Vorbeste acum!");
           }
 
-          // ---------- Loop ----------
           void loop() {
-              webSocket.loop();
-
-              // Trimite audio de la microfon către Gemini când e conectat și setup trimis
-              if (wsConnected && setupSent) {
-                  static int16_t mic_buf[BUFFER_SAMPLES];
-                  size_t bytes_read = 0;
-                  esp_err_t err = i2s_channel_read(rx_handle, mic_buf, sizeof(mic_buf), &bytes_read, 10);
-                  if (err == ESP_OK && bytes_read > 0) {
-                      webSocket.sendBIN((uint8_t*)mic_buf, bytes_read);
+              static int16_t mic_buf[512];
+              size_t bytes_read = 0;
+              esp_err_t err = i2s_channel_read(rx_handle, mic_buf, sizeof(mic_buf), &bytes_read, 1000);
+              
+              if (err == ESP_OK && bytes_read > 0) {
+                  int samples = bytes_read / sizeof(int16_t);
+                  int32_t peak = 0;
+                  for (int i = 0; i < samples; i++) {
+                      int32_t v = mic_buf[i];
+                      if (v < 0) v = -v;
+                      if (v > peak) peak = v;
                   }
+                  
+                  // Afisam primele 4 canale (ES7210 are 4 microfoane)
+                  Serial.printf("Peak: %5d | Ch1: %6d | Ch2: %6d | Ch3: %6d | Ch4: %6d\n", 
+                                peak, mic_buf[0], mic_buf[1], mic_buf[2], mic_buf[3]);
               }
-
-              delay(5);
+              delay(100);
           }
           ''').lstrip()
 
@@ -489,7 +220,7 @@ jobs:
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] Gemini Live .ino generat")
+          print("[OK] Mic Test .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -506,14 +237,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-live-full-0x0.bin \
+            -o package_bin/mic-test-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-live-full-0x0.bin
+          ls -lh package_bin/mic-test-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-live-firmware
-          path: package_bin/gemini-live-full-0x0.bin
+          name: mic-test-firmware
+          path: package_bin/mic-test-0x0.bin
           if-no-files-found: error
