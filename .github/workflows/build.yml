@@ -1,4 +1,4 @@
-name: Build Minimal Gemini OS (Bogdan Edition)
+name: Build Minimal Gemini OS v36 (Bogdan Edition)
 
 on:
   workflow_dispatch:
@@ -155,15 +155,17 @@ jobs:
               code = re.sub(pattern, safe_touch, code, count=1)
               print("Patched TouchInputReadCallback successfully!")
 
-          # example_lcd_exio_init cu diagnostic complet
+          # example_lcd_exio_init cu diagnostic complet (folosind puts fara escape-uri de newline)
+          bus_repl = 'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { puts("[EXIO] I2C bus 0 not ready"); tca9554_i2c_bus = NULL; } else { puts("[EXIO] I2C bus 0 acquired!"); }'
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
-              r'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { printf("[EXIO] I2C bus 0 not ready\n"); tca9554_i2c_bus = NULL; } else { printf("[EXIO] I2C bus 0 acquired!\n"); }',
+              lambda m: bus_repl,
               code
           )
+          tca_repl = 'if (tca9554_i2c_bus != NULL) { if (esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander) == ESP_OK) { puts("[EXIO] TCA9554 expander connected at 0x20!"); } else { puts("[EXIO] Failed to connect TCA9554"); io_expander = NULL; } } else { io_expander = NULL; }'
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_new_i2c_tca9554\s*\([^;]+\)\s*\)\s*;',
-              r'if (tca9554_i2c_bus != NULL) { if (esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander) == ESP_OK) { printf("[EXIO] TCA9554 expander connected at 0x20!\n"); } else { printf("[EXIO] Failed to connect TCA9554\n"); io_expander = NULL; } } else { io_expander = NULL; }',
+              lambda m: tca_repl,
               code
           )
           code = re.sub(
@@ -233,7 +235,7 @@ jobs:
               '        lv_obj_t *lbl_wifi = lv_label_create(scr);',
               '        lv_label_set_text(lbl_wifi, "Wi-Fi: Conectat!");',
               '        lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x0284C7), 0);',
-              '        lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_12, 0);',
+              '        lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_14, 0);',
               '        lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 18);',
               '    }',
               '',
