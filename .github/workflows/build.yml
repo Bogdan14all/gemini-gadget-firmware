@@ -80,7 +80,7 @@ jobs:
             -exec sed -i 's|lv_demo_widgets();|// lv_demo_widgets();|g' {} + 2>/dev/null || true
 
           python3 - << 'PYEOF'
-          import re, os, textwrap
+          import re, os, textwrap, glob
 
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
@@ -95,15 +95,14 @@ jobs:
                       with open(p, "w", encoding="utf-8") as f:
                           f.write(bl_c)
 
-          # 2. I2C init function detection
-          i2c_h_path = f"{sketch_dir}/i2c_bsp.h"
-          i2c_init_func = "bsp_i2c_init"
-          if os.path.exists(i2c_h_path):
-              with open(i2c_h_path, "r", encoding="utf-8", errors="ignore") as f:
+          # 2. I2C init function detection (cautam in toate fisierele .h din sketch_dir)
+          i2c_init_func = "i2c_master_init" # fallback comun
+          for h_path in glob.glob(f"{sketch_dir}/*.h"):
+              with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
                   h = f.read()
               for f_name, f_args in re.findall(
                   r'(?:esp_err_t|void|int|bool)\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*;', h):
-                  if "init" in f_name.lower() and "i2c" in f_name.lower() \
+                  if "i2c" in f_name.lower() and "init" in f_name.lower() \
                      and f_args.strip() in ("", "void"):
                       i2c_init_func = f_name
                       break
@@ -229,6 +228,8 @@ jobs:
 
           const char* ssid = "TP-Link_2.4G_9318_Guest";
           const char* password = "revelion";
+
+          bool audio_ready = false;
 
           // ---------- Codec helpers ----------
           void es8311_write(uint8_t reg, uint8_t val) {
@@ -414,7 +415,7 @@ jobs:
               pinMode(BOOT_BTN, INPUT_PULLUP);
               pinMode(PWR_BTN, INPUT_PULLUP);
 
-              bsp_i2c_init();
+              I2C_INIT_CALL
               delay(50);
 
               lvgl_port_init();
@@ -449,6 +450,7 @@ jobs:
               Serial.printf("[I2S] Buffer alocat: %u bytes in PSRAM\n", (unsigned)buf_bytes);
 
               set_status("Loopback activ - vorbeste!");
+              audio_ready = true;
 
               WiFi.mode(WIFI_STA);
               WiFi.setSleep(false);
@@ -456,6 +458,11 @@ jobs:
           }
 
           void loop() {
+              if (!audio_ready) {
+                  delay(1000);
+                  return;
+              }
+
               size_t bytes_read = 0;
               esp_err_t err = i2s_channel_read(rx_handle, audio_buf, buf_bytes, &bytes_read, 1000);
               if (err != ESP_OK || bytes_read == 0) {
@@ -489,6 +496,9 @@ jobs:
               }
           }
           ''').lstrip()
+
+          # Inlocuim apelul I2C detectat dinamic
+          ino = ino.replace("I2C_INIT_CALL", f"{i2c_init_func}();")
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
