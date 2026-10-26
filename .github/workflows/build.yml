@@ -1,4 +1,4 @@
-name: Build Gemini OS - Step 2 Audio Loopback
+name: Build Gemini OS - Step 2b Audio Loopback (I2C fixed)
 
 on:
   workflow_dispatch:
@@ -95,8 +95,8 @@ jobs:
                       with open(p, "w", encoding="utf-8") as f:
                           f.write(bl_c)
 
-          # 2. I2C init function detection (cautam in toate fisierele .h din sketch_dir)
-          i2c_init_func = "i2c_master_init" # fallback comun
+          # 2. Detecteaza functia I2C init
+          i2c_init_func = "bsp_i2c_init"
           for h_path in glob.glob(f"{sketch_dir}/*.h"):
               with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
                   h = f.read()
@@ -185,13 +185,13 @@ jobs:
               with open(port_path, "w", encoding="utf-8") as f:
                   f.write(c_content)
 
-          # 5. Generate Audio Loopback .ino
+          # 5. Generate .ino
           ino = textwrap.dedent(r'''
           #include <Arduino.h>
           #include <WiFi.h>
-          #include <Wire.h>
           #include <driver/i2s_std.h>
           #include <driver/gpio.h>
+          #include <driver/i2c_master.h>
           #include <esp_heap_caps.h>
 
           extern "C" {
@@ -205,23 +205,25 @@ jobs:
           #define BOOT_BTN  0
           #define PWR_BTN   16
 
-          #define I2C_SDA   47
-          #define I2C_SCL   48
-
           #define I2S_MCLK  7
           #define I2S_WS    46
           #define I2S_BCLK  15
           #define I2S_DIN   6
           #define I2S_DOUT  45
 
-          // ---------- Config audio ----------
-          #define SAMPLE_RATE    16000
-          #define BUFFER_SAMPLES 1024   // ~64ms
+          // ---------- I2C ----------
+          #define ES8311_ADDR  0x18
+          #define ES7210_ADDR  0x40
+          #define TCA9554_ADDR 0x20
+
+          // ---------- Audio ----------
+          #define SAMPLE_RATE    24000
+          #define BUFFER_SAMPLES 1024
 
           i2s_chan_handle_t tx_handle = NULL;
           i2s_chan_handle_t rx_handle = NULL;
+          i2c_master_bus_handle_t i2c_bus = NULL;
 
-          // ---------- UI ----------
           lv_obj_t *lbl_status = NULL;
           lv_obj_t *bar_level  = NULL;
           lv_obj_t *lbl_peak   = NULL;
@@ -231,85 +233,103 @@ jobs:
 
           bool audio_ready = false;
 
-          // ---------- Codec helpers ----------
-          void es8311_write(uint8_t reg, uint8_t val) {
-              Wire.beginTransmission(0x18);
-              Wire.write(reg);
-              Wire.write(val);
-              Wire.endTransmission();
+          // ---------- I2C helpers (ESP-IDF, pe bus 0 existent) ----------
+          bool i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val) {
+              if (!i2c_bus) return false;
+              uint8_t buf[2] = { reg, val };
+              return i2c_master_transmit(i2c_bus, addr, buf, 2, 100) == ESP_OK;
           }
 
-          void es7210_write(uint8_t reg, uint8_t val) {
-              Wire.beginTransmission(0x40);
-              Wire.write(reg);
-              Wire.write(val);
-              Wire.endTransmission();
+          bool i2c_probe(uint8_t addr) {
+              if (!i2c_bus) return false;
+              return i2c_master_probe(i2c_bus, addr, 100) == ESP_OK;
           }
 
+          // ---------- TCA9554 ----------
+          void tca9554_enable_audio() {
+              if (!i2c_bus) { Serial.println("[TCA] no i2c bus"); return; }
+
+              if (!i2c_probe(TCA9554_ADDR)) {
+                  Serial.println("[TCA] expander not on bus");
+                  return;
+              }
+
+              // 0x03 = Configuration register: 0 = output
+              i2c_write_reg(TCA9554_ADDR, 0x03, 0x00);
+              delay(20);
+
+              // 0x01 = Output register: 0xFF = all HIGH (releases codec reset, enables PA)
+              i2c_write_reg(TCA9554_ADDR, 0x01, 0xFF);
+              delay(100);
+
+              Serial.println("[TCA] codecs released from reset (all pins HIGH)");
+          }
+
+          // ---------- Codecs ----------
           bool es8311_init() {
-              Wire.beginTransmission(0x18);
-              if (Wire.endTransmission() != 0) { Serial.println("[ES8311] not found"); return false; }
-
-              es8311_write(0x00, 0x1F); delay(20);
-              es8311_write(0x00, 0x00);
-              es8311_write(0x01, 0x30);   // MCLK on, slave
-              es8311_write(0x02, 0x00);   // pre-div
-              es8311_write(0x03, 0x10);   // FS mode
-              es8311_write(0x04, 0x10);
-              es8311_write(0x05, 0x00);
-              es8311_write(0x06, 0x03);   // BCLK div
-              es8311_write(0x07, 0x00);
-              es8311_write(0x08, 0xFF);
-              es8311_write(0x09, 0x0C);   // 16-bit I2S
-              es8311_write(0x0A, 0x0C);
-              es8311_write(0x0B, 0x00);
-              es8311_write(0x0C, 0x00);
-              es8311_write(0x0D, 0x01);
-              es8311_write(0x0E, 0x02);
-              es8311_write(0x0F, 0x00);
-              es8311_write(0x10, 0x1F);
-              es8311_write(0x11, 0x7F);
-              es8311_write(0x12, 0x00);
-              es8311_write(0x13, 0x10);
-              es8311_write(0x14, 0x1A);
-              es8311_write(0x15, 0x40);
-              es8311_write(0x16, 0x24);
-              es8311_write(0x17, 0xBF);
-              es8311_write(0x32, 0xBF);   // DAC volume ~-15dB
-              es8311_write(0x37, 0x08);
-
+              if (!i2c_probe(ES8311_ADDR)) {
+                  Serial.println("[ES8311] not found at 0x18");
+                  return false;
+              }
+              i2c_write_reg(ES8311_ADDR, 0x00, 0x1F); delay(20);
+              i2c_write_reg(ES8311_ADDR, 0x00, 0x00);
+              i2c_write_reg(ES8311_ADDR, 0x01, 0x30);
+              i2c_write_reg(ES8311_ADDR, 0x02, 0x00);
+              i2c_write_reg(ES8311_ADDR, 0x03, 0x10);
+              i2c_write_reg(ES8311_ADDR, 0x04, 0x10);
+              i2c_write_reg(ES8311_ADDR, 0x05, 0x00);
+              i2c_write_reg(ES8311_ADDR, 0x06, 0x03);
+              i2c_write_reg(ES8311_ADDR, 0x07, 0x00);
+              i2c_write_reg(ES8311_ADDR, 0x08, 0xFF);
+              i2c_write_reg(ES8311_ADDR, 0x09, 0x0C);
+              i2c_write_reg(ES8311_ADDR, 0x0A, 0x0C);
+              i2c_write_reg(ES8311_ADDR, 0x0B, 0x00);
+              i2c_write_reg(ES8311_ADDR, 0x0C, 0x00);
+              i2c_write_reg(ES8311_ADDR, 0x0D, 0x01);
+              i2c_write_reg(ES8311_ADDR, 0x0E, 0x02);
+              i2c_write_reg(ES8311_ADDR, 0x0F, 0x00);
+              i2c_write_reg(ES8311_ADDR, 0x10, 0x1F);
+              i2c_write_reg(ES8311_ADDR, 0x11, 0x7F);
+              i2c_write_reg(ES8311_ADDR, 0x12, 0x00);
+              i2c_write_reg(ES8311_ADDR, 0x13, 0x10);
+              i2c_write_reg(ES8311_ADDR, 0x14, 0x1A);
+              i2c_write_reg(ES8311_ADDR, 0x15, 0x40);
+              i2c_write_reg(ES8311_ADDR, 0x16, 0x24);
+              i2c_write_reg(ES8311_ADDR, 0x17, 0xBF);
+              i2c_write_reg(ES8311_ADDR, 0x32, 0xBF);  // DAC vol ~-15dB
+              i2c_write_reg(ES8311_ADDR, 0x37, 0x08);
               Serial.println("[ES8311] init OK");
               return true;
           }
 
           bool es7210_init() {
-              Wire.beginTransmission(0x40);
-              if (Wire.endTransmission() != 0) { Serial.println("[ES7210] not found"); return false; }
-
-              es7210_write(0x00, 0xFF); delay(20);
-              es7210_write(0x00, 0x41);   // reset + power up
-              es7210_write(0x01, 0x1F);   // clock on
-              es7210_write(0x02, 0x00);
-              es7210_write(0x03, 0x00);
-              es7210_write(0x04, 0x00);
-              es7210_write(0x05, 0x00);
-              es7210_write(0x06, 0x00);
-              es7210_write(0x07, 0x00);
-              es7210_write(0x08, 0x10);   // 16-bit I2S
-              es7210_write(0x09, 0x30);
-              es7210_write(0x0A, 0x30);
-              es7210_write(0x0B, 0x00);
-              es7210_write(0x0C, 0x00);
-              es7210_write(0x0D, 0x00);
-              es7210_write(0x0E, 0x00);
-              es7210_write(0x0F, 0x00);
-              es7210_write(0x10, 0x00);
-              es7210_write(0x11, 0x60);   // mic bias
-              es7210_write(0x12, 0x3F);   // ADC1 gain
-              es7210_write(0x13, 0x3F);   // ADC2 gain
-              es7210_write(0x14, 0x3F);   // ADC3 gain
-              es7210_write(0x15, 0x3F);   // ADC4 gain
-
+              if (!i2c_probe(ES7210_ADDR)) {
+                  Serial.println("[ES7210] not found at 0x40");
+                  return false;
+              }
+              i2c_write_reg(ES7210_ADDR, 0x00, 0xFF); delay(20);
+              i2c_write_reg(ES7210_ADDR, 0x00, 0x41);
+              i2c_write_reg(ES7210_ADDR, 0x01, 0x1F);
+              i2c_write_reg(ES7210_ADDR, 0x02, 0x00);
+              i2c_write_reg(ES7210_ADDR, 0x03, 0x00);
+              i2c_write_reg(ES7210_ADDR, 0x04, 0x00);
+              i2c_write_reg(ES7210_ADDR, 0x05, 0x00);
+              i2c_write_reg(ES7210_ADDR, 0x06, 0x00);
+              i2c_write_reg(ES7210_ADDR, 0x07, 0x00);
+              i2c_write_reg(ES7210_ADDR, 0x08, 0x10);
+              i2c_write_reg(ES7210_ADDR, 0x09, 0x30);
+              i2c_write_reg(ES7210_ADDR, 0x0A, 0x30);
+              i2c_write_reg(ES7210_ADDR, 0x0B, 0x00);
+              i2c_write_reg(ES7210_ADDR, 0x0C, 0x00);
+              i2c_write_reg(ES7210_ADDR, 0x0D, 0x00);
+              i2c_write_reg(ES7210_ADDR, 0x0E, 0x00);
+              i2c_write_reg(ES7210_ADDR, 0x0F, 0x00);
+              i2c_write_reg(ES7210_ADDR, 0x10, 0x00);
+              i2c_write_reg(ES7210_ADDR, 0x11, 0x60);
+              i2c_write_reg(ES7210_ADDR, 0x12, 0x3F);
+              i2c_write_reg(ES7210_ADDR, 0x13, 0x3F);
+              i2c_write_reg(ES7210_ADDR, 0x14, 0x3F);
+              i2c_write_reg(ES7210_ADDR, 0x15, 0x3F);
               Serial.println("[ES7210] init OK");
               return true;
           }
@@ -317,12 +337,10 @@ jobs:
           bool i2s_init() {
               i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
               chan_cfg.auto_clear = true;
-
               if (i2s_new_channel(&chan_cfg, &tx_handle, &rx_handle) != ESP_OK) {
                   Serial.println("[I2S] new_channel failed");
                   return false;
               }
-
               i2s_std_config_t std_cfg = {
                   .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
                   .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
@@ -336,13 +354,11 @@ jobs:
                   }
               };
               std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
-
               if (i2s_channel_init_std_mode(tx_handle, &std_cfg) != ESP_OK) { Serial.println("[I2S] tx init fail"); return false; }
               if (i2s_channel_init_std_mode(rx_handle, &std_cfg) != ESP_OK) { Serial.println("[I2S] rx init fail"); return false; }
               if (i2s_channel_enable(tx_handle) != ESP_OK) { Serial.println("[I2S] tx enable fail"); return false; }
               if (i2s_channel_enable(rx_handle) != ESP_OK) { Serial.println("[I2S] rx enable fail"); return false; }
-
-              Serial.println("[I2S] init OK (16kHz stereo full-duplex)");
+              Serial.println("[I2S] init OK (24kHz stereo full-duplex)");
               return true;
           }
 
@@ -415,39 +431,57 @@ jobs:
               pinMode(BOOT_BTN, INPUT_PULLUP);
               pinMode(PWR_BTN, INPUT_PULLUP);
 
+              // 1. I2C bus 0 creat de Waveshare BSP (SDA=47, SCL=48)
               I2C_INIT_CALL
               delay(50);
 
+              // 2. LVGL + display + touch (folosesc bus 0)
               lvgl_port_init();
               delay(300);
               build_ui();
 
-              Wire.begin(I2C_SDA, I2C_SCL, 400000);
-              delay(50);
+              // 3. Obtinem handle-ul bus-ului 0 pentru codecuri
+              if (i2c_master_get_bus_handle(0, &i2c_bus) != ESP_OK) {
+                  Serial.println("[I2C] cannot get bus 0");
+                  set_status("I2C bus fail");
+                  return;
+              }
+              Serial.println("[I2C] bus 0 acquired for codecs");
 
-              // Pornim I2S mai intai ca sa generam MCLK pentru codecuri
+              // 4. Scan rapid: ce e pe bus?
+              Serial.println("[I2C] scanning addresses...");
+              for (uint8_t a = 1; a < 127; a++) {
+                  if (i2c_master_probe(i2c_bus, a, 20) == ESP_OK) {
+                      Serial.printf("[I2C] found device at 0x%02X\n", a);
+                  }
+              }
+
+              // 5. Scoatem codecurile din reset prin TCA9554
+              tca9554_enable_audio();
+
+              // 6. Pornim I2S (MCLK pentru codecuri)
               if (!i2s_init()) {
                   set_status("I2S init failed");
                   return;
               }
 
+              // 7. Init codecuri
               bool ok8311 = es8311_init();
               bool ok7210 = es7210_init();
 
               if (!ok8311 || !ok7210) {
-                  set_status("Codec lipsa! Verifica Serial");
-                  Serial.println("[ERR] Un codec nu a raspuns");
+                  set_status("Codec lipsa! Vezi Serial");
                   return;
               }
 
               buf_bytes = BUFFER_SAMPLES * 2 * sizeof(int16_t);
               audio_buf = (int16_t*) heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
               if (!audio_buf) {
-                  Serial.println("[ERR] Cannot alloc audio buffer in PSRAM");
+                  Serial.println("[ERR] PSRAM alloc fail");
                   set_status("PSRAM alloc fail");
                   return;
               }
-              Serial.printf("[I2S] Buffer alocat: %u bytes in PSRAM\n", (unsigned)buf_bytes);
+              Serial.printf("[I2S] Buffer alocat: %u bytes\n", (unsigned)buf_bytes);
 
               set_status("Loopback activ - vorbeste!");
               audio_ready = true;
@@ -458,17 +492,11 @@ jobs:
           }
 
           void loop() {
-              if (!audio_ready) {
-                  delay(1000);
-                  return;
-              }
+              if (!audio_ready) { delay(1000); return; }
 
               size_t bytes_read = 0;
               esp_err_t err = i2s_channel_read(rx_handle, audio_buf, buf_bytes, &bytes_read, 1000);
-              if (err != ESP_OK || bytes_read == 0) {
-                  delay(10);
-                  return;
-              }
+              if (err != ESP_OK || bytes_read == 0) { delay(10); return; }
 
               int samples = bytes_read / sizeof(int16_t);
               int32_t peak = 0;
@@ -477,7 +505,6 @@ jobs:
                   if (v < 0) v = -v;
                   if (v > peak) peak = v;
               }
-
               int level = (peak * 100) / 32768;
               update_level(level);
 
@@ -491,18 +518,17 @@ jobs:
                       Serial.printf("[LOOP] peak=%d level=%d%% ip=%s\n",
                           (int)peak, level, WiFi.localIP().toString().c_str());
                   } else {
-                      Serial.printf("[LOOP] peak=%d level=%d%% wifi=...\n", (int)peak, level);
+                      Serial.printf("[LOOP] peak=%d level=%d%%\n", (int)peak, level);
                   }
               }
           }
           ''').lstrip()
 
-          # Inlocuim apelul I2C detectat dinamic
           ino = ino.replace("I2C_INIT_CALL", f"{i2c_init_func}();")
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] Audio loopback .ino generat cu succes")
+          print("[OK] Audio .ino generat")
           PYEOF
 
       - name: Compile Firmware
