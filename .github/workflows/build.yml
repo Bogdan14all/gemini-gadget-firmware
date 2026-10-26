@@ -1,4 +1,4 @@
-name: Build Minimal Gemini OS v41 (Bogdan Edition)
+name: Build Minimal Gemini OS v42 (Bogdan Edition)
 
 on:
   workflow_dispatch:
@@ -92,49 +92,19 @@ jobs:
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include <demos\/lv_demos.h>/\/\/ #include <demos\/lv_demos.h>/g' {} + 2>/dev/null || true
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/lv_demo_widgets();/\/\/ lv_demo_widgets();/g' {} + 2>/dev/null || true
 
-          # Patch Python pe drivere pentru ecran permanent deschis
+          # Patch Python pe lvgl_port.c pentru stabilitate I2C si Touch
           python3 - << 'PYEOF'
-          import re, os
+          import re
 
-          sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
-
-          # 1. Neutralizare completa driver PWM Backlight (lcd_bl_pwm_bsp.c)
-          # Fortam setUpduty la 100% (8191) si eliminam orice oprire accidentala
-          for root, dirs, files in os.walk(sketch_dir):
-              for file in files:
-                  if file == "lcd_bl_pwm_bsp.c":
-                      bl_path = os.path.join(root, file)
-                      with open(bl_path, "r", encoding="utf-8", errors="ignore") as f:
-                          bl_c = f.read()
-                      # Rescriem complet setUpduty sa seteze 100% (duty 8191)
-                      bl_c = re.sub(
-                          r'void\s+setUpduty\s*\([^)]*\)\s*\{[^}]*\}',
-                          'void setUpduty(uint16_t duty) { ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 8191); ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0); }',
-                          bl_c
-                      )
-                      # Neutralizam ledc_stop complet
-                      bl_c = re.sub(r'ESP_ERROR_CHECK_WITHOUT_ABORT\s*\(\s*ledc_stop\s*\([^)]+\)\s*\)\s*;', '// ledc_stop disabled;', bl_c)
-                      bl_c = re.sub(r'ledc_stop\s*\([^;]+\);', '// ledc_stop disabled;', bl_c)
-                      with open(bl_path, "w", encoding="utf-8") as f:
-                          f.write(bl_c)
-                      print(f"Patched {bl_path} cleanly!")
-
-          # 2. Patch pe lvgl_port.c
-          port_path = f"{sketch_dir}/lvgl_port.c"
+          port_path = "Arduino/examples/10_LVGL_V9_Test/lvgl_port.c"
           with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
               code = f.read()
 
+          # 1. Constanta marime pixel RGB565
           code = code.replace("LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)", "2")
           code = code.replace("lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)", "2")
 
-          # Safe touch: TouchInputReadCallback pasiv fara blocaj I2C
-          safe_touch = "static void TouchInputReadCallback(lv_indev_t * indev_drv, lv_indev_data_t * data) { if (data) { data->state = LV_INDEV_STATE_RELEASED; } }"
-          pattern = r'static\s+void\s+TouchInputReadCallback\s*\([^{]+\{(?:[^{}]*|\{[^{}]*\})*\}'
-          if re.search(pattern, code):
-              code = re.sub(pattern, safe_touch, code, count=1)
-              print("Patched TouchInputReadCallback successfully!")
-
-          # example_lcd_exio_init fara abort si cu log curat
+          # 2. Inlocuire sigura pentru example_lcd_exio_init cu diagnostic curat
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
               'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { puts("[EXIO] I2C bus 0 not ready"); tca9554_i2c_bus = NULL; } else { puts("[EXIO] I2C bus 0 acquired!"); }',
@@ -156,6 +126,12 @@ jobs:
               code
           )
 
+          # 3. Touch callback pasiv fara blocare
+          safe_touch = "static void TouchInputReadCallback(lv_indev_t * indev_drv, lv_indev_data_t * data) { if (data) { data->state = LV_INDEV_STATE_RELEASED; } }"
+          pattern = r'static\s+void\s+TouchInputReadCallback\s*\([^{]+\{(?:[^{}]*|\{[^{}]*\})*\}'
+          if re.search(pattern, code):
+              code = re.sub(pattern, safe_touch, code, count=1)
+
           with open(port_path, "w", encoding="utf-8") as f:
               f.write(code)
           print("lvgl_port.c patched successfully!")
@@ -169,6 +145,7 @@ jobs:
           extern "C" {
           #include "i2c_bsp.h"
           #include "lvgl_port.h"
+          #include "lcd_bl_bsp/lcd_bl_pwm_bsp.h"
           }
           #include <lvgl.h>
 
@@ -176,10 +153,14 @@ jobs:
           const char* password = "revelion";
 
           void create_bogdan_ui() {
+              // Reset backlight pins from LEDC peripheral to standard GPIO output
+              gpio_reset_pin((gpio_num_t)1);
               pinMode(1, OUTPUT);
-              digitalWrite(1, HIGH); // Backlight GPIO 1
+              digitalWrite(1, HIGH); // Backlight GPIO 1 (V2 Hardware)
+
+              gpio_reset_pin((gpio_num_t)43);
               pinMode(43, OUTPUT);
-              digitalWrite(43, HIGH); // Backlight GPIO 43 (redundanta V1/V2)
+              digitalWrite(43, HIGH); // Backlight GPIO 43 (V1 Hardware)
 
               #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
               lvgl_port_lock(0);
@@ -190,25 +171,25 @@ jobs:
               if (scr) {
                   lv_obj_clean(scr);
 
-                  // 1. Fundal Albastru Deschis Opac (#38BDF8)
+                  // 1. Light Blue Background (#38BDF8)
                   lv_obj_set_style_bg_color(scr, lv_color_hex(0x38BDF8), 0);
                   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-                  // 2. Titlu Linia 1: "Gemini OS" (Montserrat 18)
+                  // 2. Title Line 1: "Gemini OS" (Montserrat 18)
                   lv_obj_t *lbl_title = lv_label_create(scr);
                   lv_label_set_text(lbl_title, "Gemini OS");
                   lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x000000), 0);
                   lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_18, 0);
                   lv_obj_align(lbl_title, LV_ALIGN_CENTER, 0, -36);
 
-                  // 3. Titlu Linia 2: "by Bogdan" (Montserrat 14)
+                  // 3. Title Line 2: "by Bogdan" (Montserrat 14)
                   lv_obj_t *lbl_sub = lv_label_create(scr);
                   lv_label_set_text(lbl_sub, "by Bogdan");
                   lv_obj_set_style_text_color(lbl_sub, lv_color_hex(0x0F172A), 0);
                   lv_obj_set_style_text_font(lbl_sub, &lv_font_montserrat_14, 0);
                   lv_obj_align(lbl_sub, LV_ALIGN_CENTER, 0, -14);
 
-                  // 4. Stare Wi-Fi: minim Montserrat 14 conform regulii stabilite
+                  // 4. Wi-Fi Status: Montserrat 14 (ensuring high readability)
                   lv_obj_t *lbl_wifi = lv_label_create(scr);
                   lv_label_set_text(lbl_wifi, "Wi-Fi: Conectat!");
                   lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x0284C7), 0);
@@ -226,20 +207,26 @@ jobs:
               delay(500);
               Serial.println("Starting Gemini OS Bogdan Edition...");
 
-              // 1. Initializare I2C a placii pentru cipul TCA9554
-              Serial.println("Initializare I2C Master...");
+              // 1. Initialize I2C Master bus 0 for TCA9554 IO expander
+              Serial.println("Initializing I2C Master for TCA9554...");
               i2c_master_Init();
               delay(50);
 
-              // 2. Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
+              // 2. Initialize Waveshare LVGL display port (AXS15231B QSPI driver + FreeRTOS task)
               delay(100);
               lvgl_port_init();
+
+              // 3. Set native Waveshare BSP brightness to 100% and lock GPIO output
+              bsp_display_brightness_set(100);
+              gpio_reset_pin((gpio_num_t)1);
+              pinMode(1, OUTPUT);
+              digitalWrite(1, HIGH);
 
               delay(200);
               create_bogdan_ui();
               Serial.println("UI Created successfully!");
 
-              // 3. Initializare Wi-Fi cu putere redusa si Modem Sleep oprit
+              // 4. Initialize Wi-Fi in Station mode without sleep
               WiFi.mode(WIFI_STA);
               WiFi.setTxPower(WIFI_POWER_8_5dBm);
               WiFi.setSleep(false);
@@ -248,7 +235,7 @@ jobs:
           }
 
           void loop() {
-              // Mentinem iluminarea la nivel inalt permanent pe ambele revizii hardware
+              // Maintain continuous 3.3V drive on backlight pin
               digitalWrite(1, HIGH);
               digitalWrite(43, HIGH);
 
@@ -264,6 +251,7 @@ jobs:
               delay(100);
           }
           EOF
+
       - name: Compile Minimal Firmware
         run: |
           SKETCH_PATH="Arduino/examples/10_LVGL_V9_Test/10_LVGL_V9_Test.ino"
