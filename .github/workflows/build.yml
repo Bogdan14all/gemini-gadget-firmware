@@ -13,6 +13,7 @@
           const char* password = "revelion";
           
           bool screen_on = true;
+          bool last_btn_state = HIGH;
 
           void create_bogdan_ui() {
               pinMode(1, OUTPUT);
@@ -59,7 +60,7 @@
           void setup() {
               Serial.begin(115200);
               
-              // Set BOOT button (GPIO 0) as input
+              // Configure BOOT button (GPIO 0) as input with pullup
               pinMode(0, INPUT_PULLUP);
               
               delay(500);
@@ -79,24 +80,32 @@
           }
 
           void loop() {
-              // 1. BOOT Button Debounce & Toggle
-              if (digitalRead(0) == LOW) {
+              // 1. Process LVGL Timers (Prevents screen crash/dimming)
+              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
+              lvgl_port_lock(0);
+              #endif
+              lv_timer_handler();
+              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
+              lvgl_port_unlock();
+              #endif
+              
+              // 2. Debounced Screen Toggle on BOOT Button (GPIO 0)
+              bool current_btn_state = digitalRead(0);
+              if (current_btn_state == LOW && last_btn_state == HIGH) {
                   delay(50); // Debounce
                   if (digitalRead(0) == LOW) {
                       screen_on = !screen_on;
-                      
-                      // Hardware backlight toggle
                       digitalWrite(1, screen_on ? HIGH : LOW);
                       digitalWrite(43, screen_on ? HIGH : LOW);
-                      
                       Serial.println(screen_on ? "Screen ON" : "Screen OFF");
                       
-                      // Wait for physical release
+                      // Wait until button is released
                       while(digitalRead(0) == LOW) { delay(10); }
                   }
               }
+              last_btn_state = current_btn_state;
 
-              // 2. Heartbeat logic only
+              // 3. Heartbeat Logic
               static unsigned long last_beat = 0;
               if (millis() - last_beat > 5000) {
                   last_beat = millis();
@@ -104,6 +113,7 @@
                       Serial.println("[Heartbeat] Gemini OS Bogdan Edition ruleaza stabil pe Wi-Fi! IP: " + WiFi.localIP().toString());
                   }
               }
-              delay(10);
+              
+              delay(5); // Small delay to yield to FreeRTOS watchdog
           }
           EOF
