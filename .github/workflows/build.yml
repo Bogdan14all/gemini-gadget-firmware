@@ -1,11 +1,11 @@
-name: Build Gemini OS - Mic Only Test
+name: Build Gemini OS - Mic TDM Fixed Test
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Mic Test
+    name: Build Mic TDM Test
     runs-on: ubuntu-latest
 
     steps:
@@ -81,15 +81,13 @@ jobs:
 
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
-          # Patch lvgl_port.c
+          # 1. Patch lvgl_port.c (fixes for LVGL 9 and TCA9554)
           port_path = f"{sketch_dir}/lvgl_port.c"
           with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
               code = f.read()
 
-          # Rezolvam LV_COLOR_FORMAT_GET_SIZE
           code = code.replace("LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)", "2")
           code = code.replace("lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)", "2")
-          # Comentam apelul demo
           code = code.replace("lv_demo_widgets();", "// lv_demo_widgets();")
           
           code = re.sub(
@@ -106,7 +104,7 @@ jobs:
           with open(port_path, "w", encoding="utf-8") as f:
               f.write(code)
 
-          # Inject lock/unlock in lvgl_port
+          # 2. Inject lock/unlock in lvgl_port
           h_path = f"{sketch_dir}/lvgl_port.h"
           with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
               h_content = f.read()
@@ -148,7 +146,7 @@ jobs:
               with open(port_path, "w", encoding="utf-8") as f:
                   f.write(c_content)
 
-          # Detect I2C init
+          # 3. Detect I2C init
           i2c_init_func = "bsp_i2c_init"
           for h_path in glob.glob(f"{sketch_dir}/*.h"):
               with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -196,28 +194,6 @@ jobs:
               return ret == ESP_OK;
           }
 
-          void codec_init() {
-              // TCA9554
-              i2c_write_reg(0x20, 0x03, 0x00); delay(10);
-              i2c_write_reg(0x20, 0x01, 0xFF); delay(50);
-              
-              // ES8311 (pornim MCLK corect)
-              i2c_write_reg(0x18, 0x00, 0x1F); delay(20);
-              i2c_write_reg(0x18, 0x00, 0x00);
-
-              // ES7210 (ADC)
-              i2c_write_reg(0x40, 0x00, 0xFF); delay(20);
-              i2c_write_reg(0x40, 0x00, 0x41); // Reset + power up
-              i2c_write_reg(0x40, 0x01, 0x1F); // Clock on
-              i2c_write_reg(0x40, 0x02, 0x00); // Mute off
-              i2c_write_reg(0x40, 0x08, 0x10); // 16-bit
-              i2c_write_reg(0x40, 0x09, 0x30);
-              i2c_write_reg(0x40, 0x0A, 0x30);
-              i2c_write_reg(0x40, 0x11, 0x60); // Mic bias
-              i2c_write_reg(0x40, 0x12, 0xFF); // Gain max
-              i2c_write_reg(0x40, 0x13, 0xFF); // Gain max
-          }
-
           bool i2s_init_tdm() {
               i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
               if (i2s_new_channel(&chan_cfg, NULL, &rx_handle) != ESP_OK) return false;
@@ -244,6 +220,34 @@ jobs:
               return true;
           }
 
+          void codec_init() {
+              // TCA9554
+              i2c_write_reg(0x20, 0x03, 0x00); delay(10);
+              i2c_write_reg(0x20, 0x01, 0xFF); delay(50);
+              
+              // ES8311 (pornim MCLK corect, esential pentru ES7210)
+              i2c_write_reg(0x18, 0x00, 0x1F); delay(20);
+              i2c_write_reg(0x18, 0x00, 0x00);
+
+              // ES7210 (ADC)
+              i2c_write_reg(0x40, 0x00, 0xFF); delay(20);  // Reset
+              i2c_write_reg(0x40, 0x00, 0x41);              // Power up
+              i2c_write_reg(0x40, 0x01, 0x1F);              // Clock on
+              i2c_write_reg(0x40, 0x02, 0x00);              // Mute off
+              
+              // Format audio: 16-bit I2S, TDM mode
+              i2c_write_reg(0x40, 0x11, 0x60);              // I2S, 16-bit
+              i2c_write_reg(0x40, 0x12, 0x02);              // Activeaza TDM (x1 LRCK) - CRUCIAL!
+              
+              // Gains (max)
+              i2c_write_reg(0x40, 0x13, 0xFF);              // ADC1 gain max
+              i2c_write_reg(0x40, 0x14, 0xFF);              // ADC2 gain max
+              i2c_write_reg(0x40, 0x15, 0xFF);              // ADC3 gain max
+              i2c_write_reg(0x40, 0x16, 0xFF);              // ADC4 gain max
+              
+              Serial.println("[ES7210] TDM registers applied");
+          }
+
           void setup() {
               Serial.begin(115200);
               delay(500);
@@ -260,15 +264,19 @@ jobs:
                   return;
               }
 
-              codec_init();
-              delay(100);
-
+              // IMPORTANT: Pornim I2S INAINTE de codec pentru a genera MCLK
               if (!i2s_init_tdm()) {
                   Serial.println("I2S TDM init fail");
                   return;
               }
+              Serial.println("[I2S] TDM started. MCLK generating...");
+              delay(50); // Lasa MCLK sa se stabilizeze
 
-              Serial.println("I2S TDM OK. Vorbeste acum!");
+              // Acum initializam codecurile
+              codec_init();
+              delay(100);
+
+              Serial.println("Microfon TDM OK. Vorbeste acum!");
           }
 
           void loop() {
@@ -313,14 +321,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/mic-test-0x0.bin \
+            -o package_bin/mic-tdm-test-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/mic-test-0x0.bin
+          ls -lh package_bin/mic-tdm-test-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mic-test-firmware
-          path: package_bin/mic-test-0x0.bin
+          name: mic-tdm-test-firmware
+          path: package_bin/mic-tdm-test-0x0.bin
           if-no-files-found: error
