@@ -42,7 +42,8 @@ jobs:
             cp -r Arduino/libraries/* ~/Arduino/libraries/ 2>/dev/null || true
           fi
           arduino-cli lib install "lvgl"@9.1.0
-          arduino-cli lib install "WebSockets"@2.4.1
+          # FIX: Upgrade WebSockets la 2.5.2 pentru compatibilitate cu ESP32 Core 3.x
+          arduino-cli lib install "WebSockets"@2.5.2
           arduino-cli lib install "ArduinoJson"@7.0.4
 
           cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
