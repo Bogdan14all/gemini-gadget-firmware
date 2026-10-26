@@ -1,4 +1,4 @@
-name: Build Minimal Gemini OS v39 (Bogdan Edition)
+name: Build Minimal Gemini OS v40 (Bogdan Edition)
 
 on:
   workflow_dispatch:
@@ -99,20 +99,25 @@ jobs:
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
           # 1. Neutralizare completa driver PWM Backlight (lcd_bl_pwm_bsp.c)
-          # Fortam backlight la 100% fara ca vreun timer sa mai poata reduce luminozitatea sau stinge ecranul
+          # Fortam setUpduty la 100% (8191) si eliminam orice oprire accidentala
           for root, dirs, files in os.walk(sketch_dir):
               for file in files:
                   if file == "lcd_bl_pwm_bsp.c":
                       bl_path = os.path.join(root, file)
                       with open(bl_path, "r", encoding="utf-8", errors="ignore") as f:
                           bl_c = f.read()
-                      # Inlocuim functia de set_duty sa seteze mereu maxim (100%)
-                      bl_c = re.sub(r'ledc_set_duty\s*\([^;]+\);', 'ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 8191);', bl_c)
+                      # Rescriem complet setUpduty sa seteze 100% (duty 8191)
+                      bl_c = re.sub(
+                          r'void\s+setUpduty\s*\([^)]*\)\s*\{[^}]*\}',
+                          'void setUpduty(uint32_t duty) { ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 8191); ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0); }',
+                          bl_c
+                      )
                       # Neutralizam ledc_stop complet
-                      bl_c = re.sub(r'ledc_stop\s*\([^;]+\);', '// ledc_stop disabled', bl_c)
+                      bl_c = re.sub(r'ESP_ERROR_CHECK_WITHOUT_ABORT\s*\(\s*ledc_stop\s*\([^)]+\)\s*\)\s*;', '// ledc_stop disabled;', bl_c)
+                      bl_c = re.sub(r'ledc_stop\s*\([^;]+\);', '// ledc_stop disabled;', bl_c)
                       with open(bl_path, "w", encoding="utf-8") as f:
                           f.write(bl_c)
-                      print(f"Patched {bl_path} successfully!")
+                      print(f"Patched {bl_path} cleanly!")
 
           # 2. Patch pe lvgl_port.c
           port_path = f"{sketch_dir}/lvgl_port.c"
