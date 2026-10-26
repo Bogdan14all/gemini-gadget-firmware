@@ -1,11 +1,11 @@
-name: Build Gemini OS - Mic TDM Diagnostic
+name: Build Gemini OS - Mic TDM (Xiaozhi-Style)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Mic TDM Diagnostic
+    name: Build Mic TDM Final
     runs-on: ubuntu-latest
 
     steps:
@@ -63,7 +63,7 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Generate Mic TDM Diagnostic Sketch
+      - name: Generate Mic TDM Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -155,7 +155,6 @@ jobs:
 
           ino = textwrap.dedent(r'''
           #include <Arduino.h>
-          #include <driver/i2s_std.h>
           #include <driver/i2s_tdm.h>
           #include <driver/i2c_master.h>
 
@@ -170,7 +169,7 @@ jobs:
           #define I2S_DIN   6
           #define I2S_DOUT  45
 
-          #define SAMPLE_RATE_MIC 16000
+          #define SAMPLE_RATE 24000
 
           i2s_chan_handle_t rx_handle = NULL;
           i2c_master_bus_handle_t i2c_bus = NULL;
@@ -194,7 +193,7 @@ jobs:
               if (i2s_new_channel(&chan_cfg, NULL, &rx_handle) != ESP_OK) return false;
 
               i2s_tdm_config_t tdm_cfg = {
-                  .clk_cfg = I2S_TDM_CLK_DEFAULT_CONFIG(SAMPLE_RATE_MIC),
+                  .clk_cfg = I2S_TDM_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
                   .slot_cfg = I2S_TDM_PHILIPS_SLOT_DEFAULT_CONFIG(
                       I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO,
                       (i2s_tdm_slot_mask_t)(I2S_TDM_SLOT0 | I2S_TDM_SLOT1 | I2S_TDM_SLOT2 | I2S_TDM_SLOT3)
@@ -227,31 +226,31 @@ jobs:
               i2c_write_reg(0x18, 0x00, 0x1F); delay(20);
               i2c_write_reg(0x18, 0x00, 0x00);
 
-              // ES7210 (ADC) - Configurare TDM
+              // ES7210 (ADC) - Configurare TDM completa
               i2c_write_reg(0x40, 0x00, 0xFF); delay(20);
               i2c_write_reg(0x40, 0x00, 0x41);
               i2c_write_reg(0x40, 0x01, 0x1F);
               i2c_write_reg(0x40, 0x02, 0x00);
               
-              // TDM slots (0x09, 0x0A) si format (0x11, 0x12)
-              i2c_write_reg(0x40, 0x09, 0x30); // TDM slot enable
-              i2c_write_reg(0x40, 0x0A, 0x30); // TDM slot enable
-              i2c_write_reg(0x40, 0x11, 0x60); // I2S, 16-bit
-              i2c_write_reg(0x40, 0x12, 0x02); // TDM x1 LRCK
+              // Sloturi TDM si format
+              i2c_write_reg(0x40, 0x09, 0x30);
+              i2c_write_reg(0x40, 0x0A, 0x30);
+              i2c_write_reg(0x40, 0x11, 0x60);
+              i2c_write_reg(0x40, 0x12, 0x02); // TDM x1 LRCK mode - CRUCIAL
               
-              // Gain maxim
+              // Gains
               i2c_write_reg(0x40, 0x13, 0xFF);
               i2c_write_reg(0x40, 0x14, 0xFF);
               i2c_write_reg(0x40, 0x15, 0xFF);
               i2c_write_reg(0x40, 0x16, 0xFF);
               
-              Serial.println("[ES7210] TDM configured");
+              Serial.println("[ES7210] TDM (4-slot) configured");
           }
 
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n=== Microfon TDM Diagnostic ===");
+              Serial.println("\n=== Microfon TDM (Xiaozhi-Style) ===");
 
               I2C_INIT_CALL
               delay(50);
@@ -264,7 +263,6 @@ jobs:
                   return;
               }
 
-              // I2S mai intai (MCLK)
               if (!i2s_init_tdm()) {
                   Serial.println("I2S TDM init fail");
                   return;
@@ -275,25 +273,32 @@ jobs:
               codec_init();
               delay(100);
 
-              Serial.println("Microfon TDM OK. Vorbeste acum!");
+              Serial.println("Microfon OK. Vorbeste acum!");
           }
 
           void loop() {
-              static int16_t mic_buf[512];
+              // Buffer pentru TDM: 4 sloturi * 2 bytes = 8 bytes per frame
+              static int16_t mic_buf[1024];
               size_t bytes_read = 0;
               esp_err_t err = i2s_channel_read(rx_handle, mic_buf, sizeof(mic_buf), &bytes_read, 1000);
               
               if (err == ESP_OK && bytes_read > 0) {
                   int samples = bytes_read / sizeof(int16_t);
                   int32_t peak = 0;
-                  for (int i = 0; i < samples; i++) {
-                      int32_t v = mic_buf[i];
-                      if (v < 0) v = -v;
-                      if (v > peak) peak = v;
+                  // Parsam buffer-ul TDM: slot0=mic1, slot1=ref, slot2=mic2, slot3=unused
+                  for (int i = 0; i < samples; i += 4) {
+                      int16_t mic1 = mic_buf[i];
+                      int16_t ref  = mic_buf[i+1];
+                      int16_t mic2 = mic_buf[i+2];
+                      
+                      int32_t v1 = (mic1 < 0) ? -mic1 : mic1;
+                      int32_t v2 = (mic2 < 0) ? -mic2 : mic2;
+                      if (v1 > peak) peak = v1;
+                      if (v2 > peak) peak = v2;
                   }
                   
-                  Serial.printf("Peak: %5d | Ch1: %6d | Ch2: %6d | Ch3: %6d | Ch4: %6d\n", 
-                                peak, mic_buf[0], mic_buf[1], mic_buf[2], mic_buf[3]);
+                  Serial.printf("Peak: %5d | Mic1: %6d | Ref: %6d | Mic2: %6d\n", 
+                                peak, mic_buf[0], mic_buf[1], mic_buf[2]);
               }
               delay(100);
           }
@@ -303,7 +308,7 @@ jobs:
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] Mic TDM Diagnostic .ino generat")
+          print("[OK] Mic TDM (Xiaozhi-Style) .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -320,14 +325,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/mic-tdm-diag-0x0.bin \
+            -o package_bin/mic-tdm-xiaozhi-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/mic-tdm-diag-0x0.bin
+          ls -lh package_bin/mic-tdm-xiaozhi-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mic-tdm-diag-firmware
-          path: package_bin/mic-tdm-diag-0x0.bin
+          name: mic-tdm-xiaozhi-firmware
+          path: package_bin/mic-tdm-xiaozhi-0x0.bin
           if-no-files-found: error
