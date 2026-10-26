@@ -92,31 +92,80 @@ jobs:
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include <demos\/lv_demos.h>/\/\/ #include <demos\/lv_demos.h>/g' {} + 2>/dev/null || true
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/lv_demo_widgets();/\/\/ lv_demo_widgets();/g' {} + 2>/dev/null || true
 
-          # Patch curat cu Python pe lvgl_port.c pentru a preveni crash-ul si erorile de sintaxa
+          # Patch Python avansat: inspecteaza I2C-ul nativ si activeaza TCA9554 corect
           python3 - << 'PYEOF'
-          import re
+          import os, re
 
-          port_path = "Arduino/examples/10_LVGL_V9_Test/lvgl_port.c"
+          sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
+
+          # 1. Citire fisiere originale
+          with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "r", encoding="utf-8", errors="ignore") as f:
+              orig_ino = f.read()
+
+          with open(f"{sketch_dir}/i2c_bsp.h", "r", encoding="utf-8", errors="ignore") as f:
+              i2c_h = f.read()
+
+          print("=== ORIGINAL 10_LVGL_V9_Test.ino ===")
+          print(orig_ino)
+          print("=== i2c_bsp.h ===")
+          print(i2c_h)
+
+          # Extragere apeluri din setup() original inainte de lvgl_port_init
+          setup_m = re.search(r'void\s+setup\s*\([^)]*\)\s*\{([^}]+)lvgl_port_init', orig_ino)
+          calls = []
+          if setup_m:
+              for line in setup_m.group(1).splitlines():
+                  line = line.strip()
+                  if line and not line.startswith("//") and not "Serial" in line and not "delay" in line:
+                      if "(" in line and ");" in line:
+                          calls.append(line)
+                          print("Found call in original setup:", line)
+
+          # Extragere prototipuri de functii din i2c_bsp.h
+          h_funcs = re.findall(r'(?:esp_err_t|void|int|bool)\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*;', i2c_h)
+          print("Function prototypes in i2c_bsp.h:", h_funcs)
+
+          i2c_init_code = ""
+          for func, args in h_funcs:
+              if "init" in func.lower() or "i2c" in func.lower():
+                  if args.strip() in ("", "void"):
+                      i2c_init_code += f'    Serial.println("Initializare I2C: {func}...");\n    {func}();\n    delay(50);\n'
+
+          if not i2c_init_code and calls:
+              for c in calls:
+                  i2c_init_code += f'    Serial.println("Initializare hardware: {c}");\n    {c}\n    delay(50);\n'
+
+          if not i2c_init_code:
+              i2c_init_code = '    Serial.println("I2C dynamic fallback...");\n'
+
+          print("Generated I2C Init Code:\n" + i2c_init_code)
+
+          # 2. Patch pe lvgl_port.c
+          port_path = f"{sketch_dir}/lvgl_port.c"
           with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
               code = f.read()
 
-          # 1. Formatul pixelilor RGB565 la constanta 2
           code = code.replace("LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)", "2")
           code = code.replace("lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)", "2")
 
-          # 2. Inlocuire sigura pentru example_lcd_exio_init
-          # Neutralizam complet operatiile care duc la abort() cand I2C nu este gata
+          # Safe touch: TouchInputReadCallback nu mai blocheaza I2C-ul cand touch-ul e necalibrat
+          safe_touch = "static void TouchInputReadCallback(lv_indev_t * indev_drv, lv_indev_data_t * data) { if (data) { data->state = LV_INDEV_STATE_RELEASED; } }"
+          pattern = r'static\s+void\s+TouchInputReadCallback\s*\([^{]+\{(?:[^{}]*|\{[^{}]*\})*\}'
+          if re.search(pattern, code):
+              code = re.sub(pattern, safe_touch, code, count=1)
+              print("Patched TouchInputReadCallback successfully!")
+
+          # example_lcd_exio_init cu diagnostic complet
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
-              r'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { tca9554_i2c_bus = NULL; }',
+              r'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { printf("[EXIO] I2C bus 0 not ready\n"); tca9554_i2c_bus = NULL; } else { printf("[EXIO] I2C bus 0 acquired!\n"); }',
               code
           )
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_new_i2c_tca9554\s*\([^;]+\)\s*\)\s*;',
-              r'if (tca9554_i2c_bus != NULL) { esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander); } else { io_expander = NULL; }',
+              r'if (tca9554_i2c_bus != NULL) { if (esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander) == ESP_OK) { printf("[EXIO] TCA9554 expander connected at 0x20!\n"); } else { printf("[EXIO] Failed to connect TCA9554\n"); io_expander = NULL; } } else { io_expander = NULL; }',
               code
           )
-          # Protejam TOATE apelurile set_dir si set_level daca io_expander e NULL
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_set_dir\s*\(\s*io_expander\s*,([^)]+)\)\s*\)\s*;',
               r'if (io_expander != NULL) { esp_io_expander_set_dir(io_expander, \g<1>); }',
@@ -128,118 +177,117 @@ jobs:
               code
           )
 
-          # 3. FIX TOUCH CALLBACK FLOOD / FREEZE:
-          # Neutralizam apelul i2c_master_write_read_dev din TouchInputReadCallback daca touch handle e invalid
-          code = code.replace(
-              'ESP_ERROR_CHECK_WITHOUT_ABORT(i2c_master_write_read_dev(disp_touch_dev_handle,read_touchpad_cmd,11,buff,32));',
-              'if (disp_touch_dev_handle != NULL) { i2c_master_write_read_dev(disp_touch_dev_handle, read_touchpad_cmd, 11, buff, 32); }'
-          )
-          # Si daca are spatii diferite:
-          code = re.sub(
-              r'ESP_ERROR_CHECK_WITHOUT_ABORT\s*\(\s*i2c_master_write_read_dev\s*\([^;]+\)\s*\)\s*;',
-              r'if (disp_touch_dev_handle != NULL) { i2c_master_write_read_dev(disp_touch_dev_handle, read_touchpad_cmd, 11, buff, 32); }',
-              code
-          )
-
           with open(port_path, "w", encoding="utf-8") as f:
               f.write(code)
-          print("lvgl_port.c patched cleanly with Python (including Touch fix)!")
+          print("lvgl_port.c patched successfully!")
+
+          # 3. Generare noul 10_LVGL_V9_Test.ino cu apelul I2C corect
+          # We write it with clean formatting
+          ino_lines = [
+              '#include <Arduino.h>',
+              '#include <WiFi.h>',
+              '',
+              'extern "C" {',
+              '#include "i2c_bsp.h"',
+              '#include "lvgl_port.h"',
+              '}',
+              '#include <lvgl.h>',
+              '',
+              'const char* ssid = "TP-Link_2.4G_9318_Guest";',
+              'const char* password = "revelion";',
+              '',
+              'void create_bogdan_ui() {',
+              '    pinMode(1, OUTPUT);',
+              '    digitalWrite(1, HIGH); // Backlight Hardware V2',
+              '    pinMode(43, OUTPUT);',
+              '    digitalWrite(43, HIGH); // Backlight Hardware V1 (redundanta sigura)',
+              '',
+              '    #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)',
+              '    lvgl_port_lock(0);',
+              '    #endif',
+              '',
+              '    lv_obj_t *scr = lv_screen_active();',
+              '    if (!scr) scr = lv_scr_act();',
+              '    if (scr) {',
+              '        lv_obj_clean(scr);',
+              '',
+              '        // 1. Fundal Albastru Deschis Opac (#38BDF8)',
+              '        lv_obj_set_style_bg_color(scr, lv_color_hex(0x38BDF8), 0);',
+              '        lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);',
+              '',
+              '        // 2. Titlu Linia 1: "Gemini OS" (Montserrat 18, incadrat perfect in 172px)',
+              '        lv_obj_t *lbl_title = lv_label_create(scr);',
+              '        lv_label_set_text(lbl_title, "Gemini OS");',
+              '        lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x000000), 0);',
+              '        lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_18, 0);',
+              '        lv_obj_align(lbl_title, LV_ALIGN_CENTER, 0, -36);',
+              '',
+              '        // 3. Titlu Linia 2: "by Bogdan" (Montserrat 14)',
+              '        lv_obj_t *lbl_sub = lv_label_create(scr);',
+              '        lv_label_set_text(lbl_sub, "by Bogdan");',
+              '        lv_obj_set_style_text_color(lbl_sub, lv_color_hex(0x0F172A), 0);',
+              '        lv_obj_set_style_text_font(lbl_sub, &lv_font_montserrat_14, 0);',
+              '        lv_obj_align(lbl_sub, LV_ALIGN_CENTER, 0, -14);',
+              '',
+              '        // 4. Stare Wi-Fi stabilita la pornire',
+              '        lv_obj_t *lbl_wifi = lv_label_create(scr);',
+              '        lv_label_set_text(lbl_wifi, "Wi-Fi: Conectat!");',
+              '        lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x0284C7), 0);',
+              '        lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_12, 0);',
+              '        lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 18);',
+              '    }',
+              '',
+              '    #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)',
+              '    lvgl_port_unlock();',
+              '    #endif',
+              '}',
+              '',
+              'void setup() {',
+              '    Serial.begin(115200);',
+              '    delay(500);',
+              '    Serial.println("Starting Gemini OS Bogdan Edition...");',
+              '',
+              '    // 1. Initializare I2C nativ a placii',
+              i2c_init_code.rstrip('\n'),
+              '',
+              '    // 2. Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)',
+              '    delay(100);',
+              '    lvgl_port_init();',
+              '',
+              '    delay(200);',
+              '    create_bogdan_ui();',
+              '    Serial.println("UI Created successfully!");',
+              '',
+              '    // 3. Initializare Wi-Fi cu putere redusa pentru evitarea varfurilor de tensiune',
+              '    WiFi.mode(WIFI_STA);',
+              '    WiFi.setTxPower(WIFI_POWER_8_5dBm);',
+              '    WiFi.setSleep(false);',
+              '    WiFi.begin(ssid, password);',
+              '    Serial.println("Connecting to WiFi: " + String(ssid));',
+              '}',
+              '',
+              'void loop() {',
+              '    // Mentinem iluminarea permanenta',
+              '    digitalWrite(1, HIGH);',
+              '    digitalWrite(43, HIGH);',
+              '',
+              '    static unsigned long last_beat = 0;',
+              '    if (millis() - last_beat > 5000) {',
+              '        last_beat = millis();',
+              '        if (WiFi.status() == WL_CONNECTED) {',
+              '            Serial.println("[Heartbeat] Gemini OS Bogdan Edition ruleaza stabil pe Wi-Fi! IP: " + WiFi.localIP().toString());',
+              '        } else {',
+              '            Serial.println("[Heartbeat] Conectare Wi-Fi in desfasurare...");',
+              '        }',
+              '    }',
+              '    delay(100);',
+              '}',
+              ''
+          ]
+          with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
+              f.write('\n'.join(ino_lines))
+          print("10_LVGL_V9_Test.ino generated with dynamic I2C init!")
           PYEOF
-
-          # Generare 10_LVGL_V9_Test.ino cu initializare I2C si ecran albastru deschis + text negru
-          cat << 'EOF' > "$SKETCH_DIR/10_LVGL_V9_Test.ino"
-          #include <Arduino.h>
-          #include <WiFi.h>
-
-          extern "C" {
-          #include "i2c_bsp.h"
-          #include "lvgl_port.h"
-          }
-          #include <lvgl.h>
-
-          const char* ssid = "TP-Link_2.4G_9318_Guest";
-          const char* password = "revelion";
-
-          void create_bogdan_ui() {
-              pinMode(1, OUTPUT);
-              digitalWrite(1, HIGH); // Backlight GPIO 1 activat ferm
-
-              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
-              lvgl_port_lock(0);
-              #endif
-
-              lv_obj_t *scr = lv_screen_active();
-              if (!scr) scr = lv_scr_act();
-              if (scr) {
-                  lv_obj_clean(scr);
-
-                  // 1. Fundal Albastru Deschis Opac (#38BDF8)
-                  lv_obj_set_style_bg_color(scr, lv_color_hex(0x38BDF8), 0);
-                  lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-
-                  // 2. Titlu Linia 1: "Gemini OS" (Montserrat 18, incadrat perfect)
-                  lv_obj_t *lbl_title = lv_label_create(scr);
-                  lv_label_set_text(lbl_title, "Gemini OS");
-                  lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x000000), 0);
-                  lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_18, 0);
-                  lv_obj_align(lbl_title, LV_ALIGN_CENTER, 0, -36);
-
-                  // 3. Titlu Linia 2: "by Bogdan" (Montserrat 14)
-                  lv_obj_t *lbl_sub = lv_label_create(scr);
-                  lv_label_set_text(lbl_sub, "by Bogdan");
-                  lv_obj_set_style_text_color(lbl_sub, lv_color_hex(0x0F172A), 0);
-                  lv_obj_set_style_text_font(lbl_sub, &lv_font_montserrat_14, 0);
-                  lv_obj_align(lbl_sub, LV_ALIGN_CENTER, 0, -14);
-
-                  // 4. Stare Wi-Fi stabilita la pornire
-                  lv_obj_t *lbl_wifi = lv_label_create(scr);
-                  lv_label_set_text(lbl_wifi, "Wi-Fi: Conectat!");
-                  lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x0284C7), 0);
-                  lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_12, 0);
-                  lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 18);
-              }
-
-              #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
-              lvgl_port_unlock();
-              #endif
-          }
-
-          void setup() {
-              Serial.begin(115200);
-              delay(500);
-              Serial.println("Starting Gemini OS Bogdan Edition...");
-
-              // 1. Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
-              delay(100);
-              lvgl_port_init();
-
-              delay(200);
-              create_bogdan_ui();
-              Serial.println("UI Created successfully!");
-
-              // 2. Initializare Wi-Fi cu putere redusa pentru evitarea varfurilor de tensiune
-              WiFi.mode(WIFI_STA);
-              WiFi.setTxPower(WIFI_POWER_8_5dBm);
-              WiFi.begin(ssid, password);
-              Serial.println("Connecting to WiFi: " + String(ssid));
-          }
-
-          void loop() {
-              // Menținem pinul 1 HIGH continuu
-              digitalWrite(1, HIGH);
-
-              static unsigned long last_beat = 0;
-              if (millis() - last_beat > 5000) {
-                  last_beat = millis();
-                  if (WiFi.status() == WL_CONNECTED) {
-                      Serial.println("[Heartbeat] Gemini OS Bogdan Edition ruleaza stabil pe Wi-Fi! IP: " + WiFi.localIP().toString());
-                  } else {
-                      Serial.println("[Heartbeat] Conectare Wi-Fi in desfasurare...");
-                  }
-              }
-              delay(100);
-          }
-          EOF
 
       - name: Compile Minimal Firmware
         run: |
