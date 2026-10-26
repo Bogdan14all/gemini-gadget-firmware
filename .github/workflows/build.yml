@@ -68,10 +68,77 @@ jobs:
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
 
+          # Eliminam referintele la demo-uri
+          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
+            -exec sed -i 's|#include "demos/lv_demos.h"|// #include "demos/lv_demos.h"|g' {} + 2>/dev/null || true
+          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
+            -exec sed -i 's|#include <demos/lv_demos.h>|// #include <demos/lv_demos.h>|g' {} + 2>/dev/null || true
+
           python3 - << 'PYEOF'
           import re, os, textwrap, glob
 
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
+
+          # Patch lvgl_port.c pentru a evita crash-urile
+          port_path = f"{sketch_dir}/lvgl_port.c"
+          with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
+              code = f.read()
+
+          code = re.sub(
+              r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
+              'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { puts("[EXIO] bus 0 not ready"); tca9554_i2c_bus = NULL; } else { puts("[EXIO] bus 0 acquired!"); }',
+              code)
+          code = re.sub(
+              r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_new_i2c_tca9554\s*\([^;]+\)\s*\)\s*;',
+              'if (tca9554_i2c_bus != NULL) { if (esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander) == ESP_OK) { puts("[EXIO] TCA9554 ok"); } else { puts("[EXIO] TCA9554 fail"); io_expander = NULL; } } else { io_expander = NULL; }',
+              code)
+          code = re.sub(r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_set_dir\s*\(\s*io_expander\s*,([^)]+)\)\s*\)\s*;', r'if (io_expander != NULL) { esp_io_expander_set_dir(io_expander, \g<1>); }', code)
+          code = re.sub(r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_set_level\s*\(\s*io_expander\s*,([^)]+)\)\s*\)\s*;', r'if (io_expander != NULL) { esp_io_expander_set_level(io_expander, \g<1>); }', code)
+          
+          with open(port_path, "w", encoding="utf-8") as f:
+              f.write(code)
+
+          # Inject lock/unlock in lvgl_port
+          h_path = f"{sketch_dir}/lvgl_port.h"
+          with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
+              h_content = f.read()
+          with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
+              c_content = f.read()
+
+          if "lvgl_port_lock" not in h_content:
+              mux_var = "lvgl_port_mux"
+              c_content = re.sub(
+                  r'(#include[^\n]+\n)(?![^\n]*#include)',
+                  r'\1\nstatic SemaphoreHandle_t ' + mux_var + ' = NULL;\n',
+                  c_content, count=1, flags=re.DOTALL)
+              c_content = re.sub(
+                  r'(esp_err_t\s+lvgl_port_init\s*\([^)]*\)\s*\{)',
+                  r'\1\n    ' + mux_var + ' = xSemaphoreCreateMutex();',
+                  c_content, count=1)
+              c_content += f"""
+
+          bool lvgl_port_lock(uint32_t timeout_ms) {{
+              if ({mux_var} == NULL) return false;
+              return xSemaphoreTake({mux_var}, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+          }}
+          void lvgl_port_unlock(void) {{
+              if ({mux_var} != NULL) xSemaphoreGive({mux_var});
+          }}
+          """
+              h_content += """
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          bool lvgl_port_lock(uint32_t timeout_ms);
+          void lvgl_port_unlock(void);
+          #ifdef __cplusplus
+          }
+          #endif
+          """
+              with open(h_path, "w", encoding="utf-8") as f:
+                  f.write(h_content)
+              with open(port_path, "w", encoding="utf-8") as f:
+                  f.write(c_content)
 
           # Detect I2C init
           i2c_init_func = "bsp_i2c_init"
@@ -126,7 +193,7 @@ jobs:
               i2c_write_reg(0x20, 0x03, 0x00); delay(10);
               i2c_write_reg(0x20, 0x01, 0xFF); delay(50);
               
-              // ES8311 (doar pentru a porni MCLK corect, nu ne intereseaza DAC-ul acum)
+              // ES8311 (pornim MCLK corect)
               i2c_write_reg(0x18, 0x00, 0x1F); delay(20);
               i2c_write_reg(0x18, 0x00, 0x00);
 
@@ -143,7 +210,6 @@ jobs:
               i2c_write_reg(0x40, 0x13, 0xFF); // Gain max
           }
 
-          // Folosim TDM mode, esential pentru ES7210
           bool i2s_init_tdm() {
               i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
               if (i2s_new_channel(&chan_cfg, NULL, &rx_handle) != ESP_OK) return false;
@@ -178,6 +244,10 @@ jobs:
               I2C_INIT_CALL
               delay(50);
 
+              // Initializam ecranul ca sa nu fie negru (optional, dar ajuta la debug)
+              lvgl_port_init();
+              delay(100);
+
               if (i2c_master_get_bus_handle(0, &i2c_bus) != ESP_OK) {
                   Serial.println("I2C fail");
                   return;
@@ -208,7 +278,6 @@ jobs:
                       if (v > peak) peak = v;
                   }
                   
-                  // Afisam primele 4 canale (ES7210 are 4 microfoane)
                   Serial.printf("Peak: %5d | Ch1: %6d | Ch2: %6d | Ch3: %6d | Ch4: %6d\n", 
                                 peak, mic_buf[0], mic_buf[1], mic_buf[2], mic_buf[3]);
               }
