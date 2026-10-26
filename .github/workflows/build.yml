@@ -73,17 +73,25 @@ jobs:
             -exec sed -i 's|#include "demos/lv_demos.h"|// #include "demos/lv_demos.h"|g' {} + 2>/dev/null || true
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
             -exec sed -i 's|#include <demos/lv_demos.h>|// #include <demos/lv_demos.h>|g' {} + 2>/dev/null || true
+          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
+            -exec sed -i 's|lv_demo_widgets();|// lv_demo_widgets();|g' {} + 2>/dev/null || true
 
           python3 - << 'PYEOF'
           import re, os, textwrap, glob
 
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
-          # Patch lvgl_port.c pentru a evita crash-urile
+          # Patch lvgl_port.c
           port_path = f"{sketch_dir}/lvgl_port.c"
           with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
               code = f.read()
 
+          # Rezolvam LV_COLOR_FORMAT_GET_SIZE
+          code = code.replace("LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)", "2")
+          code = code.replace("lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)", "2")
+          # Comentam apelul demo
+          code = code.replace("lv_demo_widgets();", "// lv_demo_widgets();")
+          
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
               'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { puts("[EXIO] bus 0 not ready"); tca9554_i2c_bus = NULL; } else { puts("[EXIO] bus 0 acquired!"); }',
@@ -218,7 +226,7 @@ jobs:
                   .clk_cfg = I2S_TDM_CLK_DEFAULT_CONFIG(SAMPLE_RATE_MIC),
                   .slot_cfg = I2S_TDM_PHILIPS_SLOT_DEFAULT_CONFIG(
                       I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO,
-                      I2S_TDM_SLOT0 | I2S_TDM_SLOT1 | I2S_TDM_SLOT2 | I2S_TDM_SLOT3
+                      (i2s_tdm_slot_mask_t)(I2S_TDM_SLOT0 | I2S_TDM_SLOT1 | I2S_TDM_SLOT2 | I2S_TDM_SLOT3)
                   ),
                   .gpio_cfg = {
                       .mclk = (gpio_num_t)I2S_MCLK,
@@ -244,7 +252,6 @@ jobs:
               I2C_INIT_CALL
               delay(50);
 
-              // Initializam ecranul ca sa nu fie negru (optional, dar ajuta la debug)
               lvgl_port_init();
               delay(100);
 
