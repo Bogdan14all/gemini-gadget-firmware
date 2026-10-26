@@ -1,41 +1,30 @@
-name: Build Gemini OS (Bogdan Edition)
+name: Build Gemini OS - Step 1 Touch Test
 
 on:
   workflow_dispatch:
 
 jobs:
   build-minimal:
-    name: Build Gemini OS - Buttons + Display
+    name: Build - Touch Feedback Test
     runs-on: ubuntu-latest
 
     steps:
-      # ---------------------------------------------------------------
-      # 1. Checkout Waveshare V2 repository
-      # ---------------------------------------------------------------
-      - name: Checkout Waveshare Official V2 Repository
+      - name: Checkout Waveshare V2 Repository
         uses: actions/checkout@v4
         with:
           repository: waveshareteam/ESP32-S3-Touch-LCD-3.49-V2
           submodules: recursive
 
-      # ---------------------------------------------------------------
-      # 2. Python + esptool (v4.x pentru a avea python -m esptool)
-      # ---------------------------------------------------------------
-      - name: Setup Python & esptool
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install esptool & tools
+      - name: Install esptool
         run: |
           pip install "esptool<5"
           sudo apt-get update && sudo apt-get install -y zip
-          # Verificare opțională: python -m esptool version
-          python -m esptool version || true
 
-      # ---------------------------------------------------------------
-      # 3. Arduino CLI + ESP32 core
-      # ---------------------------------------------------------------
       - name: Setup Arduino CLI & ESP32 Core
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
@@ -45,10 +34,7 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
-      # ---------------------------------------------------------------
-      # 4. LVGL 9.1 + config compatibil v9
-      # ---------------------------------------------------------------
-      - name: Install Libraries & LVGL Configuration
+      - name: Install LVGL 9.1
         shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
@@ -82,10 +68,7 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      # ---------------------------------------------------------------
-      # 5. Patch drivers + inject lock/unlock + generate .ino
-      # ---------------------------------------------------------------
-      - name: Configure Display, Buttons & Generate Sketch
+      - name: Patch Drivers & Generate Touch Test Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -97,10 +80,9 @@ jobs:
 
           python3 - << 'PYEOF'
           import re, os
-
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
-          # 1. lcd_bl_pwm_bsp.c
+          # 1. lcd_bl_pwm_bsp.c: fara ledc_stop
           for root, dirs, files in os.walk(sketch_dir):
               for file in files:
                   if file == "lcd_bl_pwm_bsp.c":
@@ -110,9 +92,8 @@ jobs:
                       bl_c = re.sub(r'ledc_stop\s*\([^;]+\);', '// ledc_stop disabled', bl_c)
                       with open(p, "w", encoding="utf-8") as f:
                           f.write(bl_c)
-                      print(f"[OK] Patched {p}")
 
-          # 2. Detectează funcția de init I2C
+          # 2. I2C init function
           i2c_h_path = f"{sketch_dir}/i2c_bsp.h"
           i2c_init_func = "bsp_i2c_init"
           if os.path.exists(i2c_h_path):
@@ -124,9 +105,10 @@ jobs:
                      and f_args.strip() in ("", "void"):
                       i2c_init_func = f_name
                       break
-          print(f"[OK] I2C init function = {i2c_init_func}")
+          print(f"[OK] I2C init = {i2c_init_func}")
 
-          # 3. lvgl_port.c: elimină ESP_ERROR_CHECK-urile fatale
+          # 3. lvgl_port.c: eliminam doar ESP_ERROR_CHECK fatale
+          #    NU mai punem stub pe TouchInputReadCallback - il lasam original!
           port_path = f"{sketch_dir}/lvgl_port.c"
           with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
               code = f.read()
@@ -134,6 +116,7 @@ jobs:
           code = code.replace("LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)", "2")
           code = code.replace("lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)", "2")
 
+          # Fara ESP_ERROR_CHECK care pot aborta
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
               'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { puts("[EXIO] bus 0 not ready"); tca9554_i2c_bus = NULL; } else { puts("[EXIO] bus 0 acquired!"); }',
@@ -151,11 +134,17 @@ jobs:
               r'if (io_expander != NULL) { esp_io_expander_set_level(io_expander, \g<1>); }',
               code)
 
+          # NU mai inlocuim TouchInputReadCallback - il lasam pe cel original
+          # (comentat pentru claritate)
+          # safe_touch = ...  # eliminat
+          # pattern = ...     # eliminat
+          # code = re.sub(pattern, safe_touch, ...)  # eliminat
+
           with open(port_path, "w", encoding="utf-8") as f:
               f.write(code)
-          print("[OK] lvgl_port.c patched")
+          print("[OK] lvgl_port.c patched (touch callback PASTRAT original)")
 
-          # 4. Injectează lvgl_port_lock/unlock dacă lipsesc
+          # 4. Inject lvgl_port_lock/unlock
           h_path = f"{sketch_dir}/lvgl_port.h"
           with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
               h_content = f.read()
@@ -170,7 +159,6 @@ jobs:
                   if m:
                       mux_var = m.group(1)
                       break
-
               if mux_var is None:
                   mux_var = "lvgl_port_mux"
                   c_content = re.sub(
@@ -206,11 +194,9 @@ jobs:
                   f.write(h_content)
               with open(port_path, "w", encoding="utf-8") as f:
                   f.write(c_content)
-              print(f"[OK] lvgl_port_lock/unlock injected (mutex={mux_var})")
-          else:
-              print("[OK] lvgl_port_lock already present")
+              print(f"[OK] lvgl_port_lock/unlock injected")
 
-          # 5. Generează .ino cu UI + butoane
+          # 5. Genereaza .ino cu touch feedback
           ino = [
               '#include <Arduino.h>',
               '#include <WiFi.h>',
@@ -221,96 +207,157 @@ jobs:
               '}',
               '#include <lvgl.h>',
               '',
-              'const char* ssid = "TP-Link_2.4G_9318_Guest";',
-              'const char* password = "revelion";',
-              '',
               '#define BOOT_BTN 0',
               '#define PWR_BTN  16',
               '#define LCD_BL   42',
               '',
-              'lv_obj_t *lbl_boot_state = NULL;',
-              'lv_obj_t *lbl_pwr_state  = NULL;',
+              'lv_obj_t *lbl_touch_xy    = NULL;',
+              'lv_obj_t *lbl_touch_state = NULL;',
+              'lv_obj_t *lbl_boot_state  = NULL;',
+              'lv_obj_t *lbl_pwr_state   = NULL;',
+              'lv_obj_t *touch_dot       = NULL;',
               '',
-              'void update_button_labels() {',
-              '    if (lbl_boot_state)',
-              '        lv_label_set_text(lbl_boot_state, digitalRead(BOOT_BTN) == LOW ? "BOOT: APASAT" : "BOOT: liber");',
-              '    if (lbl_pwr_state)',
-              '        lv_label_set_text(lbl_pwr_state, digitalRead(PWR_BTN) == LOW ? "PWR: APASAT" : "PWR: liber");',
+              'static void touch_event_cb(lv_event_t *e) {',
+              '    lv_event_code_t code = lv_event_get_code(e);',
+              '    lv_indev_t *indev = lv_indev_get_act();',
+              '    if (!indev || !lbl_touch_xy || !lbl_touch_state) return;',
+              '',
+              '    lv_point_t p;',
+              '    lv_indev_get_point(indev, &p);',
+              '',
+              '    char buf[40];',
+              '    lv_snprintf(buf, sizeof(buf), "X:%d  Y:%d", p.x, p.y);',
+              '    lv_label_set_text(lbl_touch_xy, buf);',
+              '',
+              '    if (touch_dot) {',
+              '        lv_obj_set_pos(touch_dot, p.x - 15, p.y - 15);',
+              '    }',
+              '',
+              '    if (code == LV_EVENT_PRESSED) {',
+              '        lv_label_set_text(lbl_touch_state, "APASAT!");',
+              '        lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0xFF0000), 0);',
+              '        if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0xFF0000), 0);',
+              '        Serial.printf("[TOUCH] PRESSED x=%d y=%d\\n", p.x, p.y);',
+              '    } else if (code == LV_EVENT_RELEASED) {',
+              '        lv_label_set_text(lbl_touch_state, "Eliberat");',
+              '        lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);',
+              '        if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);',
+              '        Serial.printf("[TOUCH] RELEASED\\n");',
+              '    } else if (code == LV_EVENT_PRESSING) {',
+              '        lv_label_set_text(lbl_touch_state, "Apasat...");',
+              '    }',
               '}',
               '',
-              'void create_bogdan_ui() {',
+              'void build_touch_ui() {',
               '    pinMode(LCD_BL, OUTPUT);',
               '    digitalWrite(LCD_BL, LOW);',
               '',
               '    lvgl_port_lock(1000);',
               '    lv_obj_t *scr = lv_screen_active();',
               '    if (!scr) scr = lv_scr_act();',
-              '    if (scr) {',
-              '        lv_obj_clean(scr);',
-              '        lv_obj_set_style_bg_color(scr, lv_color_hex(0x38BDF8), 0);',
-              '        lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);',
+              '    if (!scr) { lvgl_port_unlock(); return; }',
               '',
-              '        lv_obj_t *lbl_title = lv_label_create(scr);',
-              '        lv_label_set_text(lbl_title, "Gemini OS");',
-              '        lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x000000), 0);',
-              '        lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_18, 0);',
-              '        lv_obj_align(lbl_title, LV_ALIGN_CENTER, 0, -50);',
+              '    lv_obj_clean(scr);',
+              '    lv_obj_set_style_bg_color(scr, lv_color_hex(0x38BDF8), 0);',
+              '    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);',
               '',
-              '        lv_obj_t *lbl_sub = lv_label_create(scr);',
-              '        lv_label_set_text(lbl_sub, "by Bogdan");',
-              '        lv_obj_set_style_text_color(lbl_sub, lv_color_hex(0x0F172A), 0);',
-              '        lv_obj_set_style_text_font(lbl_sub, &lv_font_montserrat_14, 0);',
-              '        lv_obj_align(lbl_sub, LV_ALIGN_CENTER, 0, -28);',
+              '    // Titlu',
+              '    lv_obj_t *t = lv_label_create(scr);',
+              '    lv_label_set_text(t, "Gemini OS");',
+              '    lv_obj_set_style_text_color(t, lv_color_hex(0x000000), 0);',
+              '    lv_obj_set_style_text_font(t, &lv_font_montserrat_20, 0);',
+              '    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 30);',
               '',
-              '        lbl_boot_state = lv_label_create(scr);',
-              '        lv_label_set_text(lbl_boot_state, "BOOT: liber");',
-              '        lv_obj_set_style_text_color(lbl_boot_state, lv_color_hex(0x000000), 0);',
-              '        lv_obj_set_style_text_font(lbl_boot_state, &lv_font_montserrat_12, 0);',
-              '        lv_obj_align(lbl_boot_state, LV_ALIGN_CENTER, 0, 0);',
+              '    // Instructiune',
+              '    lv_obj_t *hint = lv_label_create(scr);',
+              '    lv_label_set_text(hint, "Atinge ecranul!");',
+              '    lv_obj_set_style_text_color(hint, lv_color_hex(0x0F172A), 0);',
+              '    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);',
+              '    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 70);',
               '',
-              '        lbl_pwr_state = lv_label_create(scr);',
-              '        lv_label_set_text(lbl_pwr_state, "PWR: liber");',
-              '        lv_obj_set_style_text_color(lbl_pwr_state, lv_color_hex(0x000000), 0);',
-              '        lv_obj_set_style_text_font(lbl_pwr_state, &lv_font_montserrat_12, 0);',
-              '        lv_obj_align(lbl_pwr_state, LV_ALIGN_CENTER, 0, 20);',
+              '    // Coordonate',
+              '    lbl_touch_xy = lv_label_create(scr);',
+              '    lv_label_set_text(lbl_touch_xy, "X:--  Y:--");',
+              '    lv_obj_set_style_text_color(lbl_touch_xy, lv_color_hex(0xFFFFFF), 0);',
+              '    lv_obj_set_style_text_font(lbl_touch_xy, &lv_font_montserrat_18, 0);',
+              '    lv_obj_align(lbl_touch_xy, LV_ALIGN_CENTER, 0, -40);',
               '',
-              '        lv_obj_t *lbl_wifi = lv_label_create(scr);',
-              '        lv_label_set_text(lbl_wifi, "Wi-Fi: Conectat!");',
-              '        lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x0284C7), 0);',
-              '        lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_14, 0);',
-              '        lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 50);',
-              '    }',
+              '    // Stare touch',
+              '    lbl_touch_state = lv_label_create(scr);',
+              '    lv_label_set_text(lbl_touch_state, "Eliberat");',
+              '    lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);',
+              '    lv_obj_set_style_text_font(lbl_touch_state, &lv_font_montserrat_16, 0);',
+              '    lv_obj_align(lbl_touch_state, LV_ALIGN_CENTER, 0, -10);',
+              '',
+              '    // Butoane fizice',
+              '    lbl_boot_state = lv_label_create(scr);',
+              '    lv_label_set_text(lbl_boot_state, "BOOT: liber");',
+              '    lv_obj_set_style_text_font(lbl_boot_state, &lv_font_montserrat_12, 0);',
+              '    lv_obj_set_style_text_color(lbl_boot_state, lv_color_hex(0x000000), 0);',
+              '    lv_obj_align(lbl_boot_state, LV_ALIGN_CENTER, 0, 30);',
+              '',
+              '    lbl_pwr_state = lv_label_create(scr);',
+              '    lv_label_set_text(lbl_pwr_state, "PWR: liber");',
+              '    lv_obj_set_style_text_font(lbl_pwr_state, &lv_font_montserrat_12, 0);',
+              '    lv_obj_set_style_text_color(lbl_pwr_state, lv_color_hex(0x000000), 0);',
+              '    lv_obj_align(lbl_pwr_state, LV_ALIGN_CENTER, 0, 50);',
+              '',
+              '    // Dot urmaritor',
+              '    touch_dot = lv_obj_create(scr);',
+              '    lv_obj_set_size(touch_dot, 30, 30);',
+              '    lv_obj_set_style_radius(touch_dot, LV_RADIUS_CIRCLE, 0);',
+              '    lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);',
+              '    lv_obj_set_style_bg_opa(touch_dot, LV_OPA_80, 0);',
+              '    lv_obj_set_style_border_width(touch_dot, 0, 0);',
+              '    lv_obj_set_pos(touch_dot, 10, 10);',
+              '',
+              '    // Evenimente touch pe screen',
+              '    lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_PRESSED,  NULL);',
+              '    lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_PRESSING, NULL);',
+              '    lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_RELEASED, NULL);',
+              '',
               '    lvgl_port_unlock();',
+              '    Serial.println("[UI] Touch test UI built");',
               '}',
               '',
               'void setup() {',
               '    Serial.begin(115200);',
               '    delay(500);',
+              '    Serial.println("\\n=== Gemini OS Touch Test ===");',
+              '',
               '    pinMode(BOOT_BTN, INPUT_PULLUP);',
               '    pinMode(PWR_BTN, INPUT_PULLUP);',
               f'    {i2c_init_func}();',
               '    delay(50);',
               '    lvgl_port_init();',
-              '    delay(200);',
-              '    create_bogdan_ui();',
-              '    WiFi.mode(WIFI_STA);',
-              '    WiFi.setSleep(false);',
-              '    WiFi.begin(ssid, password);',
+              '    delay(300);',
+              '',
+              '    // Verifica daca exista indev pointer (touch)',
+              '    lv_indev_t *indev = lv_indev_get_next(NULL);',
+              '    int count = 0;',
+              '    while (indev) {',
+              '        count++;',
+              '        indev = lv_indev_get_next(indev);',
+              '    }',
+              '    Serial.printf("[INDEV] %d input device(s) registered\\n", count);',
+              '',
+              '    build_touch_ui();',
+              '    Serial.println("[READY] Atinge ecranul!");',
               '}',
               '',
               'void loop() {',
               '    static unsigned long last_btn = 0;',
               '    if (millis() - last_btn > 100) {',
               '        last_btn = millis();',
-              '        if (lvgl_port_lock(100)) {',
-              '            update_button_labels();',
+              '        if (lvgl_port_lock(50)) {',
+              '            if (lbl_boot_state)',
+              '                lv_label_set_text(lbl_boot_state,',
+              '                    digitalRead(BOOT_BTN) == LOW ? "BOOT: APASAT" : "BOOT: liber");',
+              '            if (lbl_pwr_state)',
+              '                lv_label_set_text(lbl_pwr_state,',
+              '                    digitalRead(PWR_BTN) == LOW ? "PWR: APASAT" : "PWR: liber");',
               '            lvgl_port_unlock();',
               '        }',
-              '    }',
-              '    static unsigned long last_beat = 0;',
-              '    if (millis() - last_beat > 5000) {',
-              '        last_beat = millis();',
-              '        Serial.println(WiFi.status() == WL_CONNECTED ? "[Heartbeat] Wi-Fi OK" : "[Heartbeat] Wi-Fi...");',
               '    }',
               '    delay(20);',
               '}',
@@ -318,21 +365,15 @@ jobs:
           ]
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write('\n'.join(ino))
-          print("[OK] 10_LVGL_V9_Test.ino generat")
+          print("[OK] Touch test .ino generat")
           PYEOF
 
-      # ---------------------------------------------------------------
-      # 6. Compile
-      # ---------------------------------------------------------------
       - name: Compile Firmware
         run: |
           SKETCH_PATH="Arduino/examples/10_LVGL_V9_Test/10_LVGL_V9_Test.ino"
           FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
           arduino-cli compile --fqbn "$FQBN" --output-dir build_output "$SKETCH_PATH"
 
-      # ---------------------------------------------------------------
-      # 7. Merge într-un singur .bin  (FIX: python -m esptool)
-      # ---------------------------------------------------------------
       - name: Merge into Single .bin
         shell: bash
         run: |
@@ -340,23 +381,18 @@ jobs:
           BOOTLOADER=$(ls build_output/*.bootloader.bin | head -n 1)
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
-          echo "Bootloader: $BOOTLOADER"
-          echo "Partitions: $PARTITIONS"
-          echo "App:        $APP_BIN"
-
+          echo "BL=$BOOTLOADER"
+          echo "PT=$PARTITIONS"
+          echo "APP=$APP_BIN"
           python -m esptool --chip esp32s3 merge_bin \
             -o package_bin/gemini-os-full-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-
           ls -lh package_bin/gemini-os-full-0x0.bin
 
-      # ---------------------------------------------------------------
-      # 8. Upload artifact
-      # ---------------------------------------------------------------
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-os-full-0x0
+          name: gemini-os-touch-test
           path: package_bin/gemini-os-full-0x0.bin
           if-no-files-found: error
