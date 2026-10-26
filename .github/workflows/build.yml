@@ -1,4 +1,4 @@
-name: Build Minimal Gemini OS v37 (Bogdan Edition)
+name: Build Minimal Gemini OS v38 (Bogdan Edition)
 
 on:
   workflow_dispatch:
@@ -94,72 +94,6 @@ jobs:
 
           # Patch curat cu Python pe lvgl_port.c pentru a preveni crash-ul si erorile de sintaxa
           python3 - << 'PYEOF'
-          import re, os, glob
-
-          sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
-
-          # 1. Patch curat pe lvgl_port.c (baza verificata din v32)
-          port_path = f"{sketch_dir}/lvgl_port.c"
-          with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
-              code = f.read()
-
-          code = code.replace("LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)", "2")
-          code = code.replace("lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)", "2")
-
-          code = re.sub(
-              r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
-              r'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { tca9554_i2c_bus = NULL; }',
-              code
-          )
-          code = re.sub(
-              r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_new_i2c_tca9554\s*\([^;]+\)\s*\)\s*;',
-              r'if (tca9554_i2c_bus != NULL) { esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander); } else { io_expander = NULL; }',
-              code
-          )
-          code = re.sub(
-              r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_set_dir\s*\(\s*io_expander\s*,([^)]+)\)\s*\)\s*;',
-              r'if (io_expander != NULL) { esp_io_expander_set_dir(io_expander, \g<1>); }',
-              code
-          )
-          code = re.sub(
-              r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_set_level\s*\(\s*io_expander\s*,([^)]+)\)\s*\)\s*;',
-              r'if (io_expander != NULL) { esp_io_expander_set_level(io_expander, \g<1>); }',
-              code
-          )
-
-          code = code.replace(
-              'ESP_ERROR_CHECK_WITHOUT_ABORT(i2c_master_write_read_dev(disp_touch_dev_handle,read_touchpad_cmd,11,buff,32));',
-              'if (disp_touch_dev_handle != NULL) { i2c_master_write_read_dev(disp_touch_dev_handle, read_touchpad_cmd, 11, buff, 32); }'
-          )
-          code = re.sub(
-              r'ESP_ERROR_CHECK_WITHOUT_ABORT\s*\(\s*i2c_master_write_read_dev\s*\([^;]+\)\s*\)\s*;',
-              r'if (disp_touch_dev_handle != NULL) { i2c_master_write_read_dev(disp_touch_dev_handle, read_touchpad_cmd, 11, buff, 32); }',
-              code
-          )
-
-          with open(port_path, "w", encoding="utf-8") as f:
-              f.write(code)
-          print("lvgl_port.c patched cleanly!")
-
-          # 2. Patch pe driverele de Backlight PWM (asigura 100% luminozitate permanenta fara dimming)
-          for root, dirs, files in os.walk(sketch_dir):
-              for file in files:
-                  if file.endswith((".c", ".cpp", ".h")) and ("bl" in file.lower() or "pwm" in file.lower()):
-                      fpath = os.path.join(root, file)
-                      try:
-                          with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                              c = f.read()
-                          orig = c
-                          # Daca exista functii de setare duty LEDC, nu le lasam sa coboare sub 100%
-                          c = re.sub(r'ledc_set_duty\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*0\s*\)', r'ledc_set_duty(\g<1>, \g<2>, 8191)', c)
-                          c = re.sub(r'ledc_stop\s*\([^)]+\)', r'/* ledc_stop disabled */', c)
-                          if c != orig:
-                              with open(fpath, "w", encoding="utf-8") as f:
-                                  f.write(c)
-                              print(f"Patched PWM backlight file: {file}")
-                      except Exception as e:
-                          print(f"Notice on {file}: {e}")
-          PYEOF'
           import re
 
           port_path = "Arduino/examples/10_LVGL_V9_Test/lvgl_port.c"
@@ -216,23 +150,57 @@ jobs:
           cat << 'EOF' > "$SKETCH_DIR/10_LVGL_V9_Test.ino"
           #include <Arduino.h>
           #include <WiFi.h>
-          #include "driver/gpio.h"
 
           extern "C" {
           #include "i2c_bsp.h"
           #include "lvgl_port.h"
+          #include "driver/gpio.h"
           }
           #include <lvgl.h>
 
           const char* ssid = "TP-Link_2.4G_9318_Guest";
           const char* password = "revelion";
 
+          // Stare ecran On / Off (Sleep)
+          static bool is_screen_on = true;
+          static unsigned long last_btn_press = 0;
+          static int last_btn_state = HIGH;
+
+          // Functie comutare alimentare ecran
+          void set_screen_power(bool turn_on) {
+              is_screen_on = turn_on;
+              if (is_screen_on) {
+                  Serial.println("[Display Power] Ecran PORNIT (ON)");
+                  gpio_reset_pin((gpio_num_t)1);
+                  pinMode(1, OUTPUT);
+                  digitalWrite(1, HIGH);
+
+                  gpio_reset_pin((gpio_num_t)43);
+                  pinMode(43, OUTPUT);
+                  digitalWrite(43, HIGH);
+
+                  #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
+                  lvgl_port_lock(0);
+                  #endif
+                  lv_obj_invalidate(lv_scr_act());
+                  #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
+                  lvgl_port_unlock();
+                  #endif
+              } else {
+                  Serial.println("[Display Power] Ecran OPRIT (OFF / Standby)");
+                  gpio_reset_pin((gpio_num_t)1);
+                  pinMode(1, OUTPUT);
+                  digitalWrite(1, LOW);
+
+                  gpio_reset_pin((gpio_num_t)43);
+                  pinMode(43, OUTPUT);
+                  digitalWrite(43, LOW);
+              }
+          }
+
           void create_bogdan_ui() {
-              gpio_reset_pin((gpio_num_t)1);
               pinMode(1, OUTPUT);
-              digitalWrite(1, HIGH); // Backlight GPIO 1 activat la 100%
-              pinMode(43, OUTPUT);
-              digitalWrite(43, HIGH); // Redundanta GPIO 43
+              digitalWrite(1, HIGH); // Backlight GPIO 1 activat ferm
 
               #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
               lvgl_port_lock(0);
@@ -247,7 +215,7 @@ jobs:
                   lv_obj_set_style_bg_color(scr, lv_color_hex(0x38BDF8), 0);
                   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-                  // 2. Titlu Linia 1: "Gemini OS" (Montserrat 18, lizibil si centrat)
+                  // 2. Titlu Linia 1: "Gemini OS" (Montserrat 18, incadrat perfect)
                   lv_obj_t *lbl_title = lv_label_create(scr);
                   lv_label_set_text(lbl_title, "Gemini OS");
                   lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x000000), 0);
@@ -259,14 +227,14 @@ jobs:
                   lv_label_set_text(lbl_sub, "by Bogdan");
                   lv_obj_set_style_text_color(lbl_sub, lv_color_hex(0x0F172A), 0);
                   lv_obj_set_style_text_font(lbl_sub, &lv_font_montserrat_14, 0);
-                  lv_obj_align(lbl_sub, LV_ALIGN_CENTER, 0, -12);
+                  lv_obj_align(lbl_sub, LV_ALIGN_CENTER, 0, -14);
 
-                  // 4. Stare Wi-Fi: Montserrat 14 (Regula: niciun font sub 14!)
+                  // 4. Stare Wi-Fi stabilita la pornire (ATENTIE: Montserrat 14 conform regulii!)
                   lv_obj_t *lbl_wifi = lv_label_create(scr);
                   lv_label_set_text(lbl_wifi, "Wi-Fi: Conectat!");
                   lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x0284C7), 0);
                   lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_14, 0);
-                  lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 20);
+                  lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 18);
               }
 
               #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
@@ -279,6 +247,9 @@ jobs:
               delay(500);
               Serial.println("Starting Gemini OS Bogdan Edition...");
 
+              // Configurare buton fizic cu pull-up intern (GPIO 0 - Buton BOOT / KEY)
+              pinMode(0, INPUT_PULLUP);
+
               // 1. Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
               delay(100);
               lvgl_port_init();
@@ -290,28 +261,49 @@ jobs:
               // 2. Initializare Wi-Fi cu putere redusa pentru evitarea varfurilor de tensiune
               WiFi.mode(WIFI_STA);
               WiFi.setTxPower(WIFI_POWER_8_5dBm);
-              WiFi.setSleep(false);
               WiFi.begin(ssid, password);
               Serial.println("Connecting to WiFi: " + String(ssid));
           }
 
           void loop() {
-              // Resetare si mentinere continua a pinilor de luminozitate (impiedica trecerea PWM in sleep)
-              gpio_reset_pin((gpio_num_t)1);
-              pinMode(1, OUTPUT);
-              digitalWrite(1, HIGH);
-              digitalWrite(43, HIGH);
+              // 1. Mentinere continua a starii de iluminare dorite
+              if (is_screen_on) {
+                  digitalWrite(1, HIGH);
+                  digitalWrite(43, HIGH);
+              } else {
+                  digitalWrite(1, LOW);
+                  digitalWrite(43, LOW);
+              }
 
+              // Reset periodic de protectie a pinului cand ecranul este ON
+              static unsigned long last_bl_refresh = 0;
+              if (is_screen_on && (millis() - last_bl_refresh > 1000)) {
+                  last_bl_refresh = millis();
+                  gpio_reset_pin((gpio_num_t)1);
+                  pinMode(1, OUTPUT);
+                  digitalWrite(1, HIGH);
+              }
+
+              // 2. Detectie apasare buton fizic cu debouncing (GPIO 0)
+              int btn_reading = digitalRead(0);
+              if (btn_reading == LOW && last_btn_state == HIGH && (millis() - last_btn_press > 250)) {
+                  last_btn_press = millis();
+                  set_screen_power(!is_screen_on);
+              }
+              last_btn_state = btn_reading;
+
+              // 3. Heartbeat de functionare la fiecare 5 secunde
               static unsigned long last_beat = 0;
               if (millis() - last_beat > 5000) {
                   last_beat = millis();
+                  String screen_str = is_screen_on ? "ON" : "OFF (Sleep)";
                   if (WiFi.status() == WL_CONNECTED) {
-                      Serial.println("[Heartbeat] Gemini OS Bogdan Edition ruleaza stabil pe Wi-Fi! IP: " + WiFi.localIP().toString());
+                      Serial.println("[Heartbeat] Gemini OS Bogdan Edition ruleaza stabil pe Wi-Fi! IP: " + WiFi.localIP().toString() + " | Ecran: " + screen_str);
                   } else {
-                      Serial.println("[Heartbeat] Conectare Wi-Fi in desfasurare...");
+                      Serial.println("[Heartbeat] Conectare Wi-Fi in desfasurare... | Ecran: " + screen_str);
                   }
               }
-              delay(100);
+              delay(20);
           }
           EOF
 
