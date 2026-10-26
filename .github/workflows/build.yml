@@ -19,7 +19,7 @@ jobs:
           submodules: recursive
 
       # ---------------------------------------------------------------
-      # 2. Python + esptool (fix: esptool <5 pentru esptool.py)
+      # 2. Python + esptool (v4.x pentru a avea python -m esptool)
       # ---------------------------------------------------------------
       - name: Setup Python & esptool
         uses: actions/setup-python@v5
@@ -30,6 +30,8 @@ jobs:
         run: |
           pip install "esptool<5"
           sudo apt-get update && sudo apt-get install -y zip
+          # Verificare opțională: python -m esptool version
+          python -m esptool version || true
 
       # ---------------------------------------------------------------
       # 3. Arduino CLI + ESP32 core
@@ -88,7 +90,6 @@ jobs:
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
 
-          # Dezactivează referințele la demo-uri
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
             -exec sed -i 's|#include "demos/lv_demos.h"|// #include "demos/lv_demos.h"|g' {} + 2>/dev/null || true
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
@@ -99,7 +100,7 @@ jobs:
 
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
-          # ---------- 1. lcd_bl_pwm_bsp.c: dezactivează ledc_stop forțat ----------
+          # 1. lcd_bl_pwm_bsp.c
           for root, dirs, files in os.walk(sketch_dir):
               for file in files:
                   if file == "lcd_bl_pwm_bsp.c":
@@ -111,7 +112,7 @@ jobs:
                           f.write(bl_c)
                       print(f"[OK] Patched {p}")
 
-          # ---------- 2. Detectează funcția de init I2C ----------
+          # 2. Detectează funcția de init I2C
           i2c_h_path = f"{sketch_dir}/i2c_bsp.h"
           i2c_init_func = "bsp_i2c_init"
           if os.path.exists(i2c_h_path):
@@ -125,7 +126,7 @@ jobs:
                       break
           print(f"[OK] I2C init function = {i2c_init_func}")
 
-          # ---------- 3. lvgl_port.c: elimină ESP_ERROR_CHECK-urile fatale ----------
+          # 3. lvgl_port.c: elimină ESP_ERROR_CHECK-urile fatale
           port_path = f"{sketch_dir}/lvgl_port.c"
           with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
               code = f.read()
@@ -154,7 +155,7 @@ jobs:
               f.write(code)
           print("[OK] lvgl_port.c patched")
 
-          # ---------- 4. Injectează lvgl_port_lock/unlock dacă lipsesc ----------
+          # 4. Injectează lvgl_port_lock/unlock dacă lipsesc
           h_path = f"{sketch_dir}/lvgl_port.h"
           with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
               h_content = f.read()
@@ -209,7 +210,7 @@ jobs:
           else:
               print("[OK] lvgl_port_lock already present")
 
-          # ---------- 5. Generează .ino cu UI + butoane ----------
+          # 5. Generează .ino cu UI + butoane
           ino = [
               '#include <Arduino.h>',
               '#include <WiFi.h>',
@@ -330,7 +331,7 @@ jobs:
           arduino-cli compile --fqbn "$FQBN" --output-dir build_output "$SKETCH_PATH"
 
       # ---------------------------------------------------------------
-      # 7. Merge într-un singur .bin
+      # 7. Merge într-un singur .bin  (FIX: python -m esptool)
       # ---------------------------------------------------------------
       - name: Merge into Single .bin
         shell: bash
@@ -342,10 +343,12 @@ jobs:
           echo "Bootloader: $BOOTLOADER"
           echo "Partitions: $PARTITIONS"
           echo "App:        $APP_BIN"
-          esptool --chip esp32s3 merge_bin \
+
+          python -m esptool --chip esp32s3 merge_bin \
             -o package_bin/gemini-os-full-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
+
           ls -lh package_bin/gemini-os-full-0x0.bin
 
       # ---------------------------------------------------------------
