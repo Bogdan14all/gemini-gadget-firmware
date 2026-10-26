@@ -1,4 +1,4 @@
-name: Build Minimal Gemini OS (Bogdan Edition)
+name: Build Minimal Gemini OS v33 (Bogdan Edition)
 
 on:
   workflow_dispatch:
@@ -87,6 +87,14 @@ jobs:
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
           echo "Curatare referinte demo si aplicare ecran Bogdan in $SKETCH_DIR..."
 
+          # Inspect original files from Waveshare repo for diagnostics
+          echo "=== [DEBUG] Original 10_LVGL_V9_Test.ino ==="
+          head -n 40 "$SKETCH_DIR/10_LVGL_V9_Test.ino" || true
+          echo "=== [DEBUG] i2c_bsp.h ==="
+          cat "$SKETCH_DIR/i2c_bsp.h" || true
+          echo "=== [DEBUG] lvgl_port.c (example_lcd_exio_init) ==="
+          grep -C 10 "example_lcd_exio_init" "$SKETCH_DIR/lvgl_port.c" || true
+
           # Dezactivare referinte demo
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include "demos\/lv_demos.h"/\/\/ #include "demos\/lv_demos.h"/g' {} + 2>/dev/null || true
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include <demos\/lv_demos.h>/\/\/ #include <demos\/lv_demos.h>/g' {} + 2>/dev/null || true
@@ -108,12 +116,12 @@ jobs:
           # Neutralizam complet operatiile care duc la abort() cand I2C nu este gata
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
-              r'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { tca9554_i2c_bus = NULL; }',
+              r'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { printf("[EXIO] I2C bus 0 not found!\n"); tca9554_i2c_bus = NULL; } else { printf("[EXIO] I2C bus 0 acquired successfully!\n"); }',
               code
           )
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_new_i2c_tca9554\s*\([^;]+\)\s*\)\s*;',
-              r'if (tca9554_i2c_bus != NULL) { esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander); } else { io_expander = NULL; }',
+              r'if (tca9554_i2c_bus != NULL) { esp_err_t _err = esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander); if (_err == ESP_OK) printf("[EXIO] TCA9554 expander connected at 0x20!\n"); else { printf("[EXIO] TCA9554 expander failed: %d\n", _err); io_expander = NULL; } } else { io_expander = NULL; }',
               code
           )
           # Protejam TOATE apelurile set_dir si set_level daca io_expander e NULL
@@ -150,9 +158,6 @@ jobs:
           cat << 'EOF' > "$SKETCH_DIR/10_LVGL_V9_Test.ino"
           #include <Arduino.h>
           #include <WiFi.h>
-          #include "esp_wifi.h"
-          #include "soc/soc.h"
-          #include "soc/rtc_cntl_reg.h"
 
           extern "C" {
           #include "i2c_bsp.h"
@@ -165,7 +170,9 @@ jobs:
 
           void create_bogdan_ui() {
               pinMode(1, OUTPUT);
-              digitalWrite(1, HIGH); // Backlight GPIO 1
+              digitalWrite(1, HIGH); // Backlight GPIO 1 (Hardware V2)
+              pinMode(43, OUTPUT);
+              digitalWrite(43, HIGH); // Backlight GPIO 43 (Hardware V1 / EXIO)
 
               #if defined(lvgl_port_lock) || defined(LVGL_PORT_LOCK_H)
               lvgl_port_lock(0);
@@ -208,34 +215,33 @@ jobs:
           }
 
           void setup() {
-              // Dezactivam Brownout Detector pentru a preveni resetarea la varfuri Wi-Fi
-              WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
-
               Serial.begin(115200);
               delay(500);
               Serial.println("Starting Gemini OS Bogdan Edition...");
 
-              // 1. Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
+              // 1. Initializare I2C a placii pentru expanderul TCA9554
+              Serial.println("Initializare I2C BSP...");
+              i2c_bsp_init();
               delay(100);
+
+              // 2. Initializare port LVGL oficial Waveshare (driver QSPI AXS15231B + FreeRTOS task)
               lvgl_port_init();
 
               delay(200);
               create_bogdan_ui();
               Serial.println("UI Created successfully!");
 
-              // 2. Initializare Wi-Fi cu Sleep DEZACTIVAT (mentine APB clock stabil pentru QSPI LCD)
+              // 2. Initializare Wi-Fi cu putere redusa pentru evitarea varfurilor de tensiune
               WiFi.mode(WIFI_STA);
               WiFi.setTxPower(WIFI_POWER_8_5dBm);
-              WiFi.setSleep(false);
-              esp_wifi_set_ps(WIFI_PS_NONE);
               WiFi.begin(ssid, password);
               Serial.println("Connecting to WiFi: " + String(ssid));
           }
 
           void loop() {
-              // Re-asiguram pinMode si nivel HIGH pentru Backlight (previne trecerea pinului 1 in mod analogic)
-              pinMode(1, OUTPUT);
+              // Menținem pinii de iluminare HIGH continuu
               digitalWrite(1, HIGH);
+              digitalWrite(43, HIGH);
 
               static unsigned long last_beat = 0;
               if (millis() - last_beat > 5000) {
