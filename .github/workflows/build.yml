@@ -1,11 +1,11 @@
-name: Build Gemini OS - Mic TDM Fixed
+name: Build Gemini OS - Mic TDM Final
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Mic TDM Test
+    name: Build Mic TDM Final
     runs-on: ubuntu-latest
 
     steps:
@@ -218,41 +218,40 @@ jobs:
           void codec_init() {
               // 1. Reset ES7210 prin TCA9554 (pin 5)
               if (i2c_bus) {
-                  // Seteaza pinul 5 ca output
-                  i2c_write_reg(0x20, 0x03, 0x00); delay(10);
-                  // Trage pinul 5 LOW (reset)
-                  i2c_write_reg(0x20, 0x01, 0x00); delay(50);
-                  // Elibereaza reset-ul (pin 5 HIGH)
-                  i2c_write_reg(0x20, 0x01, 0xFF); delay(100);
+                  i2c_write_reg(0x20, 0x03, 0x00); delay(10); // Output
+                  i2c_write_reg(0x20, 0x01, 0x00); delay(100); // LOW (reset)
+                  i2c_write_reg(0x20, 0x01, 0xFF); delay(200); // HIGH (release)
               }
 
               // 2. ES8311 (DAC) - pentru MCLK
               i2c_write_reg(0x18, 0x00, 0x1F); delay(20);
               i2c_write_reg(0x18, 0x00, 0x00);
 
-              // 3. ES7210 (ADC) - Configurare TDM
+              // 3. ES7210 (ADC) - Configurare TDM completa
               i2c_write_reg(0x40, 0x00, 0xFF); delay(20);  // Reset software
               i2c_write_reg(0x40, 0x00, 0x41);              // Power up
               i2c_write_reg(0x40, 0x01, 0x1F);              // Clock on
               i2c_write_reg(0x40, 0x02, 0x00);              // Mute off
               
-              // Format audio: 16-bit I2S, TDM mode
+              // Sloturi TDM si format
+              i2c_write_reg(0x40, 0x09, 0x30);              // Time Control 0 (TDM slots)
+              i2c_write_reg(0x40, 0x0A, 0x30);              // Time Control 1 (TDM slots)
               i2c_write_reg(0x40, 0x11, 0x60);              // I2S, 16-bit
-              i2c_write_reg(0x40, 0x12, 0x02);              // Activeaza TDM (x1 LRCK) - CRUCIAL!
+              i2c_write_reg(0x40, 0x12, 0x02);              // TDM x1 LRCK mode
               
-              // Gains (max)
+              // Gains
               i2c_write_reg(0x40, 0x13, 0xFF);              // ADC1 gain max
               i2c_write_reg(0x40, 0x14, 0xFF);              // ADC2 gain max
               i2c_write_reg(0x40, 0x15, 0xFF);              // ADC3 gain max
               i2c_write_reg(0x40, 0x16, 0xFF);              // ADC4 gain max
               
-              Serial.println("[ES7210] TDM registers applied");
+              Serial.println("[ES7210] Full TDM register set applied");
           }
 
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n=== Microfon Test (TDM Mode) ===");
+              Serial.println("\n=== Microfon Test (TDM Full) ===");
 
               I2C_INIT_CALL
               delay(50);
@@ -265,15 +264,15 @@ jobs:
                   return;
               }
 
-              // IMPORTANT: Pornim I2S INAINTE de codec pentru a genera MCLK
+              // I2S mai intai (MCLK)
               if (!i2s_init_tdm()) {
                   Serial.println("I2S TDM init fail");
                   return;
               }
-              Serial.println("[I2S] TDM started. MCLK generating...");
-              delay(100); // Lasa MCLK sa se stabilizeze
+              Serial.println("[I2S] TDM started");
+              delay(100);
 
-              // Acum initializam codecurile
+              // Codec init
               codec_init();
               delay(100);
 
@@ -322,14 +321,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/mic-tdm-test-0x0.bin \
+            -o package_bin/mic-tdm-final-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/mic-tdm-test-0x0.bin
+          ls -lh package_bin/mic-tdm-final-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mic-tdm-test-firmware
-          path: package_bin/mic-tdm-test-0x0.bin
+          name: mic-tdm-final-firmware
+          path: package_bin/mic-tdm-final-0x0.bin
           if-no-files-found: error
