@@ -1,29 +1,39 @@
-name: Build Minimal Gemini OS v45 (Buttons + LVGL Lock Fixed)
+name: Build Gemini OS (Bogdan Edition)
 
 on:
   workflow_dispatch:
 
 jobs:
   build-minimal:
-    name: Build Gemini OS - Buttons Working
+    name: Build Gemini OS - Buttons + Display
     runs-on: ubuntu-latest
+
     steps:
+      # ---------------------------------------------------------------
+      # 1. Checkout Waveshare V2 repository
+      # ---------------------------------------------------------------
       - name: Checkout Waveshare Official V2 Repository
         uses: actions/checkout@v4
         with:
           repository: waveshareteam/ESP32-S3-Touch-LCD-3.49-V2
           submodules: recursive
 
+      # ---------------------------------------------------------------
+      # 2. Python + esptool (fix: esptool <5 pentru esptool.py)
+      # ---------------------------------------------------------------
       - name: Setup Python & esptool
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install esptool & zip
+      - name: Install esptool & tools
         run: |
           pip install "esptool<5"
           sudo apt-get update && sudo apt-get install -y zip
 
+      # ---------------------------------------------------------------
+      # 3. Arduino CLI + ESP32 core
+      # ---------------------------------------------------------------
       - name: Setup Arduino CLI & ESP32 Core
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
@@ -33,6 +43,9 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
+      # ---------------------------------------------------------------
+      # 4. LVGL 9.1 + config compatibil v9
+      # ---------------------------------------------------------------
       - name: Install Libraries & LVGL Configuration
         shell: bash
         run: |
@@ -61,24 +74,32 @@ jobs:
           #define LV_USE_DEMO_STRESS 0
           #endif
           EOF
-          sed -i 's/^[ 	]*//' ~/Arduino/libraries/lv_conf.h
+          sed -i 's/^[ \t]*//' ~/Arduino/libraries/lv_conf.h
           cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/src/lv_conf.h 2>/dev/null || true
           cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/lv_conf.h 2>/dev/null || true
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Configure Display & Buttons
+      # ---------------------------------------------------------------
+      # 5. Patch drivers + inject lock/unlock + generate .ino
+      # ---------------------------------------------------------------
+      - name: Configure Display, Buttons & Generate Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
-          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include "demos\/lv_demos.h"/\/\/ #include "demos\/lv_demos.h"/g' {} + 2>/dev/null || true
-          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/lv_demo_widgets();/\/\/ lv_demo_widgets();/g' {} + 2>/dev/null || true
+
+          # Dezactivează referințele la demo-uri
+          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
+            -exec sed -i 's|#include "demos/lv_demos.h"|// #include "demos/lv_demos.h"|g' {} + 2>/dev/null || true
+          find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
+            -exec sed -i 's|lv_demo_widgets();|// lv_demo_widgets();|g' {} + 2>/dev/null || true
 
           python3 - << 'PYEOF'
           import re, os
+
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
-          # 1. Patch lcd_bl_pwm_bsp.c
+          # ---------- 1. lcd_bl_pwm_bsp.c: dezactivează ledc_stop forțat ----------
           for root, dirs, files in os.walk(sketch_dir):
               for file in files:
                   if file == "lcd_bl_pwm_bsp.c":
@@ -88,20 +109,23 @@ jobs:
                       bl_c = re.sub(r'ledc_stop\s*\([^;]+\);', '// ledc_stop disabled', bl_c)
                       with open(p, "w", encoding="utf-8") as f:
                           f.write(bl_c)
+                      print(f"[OK] Patched {p}")
 
-          # 2. Detectează funcția de init I2C
+          # ---------- 2. Detectează funcția de init I2C ----------
           i2c_h_path = f"{sketch_dir}/i2c_bsp.h"
           i2c_init_func = "bsp_i2c_init"
           if os.path.exists(i2c_h_path):
               with open(i2c_h_path, "r", encoding="utf-8", errors="ignore") as f:
-                  h_content = f.read()
-              for f_name, f_args in re.findall(r'(?:esp_err_t|void|int|bool)\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*;', h_content):
-                  if "init" in f_name.lower() and "i2c" in f_name.lower() and f_args.strip() in ("", "void"):
+                  h = f.read()
+              for f_name, f_args in re.findall(
+                  r'(?:esp_err_t|void|int|bool)\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*;', h):
+                  if "init" in f_name.lower() and "i2c" in f_name.lower() \
+                     and f_args.strip() in ("", "void"):
                       i2c_init_func = f_name
                       break
-          print(f"Using I2C init function: {i2c_init_func}")
+          print(f"[OK] I2C init function = {i2c_init_func}")
 
-          # 3. Patch lvgl_port.c – elimină ESP_ERROR_CHECK
+          # ---------- 3. lvgl_port.c: elimină ESP_ERROR_CHECK-urile fatale ----------
           port_path = f"{sketch_dir}/lvgl_port.c"
           with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
               code = f.read()
@@ -112,28 +136,25 @@ jobs:
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
               'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { puts("[EXIO] bus 0 not ready"); tca9554_i2c_bus = NULL; } else { puts("[EXIO] bus 0 acquired!"); }',
-              code
-          )
+              code)
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_new_i2c_tca9554\s*\([^;]+\)\s*\)\s*;',
               'if (tca9554_i2c_bus != NULL) { if (esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander) == ESP_OK) { puts("[EXIO] TCA9554 ok"); } else { puts("[EXIO] TCA9554 fail"); io_expander = NULL; } } else { io_expander = NULL; }',
-              code
-          )
+              code)
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_set_dir\s*\(\s*io_expander\s*,([^)]+)\)\s*\)\s*;',
               r'if (io_expander != NULL) { esp_io_expander_set_dir(io_expander, \g<1>); }',
-              code
-          )
+              code)
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_set_level\s*\(\s*io_expander\s*,([^)]+)\)\s*\)\s*;',
               r'if (io_expander != NULL) { esp_io_expander_set_level(io_expander, \g<1>); }',
-              code
-          )
+              code)
 
           with open(port_path, "w", encoding="utf-8") as f:
               f.write(code)
+          print("[OK] lvgl_port.c patched")
 
-          # 4. Injectează lvgl_port_lock/unlock dacă lipsesc
+          # ---------- 4. Injectează lvgl_port_lock/unlock dacă lipsesc ----------
           h_path = f"{sketch_dir}/lvgl_port.h"
           with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
               h_content = f.read()
@@ -154,44 +175,42 @@ jobs:
                   c_content = re.sub(
                       r'(#include[^\n]+\n)(?![^\n]*#include)',
                       r'\1\nstatic SemaphoreHandle_t ' + mux_var + ' = NULL;\n',
-                      c_content, count=1, flags=re.DOTALL
-                  )
+                      c_content, count=1, flags=re.DOTALL)
                   c_content = re.sub(
                       r'(esp_err_t\s+lvgl_port_init\s*\([^)]*\)\s*\{)',
                       r'\1\n    ' + mux_var + ' = xSemaphoreCreateMutex();',
-                      c_content, count=1
-                  )
+                      c_content, count=1)
 
               c_content += f"""
 
-bool lvgl_port_lock(uint32_t timeout_ms) {{
-    if ({mux_var} == NULL) return false;
-    return xSemaphoreTake({mux_var}, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
-}}
-void lvgl_port_unlock(void) {{
-    if ({mux_var} != NULL) xSemaphoreGive({mux_var});
-}}
-"""
+          bool lvgl_port_lock(uint32_t timeout_ms) {{
+              if ({mux_var} == NULL) return false;
+              return xSemaphoreTake({mux_var}, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+          }}
+          void lvgl_port_unlock(void) {{
+              if ({mux_var} != NULL) xSemaphoreGive({mux_var});
+          }}
+          """
               h_content += """
-#ifdef __cplusplus
-extern "C" {
-#endif
-bool lvgl_port_lock(uint32_t timeout_ms);
-void lvgl_port_unlock(void);
-#ifdef __cplusplus
-}
-#endif
-"""
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          bool lvgl_port_lock(uint32_t timeout_ms);
+          void lvgl_port_unlock(void);
+          #ifdef __cplusplus
+          }
+          #endif
+          """
               with open(h_path, "w", encoding="utf-8") as f:
                   f.write(h_content)
               with open(port_path, "w", encoding="utf-8") as f:
                   f.write(c_content)
-              print(f"[OK] lvgl_port_lock/unlock adăugate (mutex={mux_var})")
+              print(f"[OK] lvgl_port_lock/unlock injected (mutex={mux_var})")
           else:
-              print("[OK] lvgl_port_lock există deja")
+              print("[OK] lvgl_port_lock already present")
 
-          # 5. Generează .ino cu butoane + lock corect
-          ino_lines = [
+          # ---------- 5. Generează .ino cu UI + butoane ----------
+          ino = [
               '#include <Arduino.h>',
               '#include <WiFi.h>',
               '',
@@ -268,7 +287,7 @@ void lvgl_port_unlock(void);
               '    delay(500);',
               '    pinMode(BOOT_BTN, INPUT_PULLUP);',
               '    pinMode(PWR_BTN, INPUT_PULLUP);',
-              '    ' + i2c_init_func + '();',
+              f'    {i2c_init_func}();',
               '    delay(50);',
               '    lvgl_port_init();',
               '    delay(200);',
@@ -296,18 +315,23 @@ void lvgl_port_unlock(void);
               '}',
               ''
           ]
-
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
-              f.write('\n'.join(ino_lines))
-          print("10_LVGL_V9_Test.ino scris OK.")
+              f.write('\n'.join(ino))
+          print("[OK] 10_LVGL_V9_Test.ino generat")
           PYEOF
 
-      - name: Compile Minimal Firmware
+      # ---------------------------------------------------------------
+      # 6. Compile
+      # ---------------------------------------------------------------
+      - name: Compile Firmware
         run: |
           SKETCH_PATH="Arduino/examples/10_LVGL_V9_Test/10_LVGL_V9_Test.ino"
           FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
           arduino-cli compile --fqbn "$FQBN" --output-dir build_output "$SKETCH_PATH"
 
+      # ---------------------------------------------------------------
+      # 7. Merge într-un singur .bin
+      # ---------------------------------------------------------------
       - name: Merge into Single .bin
         shell: bash
         run: |
@@ -315,12 +339,18 @@ void lvgl_port_unlock(void);
           BOOTLOADER=$(ls build_output/*.bootloader.bin | head -n 1)
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
+          echo "Bootloader: $BOOTLOADER"
+          echo "Partitions: $PARTITIONS"
+          echo "App:        $APP_BIN"
           esptool --chip esp32s3 merge_bin \
             -o package_bin/gemini-os-full-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
           ls -lh package_bin/gemini-os-full-0x0.bin
 
+      # ---------------------------------------------------------------
+      # 8. Upload artifact
+      # ---------------------------------------------------------------
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
