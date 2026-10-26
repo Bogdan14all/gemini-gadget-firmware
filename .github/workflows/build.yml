@@ -1,11 +1,11 @@
-name: Build Gemini OS - Mic TDM Final
+name: Build Gemini OS - Mic TDM Diagnostic
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Mic TDM Final
+    name: Build Mic TDM Diagnostic
     runs-on: ubuntu-latest
 
     steps:
@@ -63,7 +63,7 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Generate Mic Test Sketch
+      - name: Generate Mic TDM Diagnostic Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -216,42 +216,42 @@ jobs:
           }
 
           void codec_init() {
-              // 1. Reset ES7210 prin TCA9554 (pin 5)
+              // Reset ES7210 prin TCA9554
               if (i2c_bus) {
-                  i2c_write_reg(0x20, 0x03, 0x00); delay(10); // Output
-                  i2c_write_reg(0x20, 0x01, 0x00); delay(100); // LOW (reset)
-                  i2c_write_reg(0x20, 0x01, 0xFF); delay(200); // HIGH (release)
+                  i2c_write_reg(0x20, 0x03, 0x00); delay(10);
+                  i2c_write_reg(0x20, 0x01, 0x00); delay(100);
+                  i2c_write_reg(0x20, 0x01, 0xFF); delay(200);
               }
 
-              // 2. ES8311 (DAC) - pentru MCLK
+              // ES8311 (DAC) - pentru MCLK
               i2c_write_reg(0x18, 0x00, 0x1F); delay(20);
               i2c_write_reg(0x18, 0x00, 0x00);
 
-              // 3. ES7210 (ADC) - Configurare TDM completa
-              i2c_write_reg(0x40, 0x00, 0xFF); delay(20);  // Reset software
-              i2c_write_reg(0x40, 0x00, 0x41);              // Power up
-              i2c_write_reg(0x40, 0x01, 0x1F);              // Clock on
-              i2c_write_reg(0x40, 0x02, 0x00);              // Mute off
+              // ES7210 (ADC) - Configurare TDM
+              i2c_write_reg(0x40, 0x00, 0xFF); delay(20);
+              i2c_write_reg(0x40, 0x00, 0x41);
+              i2c_write_reg(0x40, 0x01, 0x1F);
+              i2c_write_reg(0x40, 0x02, 0x00);
               
-              // Sloturi TDM si format
-              i2c_write_reg(0x40, 0x09, 0x30);              // Time Control 0 (TDM slots)
-              i2c_write_reg(0x40, 0x0A, 0x30);              // Time Control 1 (TDM slots)
-              i2c_write_reg(0x40, 0x11, 0x60);              // I2S, 16-bit
-              i2c_write_reg(0x40, 0x12, 0x02);              // TDM x1 LRCK mode
+              // TDM slots (0x09, 0x0A) si format (0x11, 0x12)
+              i2c_write_reg(0x40, 0x09, 0x30); // TDM slot enable
+              i2c_write_reg(0x40, 0x0A, 0x30); // TDM slot enable
+              i2c_write_reg(0x40, 0x11, 0x60); // I2S, 16-bit
+              i2c_write_reg(0x40, 0x12, 0x02); // TDM x1 LRCK
               
-              // Gains
-              i2c_write_reg(0x40, 0x13, 0xFF);              // ADC1 gain max
-              i2c_write_reg(0x40, 0x14, 0xFF);              // ADC2 gain max
-              i2c_write_reg(0x40, 0x15, 0xFF);              // ADC3 gain max
-              i2c_write_reg(0x40, 0x16, 0xFF);              // ADC4 gain max
+              // Gain maxim
+              i2c_write_reg(0x40, 0x13, 0xFF);
+              i2c_write_reg(0x40, 0x14, 0xFF);
+              i2c_write_reg(0x40, 0x15, 0xFF);
+              i2c_write_reg(0x40, 0x16, 0xFF);
               
-              Serial.println("[ES7210] Full TDM register set applied");
+              Serial.println("[ES7210] TDM configured");
           }
 
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n=== Microfon Test (TDM Full) ===");
+              Serial.println("\n=== Microfon TDM Diagnostic ===");
 
               I2C_INIT_CALL
               delay(50);
@@ -272,7 +272,6 @@ jobs:
               Serial.println("[I2S] TDM started");
               delay(100);
 
-              // Codec init
               codec_init();
               delay(100);
 
@@ -304,7 +303,7 @@ jobs:
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] Mic Test .ino generat")
+          print("[OK] Mic TDM Diagnostic .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -321,14 +320,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/mic-tdm-final-0x0.bin \
+            -o package_bin/mic-tdm-diag-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/mic-tdm-final-0x0.bin
+          ls -lh package_bin/mic-tdm-diag-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mic-tdm-final-firmware
-          path: package_bin/mic-tdm-final-0x0.bin
+          name: mic-tdm-diag-firmware
+          path: package_bin/mic-tdm-diag-0x0.bin
           if-no-files-found: error
