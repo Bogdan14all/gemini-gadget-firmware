@@ -1,4 +1,4 @@
-name: Build Minimal Gemini OS v44 (Bogdan Edition - Buttons Fixed)
+name: Build Minimal Gemini OS v45 (Buttons + LVGL Lock Fixed)
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
 
       - name: Install esptool & zip
         run: |
-          pip install "esptool<5"          # fix: esptool.py există doar în <5
+          pip install "esptool<5"
           sudo apt-get update && sudo apt-get install -y zip
 
       - name: Setup Arduino CLI & ESP32 Core
@@ -33,17 +33,15 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
-      - name: Install Libraries & Setup LVGL Configuration
+      - name: Install Libraries & LVGL Configuration
         shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
           if [ -d "Arduino/libraries" ]; then
             cp -r Arduino/libraries/* ~/Arduino/libraries/ 2>/dev/null || true
           fi
-
           arduino-cli lib install "lvgl"@9.1.0 2>/dev/null || true
 
-          # Configurare lv_conf.h – compatibil LVGL 9.1 (nu mai folosim define-uri din v8)
           cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
           #ifndef LV_CONF_H
           #define LV_CONF_H
@@ -64,37 +62,31 @@ jobs:
           #endif
           EOF
           sed -i 's/^[ 	]*//' ~/Arduino/libraries/lv_conf.h
-
           cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/src/lv_conf.h 2>/dev/null || true
           cp ~/Arduino/libraries/lv_conf.h ~/Arduino/libraries/lvgl/lv_conf.h 2>/dev/null || true
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
-
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
       - name: Configure Display & Buttons
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
-
-          # Dezactivează demo-urile
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/#include "demos\/lv_demos.h"/\/\/ #include "demos\/lv_demos.h"/g' {} + 2>/dev/null || true
           find "$SKETCH_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) -exec sed -i 's/lv_demo_widgets();/\/\/ lv_demo_widgets();/g' {} + 2>/dev/null || true
 
           python3 - << 'PYEOF'
           import re, os
-
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
-          # 1. Patch lcd_bl_pwm_bsp.c – nu mai forța LEDC, lăsăm driver-ul original
+          # 1. Patch lcd_bl_pwm_bsp.c
           for root, dirs, files in os.walk(sketch_dir):
               for file in files:
                   if file == "lcd_bl_pwm_bsp.c":
-                      bl_path = os.path.join(root, file)
-                      with open(bl_path, "r", encoding="utf-8", errors="ignore") as f:
+                      p = os.path.join(root, file)
+                      with open(p, "r", encoding="utf-8", errors="ignore") as f:
                           bl_c = f.read()
-                      # Elimină orice ledc_stop forțat
                       bl_c = re.sub(r'ledc_stop\s*\([^;]+\);', '// ledc_stop disabled', bl_c)
-                      with open(bl_path, "w", encoding="utf-8") as f:
+                      with open(p, "w", encoding="utf-8") as f:
                           f.write(bl_c)
 
           # 2. Detectează funcția de init I2C
@@ -103,15 +95,13 @@ jobs:
           if os.path.exists(i2c_h_path):
               with open(i2c_h_path, "r", encoding="utf-8", errors="ignore") as f:
                   h_content = f.read()
-              funcs = re.findall(r'(?:esp_err_t|void|int|bool)\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*;', h_content)
-              for f_name, f_args in funcs:
-                  if "init" in f_name.lower() and "i2c" in f_name.lower():
-                      if f_args.strip() in ("", "void"):
-                          i2c_init_func = f_name
-                          break
+              for f_name, f_args in re.findall(r'(?:esp_err_t|void|int|bool)\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*;', h_content):
+                  if "init" in f_name.lower() and "i2c" in f_name.lower() and f_args.strip() in ("", "void"):
+                      i2c_init_func = f_name
+                      break
           print(f"Using I2C init function: {i2c_init_func}")
 
-          # 3. Patch lvgl_port.c – elimină ESP_ERROR_CHECK-urile care pot aborta
+          # 3. Patch lvgl_port.c – elimină ESP_ERROR_CHECK
           port_path = f"{sketch_dir}/lvgl_port.c"
           with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
               code = f.read()
@@ -121,12 +111,12 @@ jobs:
 
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
-              'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { puts("[EXIO] I2C bus 0 not ready"); tca9554_i2c_bus = NULL; } else { puts("[EXIO] I2C bus 0 acquired!"); }',
+              'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { puts("[EXIO] bus 0 not ready"); tca9554_i2c_bus = NULL; } else { puts("[EXIO] bus 0 acquired!"); }',
               code
           )
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_new_i2c_tca9554\s*\([^;]+\)\s*\)\s*;',
-              'if (tca9554_i2c_bus != NULL) { if (esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander) == ESP_OK) { puts("[EXIO] TCA9554 connected!"); } else { puts("[EXIO] Failed TCA9554"); io_expander = NULL; } } else { io_expander = NULL; }',
+              'if (tca9554_i2c_bus != NULL) { if (esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander) == ESP_OK) { puts("[EXIO] TCA9554 ok"); } else { puts("[EXIO] TCA9554 fail"); io_expander = NULL; } } else { io_expander = NULL; }',
               code
           )
           code = re.sub(
@@ -143,7 +133,64 @@ jobs:
           with open(port_path, "w", encoding="utf-8") as f:
               f.write(code)
 
-          # 4. Generează .ino cu suport pentru butoane
+          # 4. Injectează lvgl_port_lock/unlock dacă lipsesc
+          h_path = f"{sketch_dir}/lvgl_port.h"
+          with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
+              h_content = f.read()
+          with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
+              c_content = f.read()
+
+          if "lvgl_port_lock" not in h_content:
+              mux_var = None
+              for pat in [r'SemaphoreHandle_t\s+(\w*[Mm]ux\w*)\s*[;=]',
+                          r'SemaphoreHandle_t\s+(\w+)\s*[;=]']:
+                  m = re.search(pat, c_content)
+                  if m:
+                      mux_var = m.group(1)
+                      break
+
+              if mux_var is None:
+                  mux_var = "lvgl_port_mux"
+                  c_content = re.sub(
+                      r'(#include[^\n]+\n)(?![^\n]*#include)',
+                      r'\1\nstatic SemaphoreHandle_t ' + mux_var + ' = NULL;\n',
+                      c_content, count=1, flags=re.DOTALL
+                  )
+                  c_content = re.sub(
+                      r'(esp_err_t\s+lvgl_port_init\s*\([^)]*\)\s*\{)',
+                      r'\1\n    ' + mux_var + ' = xSemaphoreCreateMutex();',
+                      c_content, count=1
+                  )
+
+              c_content += f"""
+
+bool lvgl_port_lock(uint32_t timeout_ms) {{
+    if ({mux_var} == NULL) return false;
+    return xSemaphoreTake({mux_var}, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}}
+void lvgl_port_unlock(void) {{
+    if ({mux_var} != NULL) xSemaphoreGive({mux_var});
+}}
+"""
+              h_content += """
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool lvgl_port_lock(uint32_t timeout_ms);
+void lvgl_port_unlock(void);
+#ifdef __cplusplus
+}
+#endif
+"""
+              with open(h_path, "w", encoding="utf-8") as f:
+                  f.write(h_content)
+              with open(port_path, "w", encoding="utf-8") as f:
+                  f.write(c_content)
+              print(f"[OK] lvgl_port_lock/unlock adăugate (mutex={mux_var})")
+          else:
+              print("[OK] lvgl_port_lock există deja")
+
+          # 5. Generează .ino cu butoane + lock corect
           ino_lines = [
               '#include <Arduino.h>',
               '#include <WiFi.h>',
@@ -157,38 +204,29 @@ jobs:
               'const char* ssid = "TP-Link_2.4G_9318_Guest";',
               'const char* password = "revelion";',
               '',
-              '// --- Pini butoane pentru V2 ---',
               '#define BOOT_BTN 0',
               '#define PWR_BTN  16',
-              '',
-              '// --- Backlight V2 ---',
               '#define LCD_BL   42',
               '',
               'lv_obj_t *lbl_boot_state = NULL;',
               'lv_obj_t *lbl_pwr_state  = NULL;',
               '',
               'void update_button_labels() {',
-              '    if (lbl_boot_state) {',
+              '    if (lbl_boot_state)',
               '        lv_label_set_text(lbl_boot_state, digitalRead(BOOT_BTN) == LOW ? "BOOT: APASAT" : "BOOT: liber");',
-              '    }',
-              '    if (lbl_pwr_state) {',
+              '    if (lbl_pwr_state)',
               '        lv_label_set_text(lbl_pwr_state, digitalRead(PWR_BTN) == LOW ? "PWR: APASAT" : "PWR: liber");',
-              '    }',
               '}',
               '',
               'void create_bogdan_ui() {',
-              '    // Backlight V2: GPIO42, activ-low => LOW = aprins',
               '    pinMode(LCD_BL, OUTPUT);',
               '    digitalWrite(LCD_BL, LOW);',
               '',
-              '    // Lock LVGL (apel necondiționat – funcția există în lvgl_port.h)',
-              '    lvgl_port_lock(0);',
-              '',
+              '    lvgl_port_lock(1000);',
               '    lv_obj_t *scr = lv_screen_active();',
               '    if (!scr) scr = lv_scr_act();',
               '    if (scr) {',
               '        lv_obj_clean(scr);',
-              '',
               '        lv_obj_set_style_bg_color(scr, lv_color_hex(0x38BDF8), 0);',
               '        lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);',
               '',
@@ -204,59 +242,51 @@ jobs:
               '        lv_obj_set_style_text_font(lbl_sub, &lv_font_montserrat_14, 0);',
               '        lv_obj_align(lbl_sub, LV_ALIGN_CENTER, 0, -28);',
               '',
-              '        // Stare BOOT',
               '        lbl_boot_state = lv_label_create(scr);',
               '        lv_label_set_text(lbl_boot_state, "BOOT: liber");',
               '        lv_obj_set_style_text_color(lbl_boot_state, lv_color_hex(0x000000), 0);',
               '        lv_obj_set_style_text_font(lbl_boot_state, &lv_font_montserrat_12, 0);',
               '        lv_obj_align(lbl_boot_state, LV_ALIGN_CENTER, 0, 0);',
               '',
-              '        // Stare PWR',
               '        lbl_pwr_state = lv_label_create(scr);',
               '        lv_label_set_text(lbl_pwr_state, "PWR: liber");',
               '        lv_obj_set_style_text_color(lbl_pwr_state, lv_color_hex(0x000000), 0);',
               '        lv_obj_set_style_text_font(lbl_pwr_state, &lv_font_montserrat_12, 0);',
               '        lv_obj_align(lbl_pwr_state, LV_ALIGN_CENTER, 0, 20);',
               '',
-              '        // Wi-Fi status (static, nu reflectă realitatea)',
               '        lv_obj_t *lbl_wifi = lv_label_create(scr);',
               '        lv_label_set_text(lbl_wifi, "Wi-Fi: Conectat!");',
               '        lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x0284C7), 0);',
               '        lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_14, 0);',
               '        lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 50);',
               '    }',
-              '',
               '    lvgl_port_unlock();',
               '}',
               '',
               'void setup() {',
               '    Serial.begin(115200);',
               '    delay(500);',
-              '',
-              '    // Butoane ca intrări cu pull-up intern (active-low)',
               '    pinMode(BOOT_BTN, INPUT_PULLUP);',
               '    pinMode(PWR_BTN, INPUT_PULLUP);',
-              '',
               '    ' + i2c_init_func + '();',
               '    delay(50);',
               '    lvgl_port_init();',
               '    delay(200);',
               '    create_bogdan_ui();',
-              '',
               '    WiFi.mode(WIFI_STA);',
               '    WiFi.setSleep(false);',
               '    WiFi.begin(ssid, password);',
               '}',
               '',
               'void loop() {',
-              '    static unsigned long last_btn_poll = 0;',
-              '    if (millis() - last_btn_poll > 100) {',
-              '        last_btn_poll = millis();',
-              '        lvgl_port_lock(0);',
-              '        update_button_labels();',
-              '        lvgl_port_unlock();',
+              '    static unsigned long last_btn = 0;',
+              '    if (millis() - last_btn > 100) {',
+              '        last_btn = millis();',
+              '        if (lvgl_port_lock(100)) {',
+              '            update_button_labels();',
+              '            lvgl_port_unlock();',
+              '        }',
               '    }',
-              '',
               '    static unsigned long last_beat = 0;',
               '    if (millis() - last_beat > 5000) {',
               '        last_beat = millis();',
@@ -269,7 +299,7 @@ jobs:
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write('\n'.join(ino_lines))
-          print("10_LVGL_V9_Test.ino scris cu suport butoane!")
+          print("10_LVGL_V9_Test.ino scris OK.")
           PYEOF
 
       - name: Compile Minimal Firmware
@@ -278,22 +308,20 @@ jobs:
           FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
           arduino-cli compile --fqbn "$FQBN" --output-dir build_output "$SKETCH_PATH"
 
-      - name: Merge into Single .bin & Create Clean ZIP
+      - name: Merge into Single .bin
         shell: bash
         run: |
           mkdir -p package_bin
           BOOTLOADER=$(ls build_output/*.bootloader.bin | head -n 1)
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
-
           esptool --chip esp32s3 merge_bin \
             -o package_bin/gemini-os-full-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-
           ls -lh package_bin/gemini-os-full-0x0.bin
 
-      - name: Upload Single-Bin ZIP Artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: gemini-os-full-0x0
