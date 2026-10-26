@@ -1,11 +1,11 @@
-name: Build Gemini OS - Step 1 Touch Test
+name: Build Gemini OS - Step 2 Audio Loopback
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-minimal:
-    name: Build - Touch Feedback Test
+  build-audio:
+    name: Build - Audio Loopback Test
     runs-on: ubuntu-latest
 
     steps:
@@ -14,6 +14,14 @@ jobs:
         with:
           repository: waveshareteam/ESP32-S3-Touch-LCD-3.49-V2
           submodules: recursive
+
+      # Diagnostic: ce fisiere audio exista in repo
+      - name: Discover Audio Examples in Repo
+        run: |
+          echo "=== Arduino/examples ==="
+          ls -la Arduino/examples/ 2>/dev/null || echo "(nu exista)"
+          echo "=== Cauta fisiere audio/codec ==="
+          find . -type f \( -iname "*8311*" -o -iname "*7210*" -o -iname "*audio*" -o -iname "*i2s*" -o -iname "*codec*" \) 2>/dev/null | head -50
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -56,6 +64,7 @@ jobs:
           #define LV_FONT_MONTSERRAT_20 1
           #define LV_FONT_DEFAULT &lv_font_montserrat_20
           #define LV_USE_LABEL 1
+          #define LV_USE_BAR 1
           #define LV_USE_DEMO_WIDGETS 0
           #define LV_USE_DEMO_MUSIC 0
           #define LV_USE_DEMO_BENCHMARK 0
@@ -68,7 +77,7 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Patch Drivers & Generate Touch Test Sketch
+      - name: Patch Drivers & Generate Audio Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -82,7 +91,7 @@ jobs:
           import re, os
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
-          # 1. lcd_bl_pwm_bsp.c: fara ledc_stop
+          # 1. lcd_bl_pwm_bsp.c
           for root, dirs, files in os.walk(sketch_dir):
               for file in files:
                   if file == "lcd_bl_pwm_bsp.c":
@@ -107,16 +116,13 @@ jobs:
                       break
           print(f"[OK] I2C init = {i2c_init_func}")
 
-          # 3. lvgl_port.c: eliminam doar ESP_ERROR_CHECK fatale
-          #    NU mai punem stub pe TouchInputReadCallback - il lasam original!
+          # 3. lvgl_port.c
           port_path = f"{sketch_dir}/lvgl_port.c"
           with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
               code = f.read()
 
           code = code.replace("LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)", "2")
           code = code.replace("lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)", "2")
-
-          # Fara ESP_ERROR_CHECK care pot aborta
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
               'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { puts("[EXIO] bus 0 not ready"); tca9554_i2c_bus = NULL; } else { puts("[EXIO] bus 0 acquired!"); }',
@@ -134,17 +140,10 @@ jobs:
               r'if (io_expander != NULL) { esp_io_expander_set_level(io_expander, \g<1>); }',
               code)
 
-          # NU mai inlocuim TouchInputReadCallback - il lasam pe cel original
-          # (comentat pentru claritate)
-          # safe_touch = ...  # eliminat
-          # pattern = ...     # eliminat
-          # code = re.sub(pattern, safe_touch, ...)  # eliminat
-
           with open(port_path, "w", encoding="utf-8") as f:
               f.write(code)
-          print("[OK] lvgl_port.c patched (touch callback PASTRAT original)")
 
-          # 4. Inject lvgl_port_lock/unlock
+          # 4. lvgl_port_lock/unlock
           h_path = f"{sketch_dir}/lvgl_port.h"
           with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
               h_content = f.read()
@@ -169,7 +168,6 @@ jobs:
                       r'(esp_err_t\s+lvgl_port_init\s*\([^)]*\)\s*\{)',
                       r'\1\n    ' + mux_var + ' = xSemaphoreCreateMutex();',
                       c_content, count=1)
-
               c_content += f"""
 
           bool lvgl_port_lock(uint32_t timeout_ms) {{
@@ -194,178 +192,321 @@ jobs:
                   f.write(h_content)
               with open(port_path, "w", encoding="utf-8") as f:
                   f.write(c_content)
-              print(f"[OK] lvgl_port_lock/unlock injected")
 
-          # 5. Genereaza .ino cu touch feedback
-          ino = [
-              '#include <Arduino.h>',
-              '#include <WiFi.h>',
-              '',
-              'extern "C" {',
-              '#include "i2c_bsp.h"',
-              '#include "lvgl_port.h"',
-              '}',
-              '#include <lvgl.h>',
-              '',
-              '#define BOOT_BTN 0',
-              '#define PWR_BTN  16',
-              '#define LCD_BL   42',
-              '',
-              'lv_obj_t *lbl_touch_xy    = NULL;',
-              'lv_obj_t *lbl_touch_state = NULL;',
-              'lv_obj_t *lbl_boot_state  = NULL;',
-              'lv_obj_t *lbl_pwr_state   = NULL;',
-              'lv_obj_t *touch_dot       = NULL;',
-              '',
-              'static void touch_event_cb(lv_event_t *e) {',
-              '    lv_event_code_t code = lv_event_get_code(e);',
-              '    lv_indev_t *indev = lv_indev_get_act();',
-              '    if (!indev || !lbl_touch_xy || !lbl_touch_state) return;',
-              '',
-              '    lv_point_t p;',
-              '    lv_indev_get_point(indev, &p);',
-              '',
-              '    char buf[40];',
-              '    lv_snprintf(buf, sizeof(buf), "X:%d  Y:%d", p.x, p.y);',
-              '    lv_label_set_text(lbl_touch_xy, buf);',
-              '',
-              '    if (touch_dot) {',
-              '        lv_obj_set_pos(touch_dot, p.x - 15, p.y - 15);',
-              '    }',
-              '',
-              '    if (code == LV_EVENT_PRESSED) {',
-              '        lv_label_set_text(lbl_touch_state, "APASAT!");',
-              '        lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0xFF0000), 0);',
-              '        if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0xFF0000), 0);',
-              '        Serial.printf("[TOUCH] PRESSED x=%d y=%d\\n", p.x, p.y);',
-              '    } else if (code == LV_EVENT_RELEASED) {',
-              '        lv_label_set_text(lbl_touch_state, "Eliberat");',
-              '        lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);',
-              '        if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);',
-              '        Serial.printf("[TOUCH] RELEASED\\n");',
-              '    } else if (code == LV_EVENT_PRESSING) {',
-              '        lv_label_set_text(lbl_touch_state, "Apasat...");',
-              '    }',
-              '}',
-              '',
-              'void build_touch_ui() {',
-              '    pinMode(LCD_BL, OUTPUT);',
-              '    digitalWrite(LCD_BL, LOW);',
-              '',
-              '    lvgl_port_lock(1000);',
-              '    lv_obj_t *scr = lv_screen_active();',
-              '    if (!scr) scr = lv_scr_act();',
-              '    if (!scr) { lvgl_port_unlock(); return; }',
-              '',
-              '    lv_obj_clean(scr);',
-              '    lv_obj_set_style_bg_color(scr, lv_color_hex(0x38BDF8), 0);',
-              '    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);',
-              '',
-              '    // Titlu',
-              '    lv_obj_t *t = lv_label_create(scr);',
-              '    lv_label_set_text(t, "Gemini OS");',
-              '    lv_obj_set_style_text_color(t, lv_color_hex(0x000000), 0);',
-              '    lv_obj_set_style_text_font(t, &lv_font_montserrat_20, 0);',
-              '    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 30);',
-              '',
-              '    // Instructiune',
-              '    lv_obj_t *hint = lv_label_create(scr);',
-              '    lv_label_set_text(hint, "Atinge ecranul!");',
-              '    lv_obj_set_style_text_color(hint, lv_color_hex(0x0F172A), 0);',
-              '    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);',
-              '    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 70);',
-              '',
-              '    // Coordonate',
-              '    lbl_touch_xy = lv_label_create(scr);',
-              '    lv_label_set_text(lbl_touch_xy, "X:--  Y:--");',
-              '    lv_obj_set_style_text_color(lbl_touch_xy, lv_color_hex(0xFFFFFF), 0);',
-              '    lv_obj_set_style_text_font(lbl_touch_xy, &lv_font_montserrat_18, 0);',
-              '    lv_obj_align(lbl_touch_xy, LV_ALIGN_CENTER, 0, -40);',
-              '',
-              '    // Stare touch',
-              '    lbl_touch_state = lv_label_create(scr);',
-              '    lv_label_set_text(lbl_touch_state, "Eliberat");',
-              '    lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);',
-              '    lv_obj_set_style_text_font(lbl_touch_state, &lv_font_montserrat_16, 0);',
-              '    lv_obj_align(lbl_touch_state, LV_ALIGN_CENTER, 0, -10);',
-              '',
-              '    // Butoane fizice',
-              '    lbl_boot_state = lv_label_create(scr);',
-              '    lv_label_set_text(lbl_boot_state, "BOOT: liber");',
-              '    lv_obj_set_style_text_font(lbl_boot_state, &lv_font_montserrat_12, 0);',
-              '    lv_obj_set_style_text_color(lbl_boot_state, lv_color_hex(0x000000), 0);',
-              '    lv_obj_align(lbl_boot_state, LV_ALIGN_CENTER, 0, 30);',
-              '',
-              '    lbl_pwr_state = lv_label_create(scr);',
-              '    lv_label_set_text(lbl_pwr_state, "PWR: liber");',
-              '    lv_obj_set_style_text_font(lbl_pwr_state, &lv_font_montserrat_12, 0);',
-              '    lv_obj_set_style_text_color(lbl_pwr_state, lv_color_hex(0x000000), 0);',
-              '    lv_obj_align(lbl_pwr_state, LV_ALIGN_CENTER, 0, 50);',
-              '',
-              '    // Dot urmaritor',
-              '    touch_dot = lv_obj_create(scr);',
-              '    lv_obj_set_size(touch_dot, 30, 30);',
-              '    lv_obj_set_style_radius(touch_dot, LV_RADIUS_CIRCLE, 0);',
-              '    lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);',
-              '    lv_obj_set_style_bg_opa(touch_dot, LV_OPA_80, 0);',
-              '    lv_obj_set_style_border_width(touch_dot, 0, 0);',
-              '    lv_obj_set_pos(touch_dot, 10, 10);',
-              '',
-              '    // Evenimente touch pe screen',
-              '    lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_PRESSED,  NULL);',
-              '    lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_PRESSING, NULL);',
-              '    lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_RELEASED, NULL);',
-              '',
-              '    lvgl_port_unlock();',
-              '    Serial.println("[UI] Touch test UI built");',
-              '}',
-              '',
-              'void setup() {',
-              '    Serial.begin(115200);',
-              '    delay(500);',
-              '    Serial.println("\\n=== Gemini OS Touch Test ===");',
-              '',
-              '    pinMode(BOOT_BTN, INPUT_PULLUP);',
-              '    pinMode(PWR_BTN, INPUT_PULLUP);',
-              f'    {i2c_init_func}();',
-              '    delay(50);',
-              '    lvgl_port_init();',
-              '    delay(300);',
-              '',
-              '    // Verifica daca exista indev pointer (touch)',
-              '    lv_indev_t *indev = lv_indev_get_next(NULL);',
-              '    int count = 0;',
-              '    while (indev) {',
-              '        count++;',
-              '        indev = lv_indev_get_next(indev);',
-              '    }',
-              '    Serial.printf("[INDEV] %d input device(s) registered\\n", count);',
-              '',
-              '    build_touch_ui();',
-              '    Serial.println("[READY] Atinge ecranul!");',
-              '}',
-              '',
-              'void loop() {',
-              '    static unsigned long last_btn = 0;',
-              '    if (millis() - last_btn > 100) {',
-              '        last_btn = millis();',
-              '        if (lvgl_port_lock(50)) {',
-              '            if (lbl_boot_state)',
-              '                lv_label_set_text(lbl_boot_state,',
-              '                    digitalRead(BOOT_BTN) == LOW ? "BOOT: APASAT" : "BOOT: liber");',
-              '            if (lbl_pwr_state)',
-              '                lv_label_set_text(lbl_pwr_state,',
-              '                    digitalRead(PWR_BTN) == LOW ? "PWR: APASAT" : "PWR: liber");',
-              '            lvgl_port_unlock();',
-              '        }',
-              '    }',
-              '    delay(20);',
-              '}',
-              ''
-          ]
+          # 5. Genereaza .ino cu audio loopback
+          ino = r'''#include <Arduino.h>
+#include <WiFi.h>
+#include <Wire.h>
+#include <driver/i2s_std.h>
+#include <driver/gpio.h>
+
+extern "C" {
+#include "i2c_bsp.h"
+#include "lvgl_port.h"
+}
+#include <lvgl.h>
+
+// ---------- Pini ----------
+#define LCD_BL    42
+#define BOOT_BTN  0
+#define PWR_BTN   16
+
+#define I2C_SDA   47
+#define I2C_SCL   48
+
+#define I2S_MCLK  7
+#define I2S_WS    46
+#define I2S_BCLK  15
+#define I2S_DIN   6
+#define I2S_DOUT  45
+
+// ---------- Config audio ----------
+#define SAMPLE_RATE    16000
+#define BUFFER_SAMPLES 1024   // ~64ms
+
+i2s_chan_handle_t tx_handle = NULL;
+i2s_chan_handle_t rx_handle = NULL;
+
+// ---------- UI ----------
+lv_obj_t *lbl_status = NULL;
+lv_obj_t *bar_level  = NULL;
+lv_obj_t *lbl_peak   = NULL;
+
+// ---------- WiFi ----------
+const char* ssid = "TP-Link_2.4G_9318_Guest";
+const char* password = "revelion";
+
+// ---------- Codec helpers ----------
+void es8311_write(uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(0x18);
+    Wire.write(reg);
+    Wire.write(val);
+    Wire.endTransmission();
+}
+
+void es7210_write(uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(0x40);
+    Wire.write(reg);
+    Wire.write(val);
+    Wire.endTransmission();
+}
+
+bool es8311_init() {
+    Wire.beginTransmission(0x18);
+    if (Wire.endTransmission() != 0) { Serial.println("[ES8311] not found"); return false; }
+
+    es8311_write(0x00, 0x1F); delay(20);
+    es8311_write(0x00, 0x00);
+    es8311_write(0x01, 0x30);   // MCLK on, slave
+    es8311_write(0x02, 0x00);   // pre-div
+    es8311_write(0x03, 0x10);   // FS mode
+    es8311_write(0x04, 0x10);
+    es8311_write(0x05, 0x00);
+    es8311_write(0x06, 0x03);   // BCLK div
+    es8311_write(0x07, 0x00);
+    es8311_write(0x08, 0xFF);
+    es8311_write(0x09, 0x0C);   // 16-bit I2S
+    es8311_write(0x0A, 0x0C);
+    es8311_write(0x0B, 0x00);
+    es8311_write(0x0C, 0x00);
+    es8311_write(0x0D, 0x01);
+    es8311_write(0x0E, 0x02);
+    es8311_write(0x0F, 0x00);
+    es8311_write(0x10, 0x1F);
+    es8311_write(0x11, 0x7F);
+    es8311_write(0x12, 0x00);
+    es8311_write(0x13, 0x10);
+    es8311_write(0x14, 0x1A);
+    es8311_write(0x15, 0x40);
+    es8311_write(0x16, 0x24);
+    es8311_write(0x17, 0xBF);
+    es8311_write(0x32, 0xBF);   // DAC volume ~-15dB (0=max, 255=mute)
+    es8311_write(0x37, 0x08);
+
+    Serial.println("[ES8311] init OK");
+    return true;
+}
+
+bool es7210_init() {
+    Wire.beginTransmission(0x40);
+    if (Wire.endTransmission() != 0) { Serial.println("[ES7210] not found"); return false; }
+
+    es7210_write(0x00, 0xFF); delay(20);
+    es7210_write(0x00, 0x41);   // reset + power up
+    es7210_write(0x01, 0x1F);   // clock on
+    es7210_write(0x02, 0x00);
+    es7210_write(0x03, 0x00);
+    es7210_write(0x04, 0x00);
+    es7210_write(0x05, 0x00);
+    es7210_write(0x06, 0x00);
+    es7210_write(0x07, 0x00);
+    es7210_write(0x08, 0x10);   // 16-bit I2S
+    es7210_write(0x09, 0x30);
+    es7210_write(0x0A, 0x30);
+    es7210_write(0x0B, 0x00);
+    es7210_write(0x0C, 0x00);
+    es7210_write(0x0D, 0x00);
+    es7210_write(0x0E, 0x00);
+    es7210_write(0x0F, 0x00);
+    es7210_write(0x10, 0x00);
+    es7210_write(0x11, 0x60);   // mic bias
+    es7210_write(0x12, 0x3F);   // ADC1 gain
+    es7210_write(0x13, 0x3F);   // ADC2 gain
+    es7210_write(0x14, 0x3F);   // ADC3 gain
+    es7210_write(0x15, 0x3F);   // ADC4 gain
+
+    Serial.println("[ES7210] init OK");
+    return true;
+}
+
+bool i2s_init() {
+    // Master full-duplex, shared clock
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    chan_cfg.auto_clear = true;
+
+    if (i2s_new_channel(&chan_cfg, &tx_handle, &rx_handle) != ESP_OK) {
+        Serial.println("[I2S] new_channel failed");
+        return false;
+    }
+
+    i2s_std_config_t std_cfg = {
+        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+        .gpio_cfg = {
+            .mclk = (gpio_num_t)I2S_MCLK,
+            .bclk = (gpio_num_t)I2S_BCLK,
+            .ws   = (gpio_num_t)I2S_WS,
+            .dout = (gpio_num_t)I2S_DOUT,
+            .din  = (gpio_num_t)I2S_DIN,
+            .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false }
+        }
+    };
+    // MCLK = 256 * fs = 4.096 MHz
+    std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+
+    if (i2s_channel_init_std_mode(tx_handle, &std_cfg) != ESP_OK) { Serial.println("[I2S] tx init fail"); return false; }
+    if (i2s_channel_init_std_mode(rx_handle, &std_cfg) != ESP_OK) { Serial.println("[I2S] rx init fail"); return false; }
+    if (i2s_channel_enable(tx_handle) != ESP_OK) { Serial.println("[I2S] tx enable fail"); return false; }
+    if (i2s_channel_enable(rx_handle) != ESP_OK) { Serial.println("[I2S] rx enable fail"); return false; }
+
+    Serial.println("[I2S] init OK (16kHz stereo full-duplex)");
+    return true;
+}
+
+// ---------- UI ----------
+void build_ui() {
+    pinMode(LCD_BL, OUTPUT);
+    digitalWrite(LCD_BL, LOW);
+
+    lvgl_port_lock(1000);
+    lv_obj_t *scr = lv_screen_active();
+    if (!scr) scr = lv_scr_act();
+    if (!scr) { lvgl_port_unlock(); return; }
+
+    lv_obj_clean(scr);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0F172A), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+    lv_obj_t *t = lv_label_create(scr);
+    lv_label_set_text(t, "Audio Loopback");
+    lv_obj_set_style_text_color(t, lv_color_hex(0x38BDF8), 0);
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_18, 0);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 20);
+
+    lbl_status = lv_label_create(scr);
+    lv_label_set_text(lbl_status, "Initializing...");
+    lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_14, 0);
+    lv_obj_align(lbl_status, LV_ALIGN_TOP_MID, 0, 55);
+
+    bar_level = lv_bar_create(scr);
+    lv_obj_set_size(bar_level, 140, 20);
+    lv_obj_align(bar_level, LV_ALIGN_CENTER, 0, 0);
+    lv_bar_set_range(bar_level, 0, 100);
+    lv_obj_set_style_bg_color(bar_level, lv_color_hex(0x1E293B), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bar_level, lv_color_hex(0x22C55E), LV_PART_INDICATOR);
+
+    lbl_peak = lv_label_create(scr);
+    lv_label_set_text(lbl_peak, "Peak: 0");
+    lv_obj_set_style_text_color(lbl_peak, lv_color_hex(0x94A3B8), 0);
+    lv_obj_set_style_text_font(lbl_peak, &lv_font_montserrat_14, 0);
+    lv_obj_align(lbl_peak, LV_ALIGN_CENTER, 0, 40);
+
+    lvgl_port_unlock();
+}
+
+void update_level(int level) {
+    if (!lvgl_port_lock(50)) return;
+    if (bar_level) lv_bar_set_value(bar_level, level, LV_ANIM_OFF);
+    if (lbl_peak) {
+        char b[32];
+        lv_snprintf(b, sizeof(b), "Peak: %d", level);
+        lv_label_set_text(lbl_peak, b);
+    }
+    lvgl_port_unlock();
+}
+
+void set_status(const char* s) {
+    if (!lvgl_port_lock(200)) return;
+    if (lbl_status) lv_label_set_text(lbl_status, s);
+    lvgl_port_unlock();
+}
+
+// ---------- Main ----------
+int16_t *audio_buf = NULL;   // stereo interleaved
+size_t buf_bytes = 0;
+
+void setup() {
+    Serial.begin(115200);
+    delay(500);
+    Serial.println("\n=== Gemini OS Audio Loopback ===");
+
+    pinMode(BOOT_BTN, INPUT_PULLUP);
+    pinMode(PWR_BTN, INPUT_PULLUP);
+
+    // I2C bus pt. LVGL (display + touch + expander)
+    bsp_i2c_init();
+    delay(50);
+
+    lvgl_port_init();
+    delay(300);
+    build_ui();
+
+    // I2C codec-uri (acelasi bus)
+    Wire.begin(I2C_SDA, I2C_SCL, 400000);
+    delay(50);
+
+    bool ok8311 = es8311_init();
+    bool ok7210 = es7210_init();
+
+    if (!ok8311 || !ok7210) {
+        set_status("Codec lipsa! Verifica Serial");
+        Serial.println("[ERR] Un codec nu a raspuns");
+        return;
+    }
+
+    if (!i2s_init()) {
+        set_status("I2S init failed");
+        return;
+    }
+
+    buf_bytes = BUFFER_SAMPLES * 2 * sizeof(int16_t);
+    audio_buf = (int16_t*) heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!audio_buf) {
+        Serial.println("[ERR] Cannot alloc audio buffer in PSRAM");
+        set_status("PSRAM alloc fail");
+        return;
+    }
+    Serial.printf("[I2S] Buffer alocat: %u bytes in PSRAM\n", (unsigned)buf_bytes);
+
+    set_status("Loopback activ - vorbeste!");
+
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    WiFi.begin(ssid, password);
+}
+
+void loop() {
+    // Citim un buffer
+    size_t bytes_read = 0;
+    esp_err_t err = i2s_channel_read(rx_handle, audio_buf, buf_bytes, &bytes_read, 1000);
+    if (err != ESP_OK || bytes_read == 0) {
+        delay(10);
+        return;
+    }
+
+    // Calcul peak + normalizare
+    int samples = bytes_read / sizeof(int16_t);
+    int32_t peak = 0;
+    for (int i = 0; i < samples; i++) {
+        int32_t v = audio_buf[i];
+        if (v < 0) v = -v;
+        if (v > peak) peak = v;
+    }
+
+    int level = (peak * 100) / 32768;
+    update_level(level);
+
+    // Scriem inapoi (loopback)
+    size_t bytes_written = 0;
+    i2s_channel_write(tx_handle, audio_buf, bytes_read, &bytes_written, 1000);
+
+    // Log periodic
+    static unsigned long last_log = 0;
+    if (millis() - last_log > 2000) {
+        last_log = millis();
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.printf("[LOOP] peak=%d level=%d%% ip=%s\n",
+                (int)peak, level, WiFi.localIP().toString().c_str());
+        } else {
+            Serial.printf("[LOOP] peak=%d level=%d%% wifi=...\n", (int)peak, level);
+        }
+    }
+}
+'''
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
-              f.write('\n'.join(ino))
-          print("[OK] Touch test .ino generat")
+              f.write(ino)
+          print("[OK] Audio loopback .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -381,9 +522,6 @@ jobs:
           BOOTLOADER=$(ls build_output/*.bootloader.bin | head -n 1)
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
-          echo "BL=$BOOTLOADER"
-          echo "PT=$PARTITIONS"
-          echo "APP=$APP_BIN"
           python -m esptool --chip esp32s3 merge_bin \
             -o package_bin/gemini-os-full-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
@@ -393,6 +531,6 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-os-touch-test
+          name: gemini-os-audio-loopback
           path: package_bin/gemini-os-full-0x0.bin
           if-no-files-found: error
