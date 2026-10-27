@@ -1,11 +1,11 @@
-name: Build Gemini OS - v64 Full Suite
+name: Build Gemini OS - v16 Gemini Live (Final)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v64 Full Suite
+    name: Build v16 Gemini Live
     runs-on: ubuntu-latest
 
     steps:
@@ -34,7 +34,7 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
-      - name: Install LVGL 8.3.11
+      - name: Install libraries (LVGL 8.3.11 + WebSockets + ArduinoJson)
         shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
@@ -42,18 +42,17 @@ jobs:
             cp -r Arduino_Libraries/* ~/Arduino/libraries/ 2>/dev/null || true
           fi
           arduino-cli lib install "lvgl"@8.3.11
+          arduino-cli lib install "WebSockets"@2.5.2
+          arduino-cli lib install "ArduinoJson"@7.0.4
 
           cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
           #ifndef LV_CONF_H
           #define LV_CONF_H
-
           #define LV_COLOR_DEPTH 16
           #define LV_COLOR_16_SWAP 1
           #define LV_MEM_CUSTOM 0
           #define LV_MEM_SIZE (128U * 1024U)
-
           #define LV_TICK_CUSTOM 0
-
           #define LV_FONT_MONTSERRAT_12 1
           #define LV_FONT_MONTSERRAT_14 1
           #define LV_FONT_MONTSERRAT_16 1
@@ -61,55 +60,418 @@ jobs:
           #define LV_FONT_MONTSERRAT_20 1
           #define LV_FONT_MONTSERRAT_28 1
           #define LV_FONT_DEFAULT &lv_font_montserrat_20
-
           #define LV_USE_DEMO_WIDGETS 0
           #define LV_USE_DEMO_MUSIC 0
           #define LV_USE_DEMO_BENCHMARK 0
           #define LV_USE_DEMO_STRESS 0
-
           #define LV_USE_LOG 0
-          #define LV_USE_ASSERT_NULL 0
-          #define LV_USE_ASSERT_MALLOC 0
-          #define LV_USE_ASSERT_STYLE 0
-          #define LV_USE_ASSERT_MEM_INTEGRITY 0
-          #define LV_USE_ASSERT_OBJ 0
-
           #endif
           EOF
           sed -i 's/^[ \t]*//' ~/Arduino/libraries/lv_conf.h
 
-      - name: Inject Gemini OS v64 Full Suite Sketch
+      - name: Copy 08_Audio_Test as base & Patch
         shell: bash
         run: |
-          python3 -c "import base64; open('Examples/Arduino/08_Audio_Test/08_Audio_Test.ino', 'wb').write(base64.b64decode('I2luY2x1ZGUgPEFyZHVpbm8uaD4KI2luY2x1ZGUgPFdpRmkuaD4KI2luY2x1ZGUgPHRpbWUuaD4KI2luY2x1ZGUgPFdpRmlDbGllbnQuaD4KCmV4dGVybiAiQyIgewojaW5jbHVkZSAiaTJjX2JzcC5oIgojaW5jbHVkZSAibHZnbF9wb3J0LmgiCn0KI2luY2x1ZGUgPGx2Z2wuaD4KCiNkZWZpbmUgTENEX0JMICAgIDQyCiNkZWZpbmUgQk9PVF9CVE4gIDAKI2RlZmluZSBQV1JfQlROICAgMTYKCmNvbnN0IGNoYXIqIHNzaWQgICAgID0gIlRQLUxpbmtfMi40R185MzE4X0d1ZXN0IjsKY29uc3QgY2hhciogcGFzc3dvcmQgPSAicmV2ZWxpb24iOwoKLy8gLS0tLS0tLS0tLSBVSSBXSURHRVQgSEFORExFUyAtLS0tLS0tLS0tCmx2X29ial90ICpsYmxfdGl0bGUgICAgICA9IE5VTEw7Cmx2X29ial90ICpsYmxfY2xvY2sgICAgICA9IE5VTEw7Cmx2X29ial90ICpsYmxfZGF0ZSAgICAgICA9IE5VTEw7Cmx2X29ial90ICpsYmxfdG91Y2hfeHkgICA9IE5VTEw7Cmx2X29ial90ICpsYmxfdG91Y2hfc3QgICA9IE5VTEw7Cmx2X29ial90ICpsYmxfYm9vdCAgICAgICA9IE5VTEw7Cmx2X29ial90ICpsYmxfcHdyICAgICAgICA9IE5VTEw7Cmx2X29ial90ICpsYmxfd2lmaSAgICAgICA9IE5VTEw7Cmx2X29ial90ICpsYmxfcGluZyAgICAgICA9IE5VTEw7Cmx2X29ial90ICpsYmxfbWljX3N0YXR1cyA9IE5VTEw7Cmx2X29ial90ICpsYmxfbWljX3BlYWsgICA9IE5VTEw7Cmx2X29ial90ICpiYXJfbWljX2xldmVsICA9IE5VTEw7Cmx2X29ial90ICpidG5fc3BrX3Rlc3QgICA9IE5VTEw7Cmx2X29ial90ICp0b3VjaF9kb3QgICAgICA9IE5VTEw7CgovLyAtLS0tLS0tLS0tIFNUQVRFIC0tLS0tLS0tLS0Kdm9sYXRpbGUgYm9vbCBnX2Jvb3RfcHJlc3NlZCA9IGZhbHNlOwp2b2xhdGlsZSBib29sIGdfcHdyX3ByZXNzZWQgID0gZmFsc2U7CnZvbGF0aWxlIGludCAgZ19taWNfcGVhayAgICAgPSAwOwp2b2xhdGlsZSBpbnQgIGdfbWljX2xldmVsICAgID0gMDsKdm9sYXRpbGUgYm9vbCBnX21pY19hY3RpdmUgICA9IGZhbHNlOwoKY2hhciBnX2Nsb2NrX3N0clsxNl0gPSAiLS06LS06LS0iOwpjaGFyIGdfZGF0ZV9zdHJbMzJdICA9ICItLSAtLS0gLS0tLSI7CmNoYXIgZ193aWZpX3N0cls2NF0gID0gIldpRmk6IGNvbmVjdGFyZS4uLiI7CmNoYXIgZ19waW5nX3N0cls0OF0gID0gIkludGVybmV0OiAtLSI7Cgpib29sIGxhc3RfYm9vdF9zdGF0ZSA9IEhJR0g7CmJvb2wgbGFzdF9wd3Jfc3RhdGUgID0gSElHSDsKCnVuc2lnbmVkIGxvbmcgbGFzdF9ib290X2NoYW5nZSA9IDA7CnVuc2lnbmVkIGxvbmcgbGFzdF9wd3JfY2hhbmdlICA9IDA7CmNvbnN0IHVuc2lnbmVkIGxvbmcgREVCT1VOQ0VfTVMgPSA1MDsKCi8vIC0tLS0tLS0tLS0gU1BFQUtFUiBURVNUIENBTExCQUNLIC0tLS0tLS0tLS0Kc3RhdGljIHZvaWQgc3BrX2J0bl9ldmVudF9jYihsdl9ldmVudF90ICplKSB7CiAgICBsdl9ldmVudF9jb2RlX3QgY29kZSA9IGx2X2V2ZW50X2dldF9jb2RlKGUpOwogICAgaWYgKGNvZGUgPT0gTFZfRVZFTlRfQ0xJQ0tFRCkgewogICAgICAgIFNlcmlhbC5wcmludGxuKCJbU1BLXSBUZXN0IFNvdW5kIFRyaWdnZXJlZCBmcm9tIFVJIik7CiAgICB9Cn0KCi8vIC0tLS0tLS0tLS0gVE9VQ0ggRVZFTlQgQ0FMTEJBQ0sgLS0tLS0tLS0tLQpzdGF0aWMgdm9pZCB0b3VjaF9ldmVudF9jYihsdl9ldmVudF90ICplKSB7CiAgICBsdl9ldmVudF9jb2RlX3QgY29kZSA9IGx2X2V2ZW50X2dldF9jb2RlKGUpOwogICAgbHZfaW5kZXZfdCAqaW5kZXYgPSBsdl9pbmRldl9nZXRfYWN0KCk7CiAgICBpZiAoIWluZGV2IHx8ICFsYmxfdG91Y2hfeHkgfHwgIWxibF90b3VjaF9zdCkgcmV0dXJuOwogICAgbHZfcG9pbnRfdCBwOwogICAgbHZfaW5kZXZfZ2V0X3BvaW50KGluZGV2LCAmcCk7CiAgICBjaGFyIGJ1Zls0MF07CiAgICBzbnByaW50ZihidWYsIHNpemVvZihidWYpLCAiWDolZCAgWTolZCIsIHAueCwgcC55KTsKICAgIGx2X2xhYmVsX3NldF90ZXh0KGxibF90b3VjaF94eSwgYnVmKTsKICAgIGlmICh0b3VjaF9kb3QpIGx2X29ial9zZXRfcG9zKHRvdWNoX2RvdCwgcC54IC0gMTAsIHAueSAtIDEwKTsKCiAgICBpZiAoY29kZSA9PSBMVl9FVkVOVF9QUkVTU0VEKSB7CiAgICAgICAgbHZfbGFiZWxfc2V0X3RleHQobGJsX3RvdWNoX3N0LCAiQVBBU0FUIik7CiAgICAgICAgbHZfb2JqX3NldF9zdHlsZV90ZXh0X2NvbG9yKGxibF90b3VjaF9zdCwgbHZfY29sb3JfaGV4KDB4RkYwMDAwKSwgMCk7CiAgICAgICAgaWYgKHRvdWNoX2RvdCkgbHZfb2JqX3NldF9zdHlsZV9iZ19jb2xvcih0b3VjaF9kb3QsIGx2X2NvbG9yX2hleCgweEZGMDAwMCksIDApOwogICAgfSBlbHNlIGlmIChjb2RlID09IExWX0VWRU5UX1JFTEVBU0VEKSB7CiAgICAgICAgbHZfbGFiZWxfc2V0X3RleHQobGJsX3RvdWNoX3N0LCAiRWxpYmVyYXQiKTsKICAgICAgICBsdl9vYmpfc2V0X3N0eWxlX3RleHRfY29sb3IobGJsX3RvdWNoX3N0LCBsdl9jb2xvcl9oZXgoMHgwMEFBMDApLCAwKTsKICAgICAgICBpZiAodG91Y2hfZG90KSBsdl9vYmpfc2V0X3N0eWxlX2JnX2NvbG9yKHRvdWNoX2RvdCwgbHZfY29sb3JfaGV4KDB4MDBBQTAwKSwgMCk7CiAgICB9Cn0KCi8vIC0tLS0tLS0tLS0gVUkgVVBEQVRFIENBTExCQUNLIC0tLS0tLS0tLS0Kc3RhdGljIHZvaWQgdWlfdXBkYXRlX2NiKHZvaWQgKmFyZykgewogICAgYm9vbCBiID0gZ19ib290X3ByZXNzZWQ7CiAgICBib29sIHAgPSBnX3B3cl9wcmVzc2VkOwogICAgYm9vbCBtaWNfb24gPSBnX21pY19hY3RpdmU7CgogICAgaWYgKGxibF9ib290KSB7CiAgICAgICAgbHZfbGFiZWxfc2V0X3RleHQobGJsX2Jvb3QsIGIgPyAiQk9PVDogQVBBU0FUIiA6ICJCT09UOiBsaWJlciIpOwogICAgICAgIGx2X29ial9zZXRfc3R5bGVfdGV4dF9jb2xvcihsYmxfYm9vdCwgYiA/IGx2X2NvbG9yX2hleCgweEZGMDAwMCkgOiBsdl9jb2xvcl9oZXgoMHhGRkZGRkYpLCAwKTsKICAgIH0KICAgIGlmIChsYmxfcHdyKSB7CiAgICAgICAgbHZfbGFiZWxfc2V0X3RleHQobGJsX3B3ciwgcCA/ICJQV1I6IEFQQVNBVCIgOiAiUFdSOiBsaWJlciIpOwogICAgICAgIGx2X29ial9zZXRfc3R5bGVfdGV4dF9jb2xvcihsYmxfcHdyLCBwID8gbHZfY29sb3JfaGV4KDB4RkYwMDAwKSA6IGx2X2NvbG9yX2hleCgweEZGRkZGRiksIDApOwogICAgfQogICAgaWYgKGxibF9jbG9jaykgbHZfbGFiZWxfc2V0X3RleHQobGJsX2Nsb2NrLCBnX2Nsb2NrX3N0cik7CiAgICBpZiAobGJsX2RhdGUpICBsdl9sYWJlbF9zZXRfdGV4dChsYmxfZGF0ZSwgZ19kYXRlX3N0cik7CiAgICBpZiAobGJsX3dpZmkpICBsdl9sYWJlbF9zZXRfdGV4dChsYmxfd2lmaSwgZ193aWZpX3N0cik7CiAgICBpZiAobGJsX3BpbmcpICBsdl9sYWJlbF9zZXRfdGV4dChsYmxfcGluZywgZ19waW5nX3N0cik7CgogICAgaWYgKGxibF9taWNfc3RhdHVzKSB7CiAgICAgICAgbHZfbGFiZWxfc2V0X3RleHQobGJsX21pY19zdGF0dXMsIG1pY19vbiA/ICJNSUM6IEFDVElWIiA6ICJNSUM6IE1VVCIpOwogICAgICAgIGx2X29ial9zZXRfc3R5bGVfdGV4dF9jb2xvcihsYmxfbWljX3N0YXR1cywKICAgICAgICAgICAgbWljX29uID8gbHZfY29sb3JfaGV4KDB4MjJDNTVFKSA6IGx2X2NvbG9yX2hleCgweEVGNDQ0NCksIDApOwogICAgfQogICAgaWYgKGxibF9taWNfcGVhaykgewogICAgICAgIGNoYXIgcGJ1ZlszMl07IHNucHJpbnRmKHBidWYsIHNpemVvZihwYnVmKSwgIlBlYWs6ICVkIiwgZ19taWNfcGVhayk7CiAgICAgICAgbHZfbGFiZWxfc2V0X3RleHQobGJsX21pY19wZWFrLCBwYnVmKTsKICAgIH0KICAgIGlmIChiYXJfbWljX2xldmVsKSB7CiAgICAgICAgbHZfYmFyX3NldF92YWx1ZShiYXJfbWljX2xldmVsLCBnX21pY19sZXZlbCwgTFZfQU5JTV9PRkYpOwogICAgICAgIGx2X29ial9zZXRfc3R5bGVfYmdfY29sb3IoYmFyX21pY19sZXZlbCwKICAgICAgICAgICAgbWljX29uID8gbHZfY29sb3JfaGV4KDB4MjJDNTVFKSA6IGx2X2NvbG9yX2hleCgweEVGNDQ0NCksCiAgICAgICAgICAgIExWX1BBUlRfSU5ESUNBVE9SKTsKICAgIH0KfQoKdm9pZCBidWlsZF91aSgpIHsKICAgIHBpbk1vZGUoTENEX0JMLCBPVVRQVVQpOwogICAgZGlnaXRhbFdyaXRlKExDRF9CTCwgTE9XKTsgLy8gQmFja2xpZ2h0IEFjdGl2ZQoKICAgIGx2X29ial90ICpzY3IgPSBsdl9zY3JfYWN0KCk7CiAgICBpZiAoIXNjcikgcmV0dXJuOwoKICAgIGx2X29ial9jbGVhbihzY3IpOwogICAgbHZfb2JqX3NldF9zdHlsZV9iZ19jb2xvcihzY3IsIGx2X2NvbG9yX2hleCgweDBGMTcyQSksIDApOwogICAgbHZfb2JqX3NldF9zdHlsZV9iZ19vcGEoc2NyLCBMVl9PUEFfQ09WRVIsIDApOwoKICAgIGxibF90aXRsZSA9IGx2X2xhYmVsX2NyZWF0ZShzY3IpOwogICAgbHZfbGFiZWxfc2V0X3RleHQobGJsX3RpdGxlLCAiR2VtaW5pIE9TIHY2NCBTdWl0ZSIpOwogICAgbHZfb2JqX3NldF9zdHlsZV90ZXh0X2NvbG9yKGxibF90aXRsZSwgbHZfY29sb3JfaGV4KDB4MzhCREY4KSwgMCk7CiAgICBsdl9vYmpfc2V0X3N0eWxlX3RleHRfZm9udChsYmxfdGl0bGUsICZsdl9mb250X21vbnRzZXJyYXRfMTgsIDApOwogICAgbHZfb2JqX2FsaWduKGxibF90aXRsZSwgTFZfQUxJR05fVE9QX01JRCwgMCwgOCk7CgogICAgbGJsX2Nsb2NrID0gbHZfbGFiZWxfY3JlYXRlKHNjcik7CiAgICBsdl9sYWJlbF9zZXRfdGV4dChsYmxfY2xvY2ssICItLTotLTotLSIpOwogICAgbHZfb2JqX3NldF9zdHlsZV90ZXh0X2NvbG9yKGxibF9jbG9jaywgbHZfY29sb3JfaGV4KDB4RkZGRkZGKSwgMCk7CiAgICBsdl9vYmpfc2V0X3N0eWxlX3RleHRfZm9udChsYmxfY2xvY2ssICZsdl9mb250X21vbnRzZXJyYXRfMjgsIDApOwogICAgbHZfb2JqX2FsaWduKGxibF9jbG9jaywgTFZfQUxJR05fVE9QX01JRCwgMCwgMzIpOwoKICAgIGxibF9kYXRlID0gbHZfbGFiZWxfY3JlYXRlKHNjcik7CiAgICBsdl9sYWJlbF9zZXRfdGV4dChsYmxfZGF0ZSwgIi0tIC0tLSAtLS0tIik7CiAgICBsdl9vYmpfc2V0X3N0eWxlX3RleHRfY29sb3IobGJsX2RhdGUsIGx2X2NvbG9yX2hleCgweDk0QTNCOCksIDApOwogICAgbHZfb2JqX3NldF9zdHlsZV90ZXh0X2ZvbnQobGJsX2RhdGUsICZsdl9mb250X21vbnRzZXJyYXRfMTIsIDApOwogICAgbHZfb2JqX2FsaWduKGxibF9kYXRlLCBMVl9BTElHTl9UT1BfTUlELCAwLCA2OCk7CgogICAgLy8gTUlDIEJPWAogICAgbHZfb2JqX3QgKm1pY19ib3ggPSBsdl9vYmpfY3JlYXRlKHNjcik7CiAgICBsdl9vYmpfc2V0X3NpemUobWljX2JveCwgMTUwLCAxMDApOwogICAgbHZfb2JqX2FsaWduKG1pY19ib3gsIExWX0FMSUdOX1RPUF9NSUQsIDAsIDkwKTsKICAgIGx2X29ial9zZXRfc3R5bGVfYmdfY29sb3IobWljX2JveCwgbHZfY29sb3JfaGV4KDB4MUUyOTNCKSwgMCk7CiAgICBsdl9vYmpfc2V0X3N0eWxlX2JvcmRlcl93aWR0aChtaWNfYm94LCAyLCAwKTsKICAgIGx2X29ial9zZXRfc3R5bGVfYm9yZGVyX2NvbG9yKG1pY19ib3gsIGx2X2NvbG9yX2hleCgweDQ3NTU2OSksIDApOwogICAgbHZfb2JqX3NldF9zdHlsZV9yYWRpdXMobWljX2JveCwgOCwgMCk7CiAgICBsdl9vYmpfY2xlYXJfZmxhZyhtaWNfYm94LCBMVl9PQkpfRkxBR19TQ1JPTExBQkxFKTsKCiAgICBsYmxfbWljX3N0YXR1cyA9IGx2X2xhYmVsX2NyZWF0ZShtaWNfYm94KTsKICAgIGx2X2xhYmVsX3NldF90ZXh0KGxibF9taWNfc3RhdHVzLCAiTUlDOiBNVVQiKTsKICAgIGx2X29ial9zZXRfc3R5bGVfdGV4dF9jb2xvcihsYmxfbWljX3N0YXR1cywgbHZfY29sb3JfaGV4KDB4RUY0NDQ0KSwgMCk7CiAgICBsdl9vYmpfc2V0X3N0eWxlX3RleHRfZm9udChsYmxfbWljX3N0YXR1cywgJmx2X2ZvbnRfbW9udHNlcnJhdF8xNiwgMCk7CiAgICBsdl9vYmpfYWxpZ24obGJsX21pY19zdGF0dXMsIExWX0FMSUdOX1RPUF9NSUQsIDAsIDQpOwoKICAgIGJhcl9taWNfbGV2ZWwgPSBsdl9iYXJfY3JlYXRlKG1pY19ib3gpOwogICAgbHZfb2JqX3NldF9zaXplKGJhcl9taWNfbGV2ZWwsIDEyMCwgMTIpOwogICAgbHZfb2JqX2FsaWduKGJhcl9taWNfbGV2ZWwsIExWX0FMSUdOX1RPUF9NSUQsIDAsIDMwKTsKICAgIGx2X2Jhcl9zZXRfcmFuZ2UoYmFyX21pY19sZXZlbCwgMCwgMTAwKTsKICAgIGx2X29ial9zZXRfc3R5bGVfYmdfY29sb3IoYmFyX21pY19sZXZlbCwgbHZfY29sb3JfaGV4KDB4MEYxNzJBKSwgTFZfUEFSVF9NQUlOKTsKICAgIGx2X29ial9zZXRfc3R5bGVfYmdfY29sb3IoYmFyX21pY19sZXZlbCwgbHZfY29sb3JfaGV4KDB4RUY0NDQ0KSwgTFZfUEFSVF9JTkRJQ0FUT1IpOwoKICAgIGxibF9taWNfcGVhayA9IGx2X2xhYmVsX2NyZWF0ZShtaWNfYm94KTsKICAgIGx2X2xhYmVsX3NldF90ZXh0KGxibF9taWNfcGVhaywgIlBlYWs6IDAiKTsKICAgIGx2X29ial9zZXRfc3R5bGVfdGV4dF9jb2xvcihsYmxfbWljX3BlYWssIGx2X2NvbG9yX2hleCgweEZGRkZGRiksIDApOwogICAgbHZfb2JqX3NldF9zdHlsZV90ZXh0X2ZvbnQobGJsX21pY19wZWFrLCAmbHZfZm9udF9tb250c2VycmF0XzE0LCAwKTsKICAgIGx2X29ial9hbGlnbihsYmxfbWljX3BlYWssIExWX0FMSUdOX1RPUF9NSUQsIDAsIDUyKTsKCiAgICAvLyBTUEVBS0VSIFRFU1QgQlVUVE9OCiAgICBidG5fc3BrX3Rlc3QgPSBsdl9idG5fY3JlYXRlKHNjcik7CiAgICBsdl9vYmpfc2V0X3NpemUoYnRuX3Nwa190ZXN0LCAxNTAsIDM2KTsKICAgIGx2X29ial9hbGlnbihidG5fc3BrX3Rlc3QsIExWX0FMSUdOX1RPUF9NSUQsIDAsIDIwMCk7CiAgICBsdl9vYmpfc2V0X3N0eWxlX2JnX2NvbG9yKGJ0bl9zcGtfdGVzdCwgbHZfY29sb3JfaGV4KDB4MjU2M0VCKSwgMCk7CiAgICBsdl9vYmpfYWRkX2V2ZW50X2NiKGJ0bl9zcGtfdGVzdCwgc3BrX2J0bl9ldmVudF9jYiwgTFZfRVZFTlRfQ0xJQ0tFRCwgTlVMTCk7CgogICAgbHZfb2JqX3QgKmxibF9idG4gPSBsdl9sYWJlbF9jcmVhdGUoYnRuX3Nwa190ZXN0KTsKICAgIGx2X2xhYmVsX3NldF90ZXh0KGxibF9idG4sICJURVNUIERJRlVaT1IiKTsKICAgIGx2X29ial9zZXRfc3R5bGVfdGV4dF9jb2xvcihsYmxfYnRuLCBsdl9jb2xvcl9oZXgoMHhGRkZGRkYpLCAwKTsKICAgIGx2X29ial9zZXRfc3R5bGVfdGV4dF9mb250KGxibF9idG4sICZsdl9mb250X21vbnRzZXJyYXRfMTQsIDApOwogICAgbHZfb2JqX2NlbnRlcihsYmxfYnRuKTsKCiAgICAvLyBUT1VDSCAmIEJVVFRPTiBMQUJFTFMKICAgIGxibF90b3VjaF94eSA9IGx2X2xhYmVsX2NyZWF0ZShzY3IpOwogICAgbHZfbGFiZWxfc2V0X3RleHQobGJsX3RvdWNoX3h5LCAiWDotLSAgWTotLSIpOwogICAgbHZfb2JqX3NldF9zdHlsZV90ZXh0X2NvbG9yKGxibF90b3VjaF94eSwgbHZfY29sb3JfaGV4KDB4RkZGRkZGKSwgMCk7CiAgICBsdl9vYmpfc2V0X3N0eWxlX3RleHRfZm9udChsYmxfdG91Y2hfeHksICZsdl9mb250X21vbnRzZXJyYXRfMTQsIDApOwogICAgbHZfb2JqX2FsaWduKGxibF90b3VjaF94eSwgTFZfQUxJR05fVE9QX01JRCwgMCwgMjQ4KTsKCiAgICBsYmxfdG91Y2hfc3QgPSBsdl9sYWJlbF9jcmVhdGUoc2NyKTsKICAgIGx2X2xhYmVsX3NldF90ZXh0KGxibF90b3VjaF9zdCwgIkVsaWJlcmF0Iik7CiAgICBsdl9vYmpfc2V0X3N0eWxlX3RleHRfY29sb3IobGJsX3RvdWNoX3N0LCBsdl9jb2xvcl9oZXgoMHgwMEFBMDApLCAwKTsKICAgIGx2X29ial9zZXRfc3R5bGVfdGV4dF9mb250KGxibF90b3VjaF9zdCwgJmx2X2ZvbnRfbW9udHNlcnJhdF8xMiwgMCk7CiAgICBsdl9vYmpfYWxpZ24obGJsX3RvdWNoX3N0LCBMVl9BTElHTl9UT1BfTUlELCAwLCAyNjgpOwoKICAgIGxibF9ib290ID0gbHZfbGFiZWxfY3JlYXRlKHNjcik7CiAgICBsdl9sYWJlbF9zZXRfdGV4dChsYmxfYm9vdCwgIkJPT1Q6IGxpYmVyIik7CiAgICBsdl9vYmpfc2V0X3N0eWxlX3RleHRfY29sb3IobGJsX2Jvb3QsIGx2X2NvbG9yX2hleCgweEZGRkZGRiksIDApOwogICAgbHZfb2JqX3NldF9zdHlsZV90ZXh0X2ZvbnQobGJsX2Jvb3QsICZsdl9mb250X21vbnRzZXJyYXRfMTQsIDApOwogICAgbHZfb2JqX2FsaWduKGxibF9ib290LCBMVl9BTElHTl9UT1BfTUlELCAwLCAyOTApOwoKICAgIGxibF9wd3IgPSBsdl9sYWJlbF9jcmVhdGUoc2NyKTsKICAgIGx2X2xhYmVsX3NldF90ZXh0KGxibF9wd3IsICJQV1I6IGxpYmVyIik7CiAgICBsdl9vYmpfc2V0X3N0eWxlX3RleHRfY29sb3IobGJsX3B3ciwgbHZfY29sb3JfaGV4KDB4RkZGRkZGKSwgMCk7CiAgICBsdl9vYmpfc2V0X3N0eWxlX3RleHRfZm9udChsYmxfcHdyLCAmbHZfZm9udF9tb250c2VycmF0XzE0LCAwKTsKICAgIGx2X29ial9hbGlnbihsYmxfcHdyLCBMVl9BTElHTl9UT1BfTUlELCAwLCAzMTIpOwoKICAgIGxibF93aWZpID0gbHZfbGFiZWxfY3JlYXRlKHNjcik7CiAgICBsdl9sYWJlbF9zZXRfdGV4dChsYmxfd2lmaSwgIldpRmk6IGNvbmVjdGFyZS4uLiIpOwogICAgbHZfb2JqX3NldF9zdHlsZV90ZXh0X2NvbG9yKGxibF93aWZpLCBsdl9jb2xvcl9oZXgoMHg2NDc0OEIpLCAwKTsKICAgIGx2X29ial9zZXRfc3R5bGVfdGV4dF9mb250KGxibF93aWZpLCAmbHZfZm9udF9tb250c2VycmF0XzEyLCAwKTsKICAgIGx2X29ial9hbGlnbihsYmxfd2lmaSwgTFZfQUxJR05fVE9QX01JRCwgMCwgMzQwKTsKCiAgICBsYmxfcGluZyA9IGx2X2xhYmVsX2NyZWF0ZShzY3IpOwogICAgbHZfbGFiZWxfc2V0X3RleHQobGJsX3BpbmcsICJJbnRlcm5ldDogLS0iKTsKICAgIGx2X29ial9zZXRfc3R5bGVfdGV4dF9jb2xvcihsYmxfcGluZywgbHZfY29sb3JfaGV4KDB4NjQ3NDhCKSwgMCk7CiAgICBsdl9vYmpfc2V0X3N0eWxlX3RleHRfZm9udChsYmxfcGluZywgJmx2X2ZvbnRfbW9udHNlcnJhdF8xMiwgMCk7CiAgICBsdl9vYmpfYWxpZ24obGJsX3BpbmcsIExWX0FMSUdOX1RPUF9NSUQsIDAsIDM2MCk7CgogICAgdG91Y2hfZG90ID0gbHZfb2JqX2NyZWF0ZShzY3IpOwogICAgbHZfb2JqX3NldF9zaXplKHRvdWNoX2RvdCwgMjAsIDIwKTsKICAgIGx2X29ial9zZXRfc3R5bGVfcmFkaXVzKHRvdWNoX2RvdCwgTFZfUkFESVVTX0NJUkNMRSwgMCk7CiAgICBsdl9vYmpfc2V0X3N0eWxlX2JnX2NvbG9yKHRvdWNoX2RvdCwgbHZfY29sb3JfaGV4KDB4MDBBQTAwKSwgMCk7CiAgICBsdl9vYmpfc2V0X3N0eWxlX2JnX29wYSh0b3VjaF9kb3QsIExWX09QQV84MCwgMCk7CiAgICBsdl9vYmpfc2V0X3N0eWxlX2JvcmRlcl93aWR0aCh0b3VjaF9kb3QsIDAsIDApOwogICAgbHZfb2JqX3NldF9wb3ModG91Y2hfZG90LCAxMCwgMTApOwoKICAgIGx2X29ial9hZGRfZXZlbnRfY2Ioc2NyLCB0b3VjaF9ldmVudF9jYiwgTFZfRVZFTlRfUFJFU1NFRCwgIE5VTEwpOwogICAgbHZfb2JqX2FkZF9ldmVudF9jYihzY3IsIHRvdWNoX2V2ZW50X2NiLCBMVl9FVkVOVF9SRUxFQVNFRCwgTlVMTCk7CgogICAgU2VyaWFsLnByaW50bG4oIltVSV0gQnVpbHQgRnVsbCB2NjQgU3VpdGUiKTsKfQoKdm9pZCBzZXR1cCgpIHsKICAgIFNlcmlhbC5iZWdpbigxMTUyMDApOwogICAgZGVsYXkoNTAwKTsKICAgIFNlcmlhbC5wcmludGxuKCJcbltCT09UXSBHZW1pbmkgT1MgdjY0IEZ1bGwgU3VpdGUiKTsKCiAgICBwaW5Nb2RlKEJPT1RfQlROLCBJTlBVVF9QVUxMVVApOwogICAgcGluTW9kZShQV1JfQlROLCBJTlBVVF9QVUxMVVApOwoKICAgIC8vIDEuIEluaXRpYWxpemUgQm9hcmQgSTJDICYgTFZHTAogICAgYnNwX2kyY19pbml0KCk7CiAgICBkZWxheSg1MCk7CiAgICBsdmdsX3BvcnRfaW5pdCgpOwogICAgZGVsYXkoMjAwKTsKCiAgICBidWlsZF91aSgpOwoKICAgIC8vIDIuIFdpLUZpIFN0YXJ0CiAgICBXaUZpLm1vZGUoV0lGSV9TVEEpOwogICAgV2lGaS5zZXRTbGVlcChmYWxzZSk7CiAgICBXaUZpLmJlZ2luKHNzaWQsIHBhc3N3b3JkKTsKICAgIFNlcmlhbC5wcmludGxuKCJbV2lGaV0gU3RhcnRpbmcuLi4iKTsKfQoKdm9pZCBsb29wKCkgewogICAgLy8gTFZHTCBUaW1lcgogICAgbHZfdGltZXJfaGFuZGxlcigpOwoKICAgIC8vIC0tLS0tLS0tLS0gQlVUT0FORSBjdSBkZWJvdW5jZSAtLS0tLS0tLS0tCiAgICBib29sIGJfcmF3ID0gZGlnaXRhbFJlYWQoQk9PVF9CVE4pOwogICAgYm9vbCBwX3JhdyA9IGRpZ2l0YWxSZWFkKFBXUl9CVE4pOwoKICAgIGlmIChiX3JhdyAhPSBsYXN0X2Jvb3Rfc3RhdGUpIHsKICAgICAgICB1bnNpZ25lZCBsb25nIG5vdyA9IG1pbGxpcygpOwogICAgICAgIGlmIChub3cgLSBsYXN0X2Jvb3RfY2hhbmdlID4gREVCT1VOQ0VfTVMpIHsKICAgICAgICAgICAgbGFzdF9ib290X2NoYW5nZSA9IG5vdzsKICAgICAgICAgICAgbGFzdF9ib290X3N0YXRlID0gYl9yYXc7CiAgICAgICAgICAgIGdfYm9vdF9wcmVzc2VkID0gKGJfcmF3ID09IExPVyk7CiAgICAgICAgICAgIFNlcmlhbC5wcmludGYoIltCVE5dIEJPT1Q6ICVzXG4iLCBnX2Jvb3RfcHJlc3NlZCA/ICJBUEFTQVQiIDogIkVMSUJFUkFUIik7CiAgICAgICAgICAgIGx2X2FzeW5jX2NhbGwodWlfdXBkYXRlX2NiLCBOVUxMKTsKICAgICAgICB9CiAgICB9CgogICAgaWYgKHBfcmF3ICE9IGxhc3RfcHdyX3N0YXRlKSB7CiAgICAgICAgdW5zaWduZWQgbG9uZyBub3cgPSBtaWxsaXMoKTsKICAgICAgICBpZiAobm93IC0gbGFzdF9wd3JfY2hhbmdlID4gREVCT1VOQ0VfTVMpIHsKICAgICAgICAgICAgbGFzdF9wd3JfY2hhbmdlID0gbm93OwogICAgICAgICAgICBsYXN0X3B3cl9zdGF0ZSA9IHBfcmF3OwogICAgICAgICAgICBnX3B3cl9wcmVzc2VkID0gKHBfcmF3ID09IExPVyk7CiAgICAgICAgICAgIFNlcmlhbC5wcmludGYoIltCVE5dIFBXUjogJXNcbiIsIGdfcHdyX3ByZXNzZWQgPyAiQVBBU0FUIiA6ICJFTElCRVJBVCIpOwogICAgICAgICAgICBsdl9hc3luY19jYWxsKHVpX3VwZGF0ZV9jYiwgTlVMTCk7CiAgICAgICAgfQogICAgfQoKICAgIC8vIC0tLS0tLS0tLS0gV0lGSSAmIE5UUCAmIFBJTkcgLS0tLS0tLS0tLQogICAgd2xfc3RhdHVzX3Qgd3N0YXQgPSBXaUZpLnN0YXR1cygpOwogICAgc3RhdGljIGJvb2wgbnRwX2RvbmUgPSBmYWxzZTsKICAgIGlmICh3c3RhdCA9PSBXTF9DT05ORUNURUQpIHsKICAgICAgICBzdGF0aWMgYm9vbCB3YXNfY29ubmVjdGVkID0gZmFsc2U7CiAgICAgICAgaWYgKCF3YXNfY29ubmVjdGVkKSB7CiAgICAgICAgICAgIHdhc19jb25uZWN0ZWQgPSB0cnVlOwogICAgICAgICAgICBzbnByaW50ZihnX3dpZmlfc3RyLCBzaXplb2YoZ193aWZpX3N0ciksICJXaUZpOiAlcyIsIFdpRmkubG9jYWxJUCgpLnRvU3RyaW5nKCkuY19zdHIoKSk7CiAgICAgICAgICAgIGx2X2FzeW5jX2NhbGwodWlfdXBkYXRlX2NiLCBOVUxMKTsKICAgICAgICB9CiAgICAgICAgaWYgKCFudHBfZG9uZSkgewogICAgICAgICAgICBudHBfZG9uZSA9IHRydWU7CiAgICAgICAgICAgIGNvbmZpZ1R6VGltZSgiRUVULTJFRVNULE0zLjUuMC8zLE0xMC41LjAvNCIsICJwb29sLm50cC5vcmciLCAidGltZS5nb29nbGUuY29tIik7CiAgICAgICAgfQogICAgICAgIHN0YXRpYyB1bnNpZ25lZCBsb25nIGxhc3RfY2xvY2sgPSAwOwogICAgICAgIGlmIChtaWxsaXMoKSAtIGxhc3RfY2xvY2sgPiAxMDAwKSB7CiAgICAgICAgICAgIGxhc3RfY2xvY2sgPSBtaWxsaXMoKTsKICAgICAgICAgICAgc3RydWN0IHRtIHRpOwogICAgICAgICAgICBpZiAoZ2V0TG9jYWxUaW1lKCZ0aSwgNTApKSB7CiAgICAgICAgICAgICAgICBzdHJmdGltZShnX2Nsb2NrX3N0ciwgc2l6ZW9mKGdfY2xvY2tfc3RyKSwgIiVIOiVNOiVTIiwgJnRpKTsKICAgICAgICAgICAgICAgIHN0cmZ0aW1lKGdfZGF0ZV9zdHIsIHNpemVvZihnX2RhdGVfc3RyKSwgIiVkICViICVZIiwgJnRpKTsKICAgICAgICAgICAgICAgIGx2X2FzeW5jX2NhbGwodWlfdXBkYXRlX2NiLCBOVUxMKTsKICAgICAgICAgICAgfQogICAgICAgIH0KICAgICAgICBzdGF0aWMgdW5zaWduZWQgbG9uZyBsYXN0X3BpbmcgPSAwOwogICAgICAgIGlmIChtaWxsaXMoKSAtIGxhc3RfcGluZyA+IDEwMDAwKSB7CiAgICAgICAgICAgIGxhc3RfcGluZyA9IG1pbGxpcygpOwogICAgICAgICAgICBXaUZpQ2xpZW50IGM7CiAgICAgICAgICAgIHVuc2lnbmVkIGxvbmcgdDAgPSBtaWxsaXMoKTsKICAgICAgICAgICAgYm9vbCBvayA9IGMuY29ubmVjdCgiMS4xLjEuMSIsIDUzLCAyMDAwKTsKICAgICAgICAgICAgdW5zaWduZWQgbG9uZyBsYXQgPSBtaWxsaXMoKSAtIHQwOwogICAgICAgICAgICBjLnN0b3AoKTsKICAgICAgICAgICAgaWYgKG9rKSB7CiAgICAgICAgICAgICAgICBzbnByaW50ZihnX3Bpbmdfc3RyLCBzaXplb2YoZ19waW5nX3N0ciksICJJbnRlcm5ldDogT0sgKCVsdSBtcykiLCBsYXQpOwogICAgICAgICAgICAgICAgbHZfYXN5bmNfY2FsbCh1aV91cGRhdGVfY2IsIE5VTEwpOwogICAgICAgICAgICB9CiAgICAgICAgfQogICAgfQoKICAgIGRlbGF5KDUpOwp9Cg=='))"
-          echo "[OK] Replaced 08_Audio_Test.ino with v64 Full Suite Code"
+          rm -rf sketch
+          cp -r Examples/Arduino/08_Audio_Test sketch
+          cd sketch
+          
+          find . -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.ino" \) \
+            -exec sed -i 's|#include "demos/lv_demos.h"|// #include "demos/lv_demos.h"|g' {} + 2>/dev/null || true
+          find . -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.ino" \) \
+            -exec sed -i 's|lv_demo_widgets();|// lv_demo_widgets();|g' {} + 2>/dev/null || true
+          rm -f 08_Audio_Test.ino
 
-      - name: Patch demo includes
+          python3 - << 'PYEOF'
+          import re, os, glob
+
+          sketch_dir = "."
+          port_path = f"{sketch_dir}/lvgl_port.c"
+          h_path = f"{sketch_dir}/lvgl_port.h"
+
+          with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
+              h_content = f.read()
+          with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
+              c_content = f.read()
+
+          if "lvgl_port_lock" not in h_content:
+              if "example_lvgl_lock" in c_content:
+                  c_content += """
+          bool lvgl_port_lock(uint32_t timeout_ms) { return example_lvgl_lock(timeout_ms); }
+          void lvgl_port_unlock(void) { example_lvgl_unlock(); }
+          """
+              else:
+                  mux_var = "lvgl_port_mux"
+                  c_content = re.sub(
+                      r'(#include[^\n]+\n)(?![^\n]*#include)',
+                      r'\1\nstatic SemaphoreHandle_t ' + mux_var + ' = NULL;\n',
+                      c_content, count=1, flags=re.DOTALL)
+                  c_content = re.sub(
+                      r'(esp_err_t\s+lvgl_port_init\s*\([^)]*\)\s*\{)',
+                      r'\1\n    ' + mux_var + ' = xSemaphoreCreateMutex();',
+                      c_content, count=1)
+                  c_content += f"""
+          bool lvgl_port_lock(uint32_t timeout_ms) {{
+              if ({mux_var} == NULL) return false;
+              return xSemaphoreTake({mux_var}, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+          }}
+          void lvgl_port_unlock(void) {{
+              if ({mux_var} != NULL) xSemaphoreGive({mux_var});
+          }}
+          """
+              h_content += """
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          bool lvgl_port_lock(uint32_t timeout_ms);
+          void lvgl_port_unlock(void);
+          #ifdef __cplusplus
+          }
+          #endif
+          """
+              with open(h_path, "w", encoding="utf-8") as f:
+                  f.write(h_content)
+              with open(port_path, "w", encoding="utf-8") as f:
+                  f.write(c_content)
+
+          i2c_init_func = "bsp_i2c_init"
+          for hh in glob.glob(f"{sketch_dir}/*.h"):
+              with open(hh, "r", encoding="utf-8", errors="ignore") as f:
+                  h = f.read()
+              for f_name, f_args in re.findall(r'(?:esp_err_t|void|int|bool)\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*;', h):
+                  if "i2c" in f_name.lower() and "init" in f_name.lower() and f_args.strip() in ("", "void"):
+                      i2c_init_func = f_name
+                      break
+
+          with open("i2c_func.txt", "w") as f:
+              f.write(i2c_init_func)
+          PYEOF
+
+      - name: Create secrets.h from GitHub Secrets
         shell: bash
         run: |
-          find Examples/Arduino/08_Audio_Test -type f \( -name "*.c" -o -name "*.h" -o -name "*.ino" -o -name "*.cpp" \) \            -exec sed -i 's|#include "demos/lv_demos.h"|// #include "demos/lv_demos.h"|g' {} + 2>/dev/null || true
-          find Examples/Arduino/08_Audio_Test -type f \( -name "*.c" -o -name "*.h" -o -name "*.ino" -o -name "*.cpp" \) \            -exec sed -i 's|#include <demos/lv_demos.h>|// #include <demos/lv_demos.h>|g' {} + 2>/dev/null || true
-          find Examples/Arduino/08_Audio_Test -type f \( -name "*.c" -o -name "*.h" -o -name "*.ino" -o -name "*.cpp" \) \            -exec sed -i 's|lv_demo_widgets();|// lv_demo_widgets();|g' {} + 2>/dev/null || true
+          echo "#pragma once" > sketch/secrets.h
+          echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
 
-      - name: Compile Full Suite Sketch
+      - name: Write sketch.ino
+        shell: bash
         run: |
-          SKETCH_PATH="Examples/Arduino/08_Audio_Test/08_Audio_Test.ino"
+          I2C_FUNC=$(cat sketch/i2c_func.txt)
+
+          python3 - << PYEOF
+          import textwrap
+
+          i2c_init = "$I2C_FUNC"
+
+          code = textwrap.dedent(r'''
+          #include <Arduino.h>
+          #include <WiFi.h>
+          #include <WebSocketsClient.h>
+          #include <ArduinoJson.h>
+          #include <base64.h>
+
+          #include "secrets.h"
+
+          extern "C" {
+          #include "lvgl_port.h"
+          #include "i2c_bsp.h"
+          #include "src/codec_board/codec_board.h"
+          #include "src/codec_board/codec_init.h"
+          #include "src/tca9554/esp_io_expander_tca9554.h"
+          }
+
+          const char* WIFI_SSID = "TP-Link_2.4G_9318_Guest";
+          const char* WIFI_PASS = "revelion";
+          const char* GEMINI_API_KEY = SECRET_GEMINI_API_KEY;
+
+          esp_codec_dev_handle_t playback = NULL;
+          esp_codec_dev_handle_t record = NULL;
+          esp_io_expander_handle_t io_expander = NULL;
+          WebSocketsClient ws;
+
+          volatile int g_state = 0;
+          volatile int g_rx_kb = 0;
+          volatile int g_tx_kb = 0;
+          volatile int g_peak  = 0;
+          volatile int g_setup_ok = 0;
+
+          lv_obj_t *lbl_state = NULL;
+          lv_obj_t *lbl_rx    = NULL;
+          lv_obj_t *lbl_tx    = NULL;
+          lv_obj_t *lbl_peak  = NULL;
+
+          static int16_t buf_in_stereo[1024];
+          static int16_t buf_mono_24k[512];
+          static int16_t buf_mono_16k[341]; // 512 * 2 / 3
+          static int16_t buf_out_stereo[256];
+
+          void tca9554_init_local() {
+              i2c_master_bus_handle_t bus;
+              ESP_ERROR_CHECK(i2c_master_get_bus_handle(0, &bus));
+              esp_io_expander_new_i2c_tca9554(bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander);
+              esp_io_expander_set_dir(io_expander, IO_EXPANDER_PIN_NUM_7, IO_EXPANDER_OUTPUT);
+              esp_io_expander_set_level(io_expander, IO_EXPANDER_PIN_NUM_7, 1);
+              Serial.println("[TCA] Codec reset released");
+          }
+
+          void audio_init_local() {
+              set_codec_board_type((char*)"S3_LCD_3_49");
+              codec_init_cfg_t cfg = {
+                  .in_mode = CODEC_I2S_MODE_TDM,
+                  .out_mode = CODEC_I2S_MODE_TDM,
+                  .in_use_tdm = false,
+                  .reuse_dev = false,
+              };
+              ESP_ERROR_CHECK(init_codec(&cfg));
+              playback = get_playback_handle();
+              record   = get_record_handle();
+              Serial.println("[AUDIO] Codec initialized");
+          }
+
+          void audio_open_local() {
+              esp_codec_dev_set_out_vol(playback, 100.0);
+              esp_codec_dev_set_in_gain(record, 35.0);
+              esp_codec_dev_sample_info_t fs = {};
+              fs.sample_rate = 24000;
+              fs.channel = 2;
+              fs.bits_per_sample = 16;
+              esp_codec_dev_open(playback, &fs);
+              esp_codec_dev_open(record, &fs);
+              Serial.println("[AUDIO] Opened @24kHz stereo");
+          }
+
+          void wsEvent(WStype_t type, uint8_t* payload, size_t len) {
+              switch (type) {
+                  case WStype_CONNECTED: {
+                      Serial.println("[WS] CONNECTED");
+                      g_state = 2;
+                      JsonDocument doc;
+                      doc["setup"]["model"] = "models/gemini-2.5-flash-native-audio-latest";
+                      doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
+                      doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Kore";
+                      String out;
+                      serializeJson(doc, out);
+                      ws.sendTXT(out);
+                      Serial.printf("[WS] Setup sent.\n");
+                      break;
+                  }
+                  case WStype_DISCONNECTED:
+                      Serial.printf("[WS] DISCONNECTED\n");
+                      g_state = 1;
+                      break;
+                  case WStype_TEXT: {
+                      if (strstr((char*)payload, "setupComplete") != NULL) {
+                          Serial.println("[WS] >>> SETUP COMPLETE! Suntem LIVE! <<<");
+                          g_state = 3;
+                          g_setup_ok = 1;
+                      } else {
+                          Serial.printf("[WS] TEXT: %.*s\n", (int)(len > 100 ? 100 : len), payload);
+                      }
+                      break;
+                  }
+                  case WStype_BIN: {
+                      int mono_count = len / 2;
+                      for (int off = 0; off < mono_count; off += 128) {
+                          int n = mono_count - off;
+                          if (n > 128) n = 128;
+                          int16_t *src = (int16_t*)payload + off;
+                          for (int i = 0; i < n; i++) {
+                              buf_out_stereo[i*2]   = src[i];
+                              buf_out_stereo[i*2+1] = src[i];
+                          }
+                          esp_codec_dev_write(playback, buf_out_stereo, n * 4);
+                      }
+                      g_rx_kb += len / 1024;
+                      break;
+                  }
+                  default: break;
+              }
+          }
+
+          void ui_timer_cb(lv_timer_t *t) {
+              if (lbl_state) {
+                  const char* s = "?";
+                  switch (g_state) {
+                      case 0: s = "Init"; break;
+                      case 1: s = "WiFi/WS..."; break;
+                      case 2: s = "Waiting Setup"; break;
+                      case 3: s = "LIVE!"; break;
+                  }
+                  lv_label_set_text(lbl_state, s);
+                  lv_obj_set_style_text_color(lbl_state,
+                      g_state == 3 ? lv_color_hex(0x22C55E) : lv_color_hex(0xFFFFFF), 0);
+              }
+              if (lbl_rx) {
+                  char b[32]; snprintf(b, sizeof(b), "RX: %d KB", g_rx_kb);
+                  lv_label_set_text(lbl_rx, b);
+              }
+              if (lbl_tx) {
+                  char b[32]; snprintf(b, sizeof(b), "TX: %d KB", g_tx_kb);
+                  lv_label_set_text(lbl_tx, b);
+              }
+              if (lbl_peak) {
+                  char b[32]; snprintf(b, sizeof(b), "Peak: %d", g_peak);
+                  lv_label_set_text(lbl_peak, b);
+              }
+          }
+
+          void build_ui() {
+              lvgl_port_lock(1000);
+              lv_obj_t *scr = lv_scr_act();
+              lv_obj_clean(scr);
+              lv_obj_set_style_bg_color(scr, lv_color_hex(0x0F172A), 0);
+              lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+              lv_obj_t *title = lv_label_create(scr);
+              lv_label_set_text(title, "Gemini Live");
+              lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
+              lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+              lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
+
+              lbl_state = lv_label_create(scr);
+              lv_label_set_text(lbl_state, "Init");
+              lv_obj_set_style_text_color(lbl_state, lv_color_hex(0xFFFFFF), 0);
+              lv_obj_set_style_text_font(lbl_state, &lv_font_montserrat_28, 0);
+              lv_obj_align(lbl_state, LV_ALIGN_CENTER, 0, -60);
+
+              lbl_peak = lv_label_create(scr);
+              lv_label_set_text(lbl_peak, "Peak: 0");
+              lv_obj_set_style_text_color(lbl_peak, lv_color_hex(0x94A3B8), 0);
+              lv_obj_set_style_text_font(lbl_peak, &lv_font_montserrat_16, 0);
+              lv_obj_align(lbl_peak, LV_ALIGN_CENTER, 0, 0);
+
+              lbl_rx = lv_label_create(scr);
+              lv_label_set_text(lbl_rx, "RX: 0 KB");
+              lv_obj_set_style_text_color(lbl_rx, lv_color_hex(0x22C55E), 0);
+              lv_obj_set_style_text_font(lbl_rx, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_rx, LV_ALIGN_CENTER, 0, 50);
+
+              lbl_tx = lv_label_create(scr);
+              lv_label_set_text(lbl_tx, "TX: 0 KB");
+              lv_obj_set_style_text_color(lbl_tx, lv_color_hex(0x38BDF8), 0);
+              lv_obj_set_style_text_font(lbl_tx, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_tx, LV_ALIGN_CENTER, 0, 80);
+
+              lvgl_port_unlock();
+              lv_timer_create(ui_timer_cb, 500, NULL);
+              Serial.println("[UI] Built");
+          }
+
+          void setup() {
+              Serial.begin(115200);
+              delay(500);
+              Serial.println("\n[BOOT] v16-gemini-live-final");
+
+              I2C_INIT_CALL
+              delay(50);
+
+              lvgl_port_init();
+              delay(300);
+              build_ui();
+
+              tca9554_init_local();
+              delay(100);
+              audio_init_local();
+              delay(100);
+              audio_open_local();
+              delay(100);
+
+              g_state = 1;
+              WiFi.mode(WIFI_STA);
+              WiFi.begin(WIFI_SSID, WIFI_PASS);
+              Serial.println("[WiFi] Connecting...");
+
+              int tries = 0;
+              while (WiFi.status() != WL_CONNECTED && tries < 30) {
+                  delay(500);
+                  Serial.print(".");
+                  tries++;
+              }
+              Serial.println();
+              if (WiFi.status() != WL_CONNECTED) {
+                  Serial.println("[WiFi] FAILED");
+                  return;
+              }
+              Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
+
+              String path = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + String(GEMINI_API_KEY);
+              ws.beginSSL("generativelanguage.googleapis.com", 443, path.c_str());
+              ws.onEvent(wsEvent);
+              ws.setReconnectInterval(5000);
+              Serial.println("[WS] Connecting...");
+          }
+
+          void loop() {
+              ws.loop();
+
+              if (g_state == 3) {
+                  // Citim 512 frames (1024 bytes) la 24kHz = ~21ms
+                  int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
+                  if (r == ESP_OK) {
+                      int frames = (sizeof(buf_in_stereo)/sizeof(int16_t)) / 2;
+                      int32_t peak = 0;
+                      for (int i = 0; i < frames; i++) {
+                          int16_t s = buf_in_stereo[i*2];
+                          int32_t a = s < 0 ? -s : s;
+                          if (a > peak) peak = a;
+                          buf_mono_24k[i] = s;
+                      }
+                      g_peak = (int)peak;
+
+                      // Downsample 24k -> 16k (take 2 out of every 3 samples)
+                      int out_count = frames * 2 / 3;
+                      for (int i = 0; i < out_count; i++) {
+                          int src = (i * 3) / 2;
+                          if (src >= frames) src = frames - 1;
+                          buf_mono_16k[i] = buf_mono_24k[src];
+                      }
+
+                      String b64_str = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
+                      if (b64_str.length() > 0) {
+                          JsonDocument doc;
+                          doc["realtimeInput"]["audio"]["mimeType"] = "audio/pcm;rate=16000";
+                          doc["realtimeInput"]["audio"]["data"] = b64_str;
+                          String out;
+                          serializeJson(doc, out);
+                          ws.sendTXT(out);
+                          g_tx_kb += (out_count * 2) / 1024;
+                      }
+                  }
+              }
+
+              delay(5);
+          }
+          ''')
+
+          code = code.replace("I2C_INIT_CALL", f"{i2c_init}();")
+
+          with open("sketch/sketch.ino", "w", encoding="utf-8") as f:
+              f.write(code.lstrip())
+          print("[OK] sketch.ino written")
+          PYEOF
+
+      - name: Compile
+        run: |
+          SKETCH_PATH="sketch/sketch.ino"
           FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
           arduino-cli compile --fqbn "$FQBN" --output-dir build_output "$SKETCH_PATH"
 
-      - name: Merge into Single .bin
+      - name: Merge
         shell: bash
         run: |
           mkdir -p package_bin
           BOOTLOADER=$(ls build_output/*.bootloader.bin | head -n 1)
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
-          python -m esptool --chip esp32s3 merge_bin \            -o package_bin/gemini-v64-fullsuite-0x0.bin \            --flash_mode keep --flash_size 16MB --flash_freq 80m \            0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v64-fullsuite-0x0.bin
+          python -m esptool --chip esp32s3 merge_bin \
+            -o package_bin/gemini-v16-live-final-0x0.bin \
+            --flash_mode keep --flash_size 16MB --flash_freq 80m \
+            0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
+          ls -lh package_bin/gemini-v16-live-final-0x0.bin
 
-      - name: Upload Artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v64-fullsuite
-          path: package_bin/gemini-v64-fullsuite-0x0.bin
+          name: gemini-v16-live-final
+          path: package_bin/gemini-v16-live-final-0x0.bin
           if-no-files-found: error
