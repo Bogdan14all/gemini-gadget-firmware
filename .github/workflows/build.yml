@@ -1,11 +1,11 @@
-name: Build Gemini OS - v5.1 Audio Dual Indicator
+name: Build Gemini OS - v5.2 Audio Fix (MCLK GPIO16)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v5.1
+    name: Build v5.2
     runs-on: ubuntu-latest
 
     steps:
@@ -24,24 +24,6 @@ jobs:
         run: |
           pip install "esptool<5"
           sudo apt-get update && sudo apt-get install -y zip
-
-      - name: Diagnostic - Extract ES7210 registers from esp_codec_dev
-        shell: bash
-        continue-on-error: true
-        run: |
-          mkdir -p /tmp/esp_diag
-          for url in \
-            "https://raw.githubusercontent.com/espressif/esp-adf/master/components/esp_codec_dev/device/es7210/es7210.c" \
-            "https://raw.githubusercontent.com/espressif/esp-adf/master/components/esp_codec_dev/device/es7210/es7210_reg.h"
-          do
-            fname=$(basename "$url")
-            curl -sL "$url" -o "/tmp/esp_diag/$fname" || echo "(failed $fname)"
-          done
-          echo "=== ES7210 REGISTER DEFINES ==="
-          grep -E "#define ES7210_REG" /tmp/esp_diag/es7210_reg.h 2>/dev/null | head -60 || echo "(no data)"
-          echo ""
-          echo "=== ES7210 WRITE SEQUENCE ==="
-          grep -nE "es7210_write|ES7210_REG_" /tmp/esp_diag/es7210.c 2>/dev/null | head -80 || echo "(no data)"
 
       - name: Setup Arduino CLI & ESP32 Core
         run: |
@@ -87,7 +69,7 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Patch Drivers & Generate v5.1 Sketch
+      - name: Patch Drivers & Generate v5.2 Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -196,7 +178,8 @@ jobs:
           #define BOOT_BTN  0
           #define PWR_BTN   16
 
-          #define I2S_MCLK  7
+          // !!! FIX: MCLK pe GPIO16 (conform rapoartelor pentru placi similare)
+          #define I2S_MCLK  16
           #define I2S_WS    46
           #define I2S_BCLK  15
           #define I2S_DIN   6
@@ -213,7 +196,6 @@ jobs:
           i2c_master_dev_handle_t dev_8311 = NULL;
           i2c_master_dev_handle_t dev_9554 = NULL;
 
-          // ---------- UI HANDLES ----------
           lv_obj_t *lbl_clock    = NULL;
           lv_obj_t *lbl_date     = NULL;
           lv_obj_t *lbl_touch_xy = NULL;
@@ -224,22 +206,20 @@ jobs:
           lv_obj_t *lbl_ping     = NULL;
           lv_obj_t *lbl_tick     = NULL;
           lv_obj_t *touch_dot    = NULL;
-          // --- MIC indicators ---
-          lv_obj_t *lbl_mic_status = NULL;   // "MIC: ACTIV" / "MIC: MUT"
-          lv_obj_t *lbl_mic_peak   = NULL;   // "Peak: N"
-          lv_obj_t *lbl_mic_rx     = NULL;   // "RX: ok/total"
-          lv_obj_t *bar_mic_level  = NULL;   // level bar
+          lv_obj_t *lbl_mic_status = NULL;
+          lv_obj_t *lbl_mic_peak   = NULL;
+          lv_obj_t *lbl_mic_rx     = NULL;
+          lv_obj_t *bar_mic_level  = NULL;
 
-          // ---------- STATE ----------
           volatile bool g_boot_pressed = false;
           volatile bool g_pwr_pressed  = false;
           volatile int  g_tick         = 0;
           volatile int  g_mic_peak     = 0;
-          volatile int  g_mic_level    = 0;   // 0-100
+          volatile int  g_mic_level    = 0;
           volatile bool g_mic_active   = false;
-          volatile int  g_mic_ok       = 0;   // citiri cu date
-          volatile int  g_mic_total    = 0;   // citiri totale
-          volatile int  g_mic_read_fail= 0;   // erori I2S
+          volatile int  g_mic_ok       = 0;
+          volatile int  g_mic_total    = 0;
+          volatile int  g_mic_read_fail= 0;
 
           char g_clock_str[16] = "--:--:--";
           char g_date_str[32]  = "-- --- ----";
@@ -249,7 +229,6 @@ jobs:
           bool last_boot_state = HIGH;
           bool last_pwr_state  = HIGH;
 
-          // ---------- I2C helpers ----------
           i2c_master_dev_handle_t get_dev(uint8_t addr) {
               i2c_master_dev_handle_t *slot = NULL;
               if (addr == 0x40) slot = &dev_7210;
@@ -320,7 +299,7 @@ jobs:
                   Serial.println("[I2S] enable FAIL");
                   return false;
               }
-              Serial.println("[I2S] TDM OK");
+              Serial.println("[I2S] TDM OK (MCLK=GPIO16)");
               return true;
           }
 
@@ -344,7 +323,6 @@ jobs:
               Serial.println("[ES7210] Written");
           }
 
-          // ---------- TOUCH ----------
           static void touch_event_cb(lv_event_t *e) {
               lv_event_code_t code = lv_event_get_code(e);
               lv_indev_t *indev = lv_indev_get_act();
@@ -366,7 +344,6 @@ jobs:
               }
           }
 
-          // ---------- ASYNC UI ----------
           static void ui_update_cb(void *arg) {
               bool b = g_boot_pressed;
               bool p = g_pwr_pressed;
@@ -388,8 +365,6 @@ jobs:
                   char tbuf[32]; snprintf(tbuf, sizeof(tbuf), "UI_CB:%d", g_tick);
                   lv_label_set_text(lbl_tick, tbuf);
               }
-
-              // --- MIC indicator ---
               if (lbl_mic_status) {
                   lv_label_set_text(lbl_mic_status, mic_on ? "MIC: ACTIV" : "MIC: MUT");
                   lv_obj_set_style_text_color(lbl_mic_status,
@@ -425,7 +400,7 @@ jobs:
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Gemini OS v5.1");
+              lv_label_set_text(title, "Gemini OS v5.2");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
               lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
@@ -442,7 +417,6 @@ jobs:
               lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_12, 0);
               lv_obj_align(lbl_date, LV_ALIGN_TOP_MID, 0, 78);
 
-              // ============ MIC CARD ============
               lv_obj_t *mic_box = lv_obj_create(scr);
               lv_obj_set_size(mic_box, 150, 130);
               lv_obj_align(mic_box, LV_ALIGN_TOP_MID, 0, 105);
@@ -477,7 +451,6 @@ jobs:
               lv_obj_set_style_text_font(lbl_mic_rx, &lv_font_montserrat_12, 0);
               lv_obj_align(lbl_mic_rx, LV_ALIGN_TOP_MID, 0, 80);
 
-              // ============ TOUCH ============
               lbl_touch_xy = lv_label_create(scr);
               lv_label_set_text(lbl_touch_xy, "X:--  Y:--");
               lv_obj_set_style_text_color(lbl_touch_xy, lv_color_hex(0xFFFFFF), 0);
@@ -538,8 +511,8 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] BUILD v5.1-audio-dual-indicator");
-              Serial.println("=== Gemini OS v5.1 ===");
+              Serial.println("\n[BOOT] BUILD v5.2-audio-mclk16");
+              Serial.println("=== Gemini OS v5.2 ===");
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
               pinMode(PWR_BTN, INPUT_PULLUP);
@@ -555,21 +528,21 @@ jobs:
                   return;
               }
 
-              // TCA9554 reset (secventa lunga)
-              i2c_write_reg(0x20, 0x03, 0x00); delay(20);
-              i2c_write_reg(0x20, 0x01, 0x00); delay(150);
-              i2c_write_reg(0x20, 0x01, 0xFF); delay(300);
+              // Reset ES7210 cu delay-uri mai lungi
+              i2c_write_reg(0x20, 0x03, 0x00); delay(50);
+              i2c_write_reg(0x20, 0x01, 0x00); delay(500);
+              i2c_write_reg(0x20, 0x01, 0xFF); delay(500);
 
               // I2S FIRST (MCLK must run before ES7210 config)
               if (!i2s_init_tdm()) {
                   Serial.println("[FATAL] I2S TDM init failed");
                   return;
               }
-              delay(200);
+              delay(500); // Lăsăm MCLK să se stabilizeze
 
               // ES7210 init
               es7210_init_regs();
-              delay(100);
+              delay(200);
 
               // Verify I2C readback
               diag_readback();
@@ -626,7 +599,6 @@ jobs:
                           g_mic_active = false;
                       }
 
-                      // Log full RAW bytes only on change
                       static int32_t last_logged_peak = -1;
                       if (peak != last_logged_peak) {
                           last_logged_peak = peak;
@@ -700,7 +672,7 @@ jobs:
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] v5.1 audio dual indicator .ino generat")
+          print("[OK] v5.2 audio fix (MCLK GPIO16) .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -717,14 +689,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v5.1-audio-dual-0x0.bin \
+            -o package_bin/gemini-v5.2-audio-mclk16-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v5.1-audio-dual-0x0.bin
+          ls -lh package_bin/gemini-v5.2-audio-mclk16-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v5.1-audio-dual
-          path: package_bin/gemini-v5.1-audio-dual-0x0.bin
+          name: gemini-v5.2-audio-mclk16
+          path: package_bin/gemini-v5.2-audio-mclk16-0x0.bin
           if-no-files-found: error
