@@ -1,11 +1,11 @@
-name: Build Gemini OS - v23 Gemini Live (Correct Protocol)
+name: Build Gemini OS - v24 Gemini Live (Stabil)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v23 Gemini Live
+    name: Build v24 Gemini Live
     runs-on: ubuntu-latest
 
     steps:
@@ -245,9 +245,10 @@ jobs:
                       Serial.println("[WS] CONNECTED");
                       g_state = 2;
                       JsonDocument doc;
-                      doc["setup"]["model"] = "models/gemini-2.5-flash-native-audio-preview-09-2025";
-                      doc["setup"]["responseModalities"][0] = "AUDIO";
-                      doc["setup"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Kore";
+                      doc["setup"]["model"] = "models/gemini-2.0-flash-exp";
+                      doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
+                      doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Kore";
+                      doc["setup"]["systemInstruction"]["role"] = "user";
                       doc["setup"]["systemInstruction"]["parts"][0]["text"] = "Raspunde intotdeauna exclusiv in limba romana, intr-un mod concis si natural.";
                       String out;
                       serializeJson(doc, out);
@@ -264,7 +265,7 @@ jobs:
                           Serial.println("[WS] >>> SETUP COMPLETE! Suntem LIVE! <<<");
                           g_state = 3;
                       } else {
-                          Serial.printf("[WS] TEXT: %.*s\n", (int)(len > 200 ? 200 : len), payload);
+                          Serial.printf("[WS] TEXT: %.*s\n", (int)(len > 150 ? 150 : len), payload);
                       }
                       break;
                   }
@@ -359,7 +360,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v23-gemini-live-correct-protocol");
+              Serial.println("\n[BOOT] v24-gemini-live-stable");
 
               I2C_INIT_CALL
               delay(50);
@@ -396,7 +397,7 @@ jobs:
               String path = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + String(GEMINI_API_KEY);
               ws.beginSSL("generativelanguage.googleapis.com", 443, path.c_str());
               ws.onEvent(wsEvent);
-              ws.setReconnectInterval(5000);
+              ws.setReconnectInterval(10000); // Crescut la 10s pentru a evita boot-loop-ul
               Serial.println("[WS] Connecting...");
           }
 
@@ -426,8 +427,8 @@ jobs:
                       String b64_str = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
                       if (b64_str.length() > 0) {
                           JsonDocument doc;
-                          doc["realtimeInput"]["audio"]["mimeType"] = "audio/pcm;rate=16000";
-                          doc["realtimeInput"]["audio"]["data"] = b64_str;
+                          doc["realtimeInput"]["mediaChunks"][0]["mimeType"] = "audio/pcm;rate=16000";
+                          doc["realtimeInput"]["mediaChunks"][0]["data"] = b64_str;
                           String out;
                           serializeJson(doc, out);
                           ws.sendTXT(out);
@@ -461,14 +462,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v23-live-0x0.bin \
+            -o package_bin/gemini-v24-live-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v23-live-0x0.bin
+          ls -lh package_bin/gemini-v24-live-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v23-live
-          path: package_bin/gemini-v23-live-0x0.bin
+          name: gemini-v24-live
+          path: package_bin/gemini-v24-live-0x0.bin
           if-no-files-found: error
