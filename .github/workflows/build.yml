@@ -1,11 +1,11 @@
-name: Build Gemini OS - Instant Buttons Test
+name: Build Gemini OS - Internet & NTP Clock
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Baseline (Instant Buttons)
+    name: Build Internet & NTP Test
     runs-on: ubuntu-latest
 
     steps:
@@ -54,6 +54,7 @@ jobs:
           #define LV_FONT_MONTSERRAT_16 1
           #define LV_FONT_MONTSERRAT_18 1
           #define LV_FONT_MONTSERRAT_20 1
+          #define LV_FONT_MONTSERRAT_28 1
           #define LV_FONT_DEFAULT &lv_font_montserrat_20
           #define LV_USE_LABEL 1
           #define LV_USE_BAR 1
@@ -68,7 +69,7 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Patch Drivers & Generate Instant Button Sketch
+      - name: Patch Drivers & Generate Internet Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -162,6 +163,8 @@ jobs:
           ino = textwrap.dedent(r'''
           #include <Arduino.h>
           #include <WiFi.h>
+          #include <HTTPClient.h>
+          #include <time.h>
 
           extern "C" {
           #include "i2c_bsp.h"
@@ -177,39 +180,73 @@ jobs:
           const char* ssid     = "TP-Link_2.4G_9318_Guest";
           const char* password = "revelion";
 
-          lv_obj_t *lbl_touch_xy    = NULL;
-          lv_obj_t *lbl_touch_state = NULL;
-          lv_obj_t *lbl_boot        = NULL;
-          lv_obj_t *lbl_pwr         = NULL;
-          lv_obj_t *lbl_wifi        = NULL;
-          lv_obj_t *touch_dot       = NULL;
+          // ---------- UI HANDLES ----------
+          lv_obj_t *lbl_clock  = NULL;
+          lv_obj_t *lbl_date   = NULL;
+          lv_obj_t *lbl_ip     = NULL;
+          lv_obj_t *lbl_ping   = NULL;
+          lv_obj_t *lbl_boot   = NULL;
+          lv_obj_t *lbl_pwr    = NULL;
 
-          // Stare anterioara pentru Edge Detection
           bool last_boot_state = HIGH;
           bool last_pwr_state  = HIGH;
 
-          static void touch_event_cb(lv_event_t *e) {
-              lv_event_code_t code = lv_event_get_code(e);
-              lv_indev_t *indev = lv_indev_get_act();
-              if (!indev || !lbl_touch_xy || !lbl_touch_state) return;
+          void setup_time() {
+              // Setam fusul orar pentru Romania (EET/EEST cu daylight saving automat)
+              configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.google.com");
+          }
 
-              lv_point_t p;
-              lv_indev_get_point(indev, &p);
-              char buf[40];
-              lv_snprintf(buf, sizeof(buf), "X:%d  Y:%d", p.x, p.y);
-              lv_label_set_text(lbl_touch_xy, buf);
+          void update_clock_ui() {
+              struct tm timeinfo;
+              if (!getLocalTime(&timeinfo, 100)) return;
 
-              if (touch_dot) lv_obj_set_pos(touch_dot, p.x - 15, p.y - 15);
+              char timeStr[16];
+              char dateStr[32];
+              strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
+              strftime(dateStr, sizeof(dateStr), "%d %b %Y", &timeinfo);
 
-              if (code == LV_EVENT_PRESSED) {
-                  lv_label_set_text(lbl_touch_state, "TOUCH: APASAT!");
-                  lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0xFF0000), 0);
-                  if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0xFF0000), 0);
-              } else if (code == LV_EVENT_RELEASED) {
-                  lv_label_set_text(lbl_touch_state, "TOUCH: Eliberat");
-                  lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);
-                  if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);
+              lvgl_port_lock(50);
+              if (lbl_clock) lv_label_set_text(lbl_clock, timeStr);
+              if (lbl_date)  lv_label_set_text(lbl_date, dateStr);
+              lvgl_port_unlock();
+          }
+
+          void update_network_ui() {
+              lvgl_port_lock(50);
+              if (WiFi.status() == WL_CONNECTED) {
+                  if (lbl_ip) lv_label_set_text(lbl_ip, WiFi.localIP().toString().c_str());
+              } else {
+                  if (lbl_ip) lv_label_set_text(lbl_ip, "WiFi: Deconectat");
               }
+              lvgl_port_unlock();
+          }
+
+          void measure_ping() {
+              if (WiFi.status() != WL_CONNECTED) return;
+
+              HTTPClient http;
+              // Folosim un endpoint usor de la Google care intoarce 204 No Content
+              http.begin("http://connectivitycheck.gstatic.com/generate_204");
+              http.setConnectTimeout(3000); // 3 secunde timeout
+              
+              unsigned long start = millis();
+              int httpCode = http.GET();
+              unsigned long latency = millis() - start;
+              http.end();
+
+              lvgl_port_lock(50);
+              if (lbl_ping) {
+                  char buf[32];
+                  if (httpCode > 0) {
+                      snprintf(buf, sizeof(buf), "Internet: OK (%lu ms)", latency);
+                      lv_obj_set_style_text_color(lbl_ping, lv_color_hex(0x00FF00), 0);
+                  } else {
+                      snprintf(buf, sizeof(buf), "Internet: Eroare");
+                      lv_obj_set_style_text_color(lbl_ping, lv_color_hex(0xFF0000), 0);
+                  }
+                  lv_label_set_text(lbl_ping, buf);
+              }
+              lvgl_port_unlock();
           }
 
           void build_ui() {
@@ -226,51 +263,51 @@ jobs:
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Instant Button Test");
+              lv_label_set_text(title, "Gemini OS - Internet Test");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
               lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
 
-              lbl_touch_xy = lv_label_create(scr);
-              lv_label_set_text(lbl_touch_xy, "X:--  Y:--");
-              lv_obj_set_style_text_color(lbl_touch_xy, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_touch_xy, &lv_font_montserrat_18, 0);
-              lv_obj_align(lbl_touch_xy, LV_ALIGN_CENTER, 0, -80);
+              // ORA MARE
+              lbl_clock = lv_label_create(scr);
+              lv_label_set_text(lbl_clock, "--:--:--");
+              lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0xFFFFFF), 0);
+              lv_obj_set_style_text_font(lbl_clock, &lv_font_montserrat_28, 0);
+              lv_obj_align(lbl_clock, LV_ALIGN_CENTER, 0, -60);
 
-              lbl_touch_state = lv_label_create(scr);
-              lv_label_set_text(lbl_touch_state, "TOUCH: Eliberat");
-              lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);
-              lv_obj_set_style_text_font(lbl_touch_state, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_touch_state, LV_ALIGN_CENTER, 0, -55);
+              // DATA
+              lbl_date = lv_label_create(scr);
+              lv_label_set_text(lbl_date, "-- --- ----");
+              lv_obj_set_style_text_color(lbl_date, lv_color_hex(0x94A3B8), 0);
+              lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_date, LV_ALIGN_CENTER, 0, -20);
 
+              // IP
+              lbl_ip = lv_label_create(scr);
+              lv_label_set_text(lbl_ip, "WiFi: conectare...");
+              lv_obj_set_style_text_color(lbl_ip, lv_color_hex(0x38BDF8), 0);
+              lv_obj_set_style_text_font(lbl_ip, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_ip, LV_ALIGN_CENTER, 0, 20);
+
+              // PING
+              lbl_ping = lv_label_create(scr);
+              lv_label_set_text(lbl_ping, "Internet: se verifica...");
+              lv_obj_set_style_text_color(lbl_ping, lv_color_hex(0x64748B), 0);
+              lv_obj_set_style_text_font(lbl_ping, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_ping, LV_ALIGN_CENTER, 0, 45);
+
+              // BOOT / PWR
               lbl_boot = lv_label_create(scr);
               lv_label_set_text(lbl_boot, "BOOT: liber");
               lv_obj_set_style_text_color(lbl_boot, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_16, 0);
-              lv_obj_align(lbl_boot, LV_ALIGN_CENTER, 0, -10);
+              lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_12, 0);
+              lv_obj_align(lbl_boot, LV_ALIGN_BOTTOM_LEFT, 10, -30);
 
               lbl_pwr = lv_label_create(scr);
               lv_label_set_text(lbl_pwr, "PWR: liber");
               lv_obj_set_style_text_color(lbl_pwr, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_pwr, &lv_font_montserrat_16, 0);
-              lv_obj_align(lbl_pwr, LV_ALIGN_CENTER, 0, 20);
-
-              lbl_wifi = lv_label_create(scr);
-              lv_label_set_text(lbl_wifi, "WiFi: conectare...");
-              lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x0284C7), 0);
-              lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 70);
-
-              touch_dot = lv_obj_create(scr);
-              lv_obj_set_size(touch_dot, 30, 30);
-              lv_obj_set_style_radius(touch_dot, LV_RADIUS_CIRCLE, 0);
-              lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);
-              lv_obj_set_style_bg_opa(touch_dot, LV_OPA_80, 0);
-              lv_obj_set_style_border_width(touch_dot, 0, 0);
-              lv_obj_set_pos(touch_dot, 10, 10);
-
-              lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_PRESSED,  NULL);
-              lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_RELEASED, NULL);
+              lv_obj_set_style_text_font(lbl_pwr, &lv_font_montserrat_12, 0);
+              lv_obj_align(lbl_pwr, LV_ALIGN_BOTTOM_LEFT, 10, -10);
 
               lvgl_port_unlock();
               Serial.println("[UI] Built");
@@ -279,7 +316,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n=== Instant Button Test ===");
+              Serial.println("\n=== Internet & NTP Clock Test ===");
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
               pinMode(PWR_BTN, INPUT_PULLUP);
@@ -293,19 +330,16 @@ jobs:
               WiFi.mode(WIFI_STA);
               WiFi.setSleep(false);
               WiFi.begin(ssid, password);
-
-              Serial.println("[READY] Apasa butoanele BOOT sau PWR acum!");
+              Serial.println("[WiFi] Connecting...");
           }
 
           void loop() {
-              // 1. Citim starea butoanelor
+              // 1. Butoane (Instant)
               bool current_boot = digitalRead(BOOT_BTN);
               bool current_pwr  = digitalRead(PWR_BTN);
 
-              // 2. Verificam daca s-a schimbat ceva (Edge Detection)
               if (current_boot != last_boot_state) {
                   last_boot_state = current_boot;
-                  Serial.printf("[BTN] BOOT: %s\n", current_boot == LOW ? "APASAT" : "ELIBERAT");
                   lvgl_port_lock(50);
                   lv_label_set_text(lbl_boot, current_boot == LOW ? "BOOT: APASAT" : "BOOT: liber");
                   lv_obj_set_style_text_color(lbl_boot, current_boot == LOW ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF), 0);
@@ -314,29 +348,41 @@ jobs:
 
               if (current_pwr != last_pwr_state) {
                   last_pwr_state = current_pwr;
-                  Serial.printf("[BTN] PWR: %s\n", current_pwr == LOW ? "APASAT" : "ELIBERAT");
                   lvgl_port_lock(50);
                   lv_label_set_text(lbl_pwr, current_pwr == LOW ? "PWR: APASAT" : "PWR: liber");
                   lv_obj_set_style_text_color(lbl_pwr, current_pwr == LOW ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF), 0);
                   lvgl_port_unlock();
               }
 
-              // 3. Update WiFi text
-              static unsigned long last_wifi = 0;
-              if (millis() - last_wifi > 2000) {
-                  last_wifi = millis();
-                  lvgl_port_lock(50);
-                  if (WiFi.status() == WL_CONNECTED) {
-                      char wbuf[64];
-                      snprintf(wbuf, sizeof(wbuf), "WiFi: OK %s", WiFi.localIP().toString().c_str());
-                      lv_label_set_text(lbl_wifi, wbuf);
-                  } else {
-                      lv_label_set_text(lbl_wifi, "WiFi: conectare...");
+              // 2. WiFi & NTP
+              static bool time_configured = false;
+              if (WiFi.status() == WL_CONNECTED) {
+                  if (!time_configured) {
+                      Serial.println("[WiFi] Connected! Configuring NTP...");
+                      update_network_ui();
+                      setup_time();
+                      time_configured = true;
                   }
-                  lvgl_port_unlock();
+
+                  // Actualizam ceasul la fiecare secunda
+                  static unsigned long last_clock = 0;
+                  if (millis() - last_clock > 1000) {
+                      last_clock = millis();
+                      update_clock_ui();
+                  }
+
+                  // Masuram ping-ul la fiecare 5 secunde
+                  static unsigned long last_ping = 0;
+                  if (millis() - last_ping > 5000) {
+                      last_ping = millis();
+                      measure_ping();
+                  }
+              } else {
+                  time_configured = false;
+                  update_network_ui();
               }
 
-              delay(20); // bucla rapida pentru a prinde apasarile scurte
+              delay(20);
           }
           ''').lstrip()
 
@@ -344,7 +390,7 @@ jobs:
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] Instant Button Test .ino generat")
+          print("[OK] Internet & NTP .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -361,14 +407,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/instant-buttons-0x0.bin \
+            -o package_bin/internet-ntp-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/instant-buttons-0x0.bin
+          ls -lh package_bin/internet-ntp-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: instant-buttons-firmware
-          path: package_bin/instant-buttons-0x0.bin
+          name: internet-ntp-firmware
+          path: package_bin/internet-ntp-0x0.bin
           if-no-files-found: error
