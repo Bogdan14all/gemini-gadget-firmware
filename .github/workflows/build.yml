@@ -1,11 +1,11 @@
-name: Build Gemini OS - Full Integration (Touch+Buttons+WiFi+NTP)
+name: Build Gemini OS - Fixed LVGL Lock
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Full Integration
+    name: Build Fixed Integration
     runs-on: ubuntu-latest
 
     steps:
@@ -69,7 +69,13 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Patch Drivers & Generate Full Sketch
+      - name: Diagnostic - check lvgl_port.h
+        shell: bash
+        run: |
+          echo "=== lvgl_port.h lock signature ==="
+          grep -nE "lvgl_port_lock|lvgl_port_unlock" "Arduino/examples/10_LVGL_V9_Test/lvgl_port.h" || echo "(not found)"
+
+      - name: Patch Drivers & Generate Fixed Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -108,20 +114,39 @@ jobs:
           with open(port_path, "w", encoding="utf-8") as f:
               f.write(code)
 
+          # Detect lock function return type
           h_path = f"{sketch_dir}/lvgl_port.h"
           with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
               h_content = f.read()
-          with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
-              c_content = f.read()
 
-          if "lvgl_port_lock" not in h_content:
+          if "lvgl_port_lock" in h_content:
+              # Existing lock function - detect type
+              m = re.search(r'(esp_err_t|bool|void)\s+lvgl_port_lock\s*\(', h_content)
+              ret = m.group(1) if m else "unknown"
+              print(f"[INFO] Existing lvgl_port_lock returns: {ret}")
+              if ret == "esp_err_t":
+                  LOCK_CHECK = "lvgl_port_lock(100) == ESP_OK"
+                  LOCK_CHECK_50 = "lvgl_port_lock(50) == ESP_OK"
+                  LOCK_CHECK_1000 = "lvgl_port_lock(1000) == ESP_OK"
+              elif ret == "bool":
+                  LOCK_CHECK = "lvgl_port_lock(100)"
+                  LOCK_CHECK_50 = "lvgl_port_lock(50)"
+                  LOCK_CHECK_1000 = "lvgl_port_lock(1000)"
+              else:
+                  LOCK_CHECK = "(lvgl_port_lock(100), true)"
+                  LOCK_CHECK_50 = "(lvgl_port_lock(50), true)"
+                  LOCK_CHECK_1000 = "(lvgl_port_lock(1000), true)"
+          else:
+              # No existing lock - inject our own bool version
+              print("[INFO] No lvgl_port_lock found - injecting bool version")
               mux_var = "lvgl_port_mux"
+              c_content = code
               c_content = re.sub(
                   r'(#include[^\n]+\n)(?![^\n]*#include)',
                   r'\1\nstatic SemaphoreHandle_t ' + mux_var + ' = NULL;\n',
                   c_content, count=1, flags=re.DOTALL)
               c_content = re.sub(
-                  r'(esp_err_t\s+lvgl_port_init\s*\([^)]*\)\s*\{)',
+                  r'((esp_err_t|void)\s+lvgl_port_init\s*\([^)]*\)\s*\{)',
                   r'\1\n    ' + mux_var + ' = xSemaphoreCreateMutex();',
                   c_content, count=1)
               c_content += f"""
@@ -148,10 +173,15 @@ jobs:
                   f.write(h_content)
               with open(port_path, "w", encoding="utf-8") as f:
                   f.write(c_content)
+              LOCK_CHECK = "lvgl_port_lock(100)"
+              LOCK_CHECK_50 = "lvgl_port_lock(50)"
+              LOCK_CHECK_1000 = "lvgl_port_lock(1000)"
+
+          print(f"[INFO] LOCK_CHECK = {LOCK_CHECK}")
 
           i2c_init_func = "bsp_i2c_init"
-          for h_path in glob.glob(f"{sketch_dir}/*.h"):
-              with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
+          for hh in glob.glob(f"{sketch_dir}/*.h"):
+              with open(hh, "r", encoding="utf-8", errors="ignore") as f:
                   h = f.read()
               for f_name, f_args in re.findall(
                   r'(?:esp_err_t|void|int|bool)\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*;', h):
@@ -172,7 +202,6 @@ jobs:
           }
           #include <lvgl.h>
 
-          // ---------- PINI ----------
           #define LCD_BL    42
           #define BOOT_BTN  0
           #define PWR_BTN   16
@@ -180,7 +209,6 @@ jobs:
           const char* ssid     = "TP-Link_2.4G_9318_Guest";
           const char* password = "revelion";
 
-          // ---------- UI ----------
           lv_obj_t *lbl_clock       = NULL;
           lv_obj_t *lbl_date        = NULL;
           lv_obj_t *lbl_touch_xy    = NULL;
@@ -194,138 +222,119 @@ jobs:
           bool last_boot_state = HIGH;
           bool last_pwr_state  = HIGH;
 
-          // ---------- Touch callback ----------
           static void touch_event_cb(lv_event_t *e) {
               lv_event_code_t code = lv_event_get_code(e);
               lv_indev_t *indev = lv_indev_get_act();
               if (!indev || !lbl_touch_xy || !lbl_touch_state) return;
-
               lv_point_t p;
               lv_indev_get_point(indev, &p);
-
               char buf[40];
               lv_snprintf(buf, sizeof(buf), "X:%d  Y:%d", p.x, p.y);
               lv_label_set_text(lbl_touch_xy, buf);
-
               if (touch_dot) lv_obj_set_pos(touch_dot, p.x - 10, p.y - 10);
-
               if (code == LV_EVENT_PRESSED) {
                   lv_label_set_text(lbl_touch_state, "APASAT");
                   lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0xFF0000), 0);
                   if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0xFF0000), 0);
-                  Serial.printf("[TOUCH] PRESSED x=%d y=%d\n", p.x, p.y);
               } else if (code == LV_EVENT_RELEASED) {
                   lv_label_set_text(lbl_touch_state, "Eliberat");
                   lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);
                   if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);
-                  Serial.println("[TOUCH] RELEASED");
               }
           }
 
-          // ---------- UI ----------
           void build_ui() {
               pinMode(LCD_BL, OUTPUT);
               digitalWrite(LCD_BL, LOW);
 
-              lvgl_port_lock(1000);
-              lv_obj_t *scr = lv_screen_active();
-              if (!scr) scr = lv_scr_act();
-              if (!scr) { lvgl_port_unlock(); return; }
+              if (LOCK_CHECK_1000) {
+                  lv_obj_t *scr = lv_screen_active();
+                  if (!scr) scr = lv_scr_act();
+                  if (scr) {
+                      lv_obj_clean(scr);
+                      lv_obj_set_style_bg_color(scr, lv_color_hex(0x0F172A), 0);
+                      lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-              lv_obj_clean(scr);
-              lv_obj_set_style_bg_color(scr, lv_color_hex(0x0F172A), 0);
-              lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+                      lv_obj_t *title = lv_label_create(scr);
+                      lv_label_set_text(title, "Gemini OS");
+                      lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
+                      lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+                      lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
 
-              // Titlu
-              lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Gemini OS");
-              lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
-              lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
-              lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
+                      lbl_clock = lv_label_create(scr);
+                      lv_label_set_text(lbl_clock, "--:--:--");
+                      lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0xFFFFFF), 0);
+                      lv_obj_set_style_text_font(lbl_clock, &lv_font_montserrat_28, 0);
+                      lv_obj_align(lbl_clock, LV_ALIGN_TOP_MID, 0, 45);
 
-              // Ceas mare
-              lbl_clock = lv_label_create(scr);
-              lv_label_set_text(lbl_clock, "--:--:--");
-              lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_clock, &lv_font_montserrat_28, 0);
-              lv_obj_align(lbl_clock, LV_ALIGN_TOP_MID, 0, 45);
+                      lbl_date = lv_label_create(scr);
+                      lv_label_set_text(lbl_date, "-- --- ----");
+                      lv_obj_set_style_text_color(lbl_date, lv_color_hex(0x94A3B8), 0);
+                      lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_12, 0);
+                      lv_obj_align(lbl_date, LV_ALIGN_TOP_MID, 0, 85);
 
-              // Data
-              lbl_date = lv_label_create(scr);
-              lv_label_set_text(lbl_date, "-- --- ----");
-              lv_obj_set_style_text_color(lbl_date, lv_color_hex(0x94A3B8), 0);
-              lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_date, LV_ALIGN_TOP_MID, 0, 85);
+                      lbl_touch_xy = lv_label_create(scr);
+                      lv_label_set_text(lbl_touch_xy, "X:--  Y:--");
+                      lv_obj_set_style_text_color(lbl_touch_xy, lv_color_hex(0xFFFFFF), 0);
+                      lv_obj_set_style_text_font(lbl_touch_xy, &lv_font_montserrat_14, 0);
+                      lv_obj_align(lbl_touch_xy, LV_ALIGN_CENTER, 0, -40);
 
-              // Touch XY
-              lbl_touch_xy = lv_label_create(scr);
-              lv_label_set_text(lbl_touch_xy, "X:--  Y:--");
-              lv_obj_set_style_text_color(lbl_touch_xy, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_touch_xy, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_touch_xy, LV_ALIGN_CENTER, 0, -40);
+                      lbl_touch_state = lv_label_create(scr);
+                      lv_label_set_text(lbl_touch_state, "Eliberat");
+                      lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);
+                      lv_obj_set_style_text_font(lbl_touch_state, &lv_font_montserrat_12, 0);
+                      lv_obj_align(lbl_touch_state, LV_ALIGN_CENTER, 0, -20);
 
-              // Touch state
-              lbl_touch_state = lv_label_create(scr);
-              lv_label_set_text(lbl_touch_state, "Eliberat");
-              lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);
-              lv_obj_set_style_text_font(lbl_touch_state, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_touch_state, LV_ALIGN_CENTER, 0, -20);
+                      lbl_boot = lv_label_create(scr);
+                      lv_label_set_text(lbl_boot, "BOOT: liber");
+                      lv_obj_set_style_text_color(lbl_boot, lv_color_hex(0xFFFFFF), 0);
+                      lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_12, 0);
+                      lv_obj_align(lbl_boot, LV_ALIGN_CENTER, 0, 5);
 
-              // BOOT
-              lbl_boot = lv_label_create(scr);
-              lv_label_set_text(lbl_boot, "BOOT: liber");
-              lv_obj_set_style_text_color(lbl_boot, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_boot, LV_ALIGN_CENTER, 0, 5);
+                      lbl_pwr = lv_label_create(scr);
+                      lv_label_set_text(lbl_pwr, "PWR: liber");
+                      lv_obj_set_style_text_color(lbl_pwr, lv_color_hex(0xFFFFFF), 0);
+                      lv_obj_set_style_text_font(lbl_pwr, &lv_font_montserrat_12, 0);
+                      lv_obj_align(lbl_pwr, LV_ALIGN_CENTER, 0, 25);
 
-              // PWR
-              lbl_pwr = lv_label_create(scr);
-              lv_label_set_text(lbl_pwr, "PWR: liber");
-              lv_obj_set_style_text_color(lbl_pwr, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_pwr, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_pwr, LV_ALIGN_CENTER, 0, 25);
+                      lbl_wifi = lv_label_create(scr);
+                      lv_label_set_text(lbl_wifi, "WiFi: conectare...");
+                      lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x38BDF8), 0);
+                      lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_12, 0);
+                      lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 55);
 
-              // WiFi
-              lbl_wifi = lv_label_create(scr);
-              lv_label_set_text(lbl_wifi, "WiFi: conectare...");
-              lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x38BDF8), 0);
-              lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 55);
+                      lbl_ping = lv_label_create(scr);
+                      lv_label_set_text(lbl_ping, "Internet: --");
+                      lv_obj_set_style_text_color(lbl_ping, lv_color_hex(0x64748B), 0);
+                      lv_obj_set_style_text_font(lbl_ping, &lv_font_montserrat_12, 0);
+                      lv_obj_align(lbl_ping, LV_ALIGN_CENTER, 0, 80);
 
-              // Ping
-              lbl_ping = lv_label_create(scr);
-              lv_label_set_text(lbl_ping, "Internet: --");
-              lv_obj_set_style_text_color(lbl_ping, lv_color_hex(0x64748B), 0);
-              lv_obj_set_style_text_font(lbl_ping, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_ping, LV_ALIGN_CENTER, 0, 80);
+                      touch_dot = lv_obj_create(scr);
+                      lv_obj_set_size(touch_dot, 20, 20);
+                      lv_obj_set_style_radius(touch_dot, LV_RADIUS_CIRCLE, 0);
+                      lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);
+                      lv_obj_set_style_bg_opa(touch_dot, LV_OPA_80, 0);
+                      lv_obj_set_style_border_width(touch_dot, 0, 0);
+                      lv_obj_set_pos(touch_dot, 10, 10);
 
-              // Touch dot
-              touch_dot = lv_obj_create(scr);
-              lv_obj_set_size(touch_dot, 20, 20);
-              lv_obj_set_style_radius(touch_dot, LV_RADIUS_CIRCLE, 0);
-              lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);
-              lv_obj_set_style_bg_opa(touch_dot, LV_OPA_80, 0);
-              lv_obj_set_style_border_width(touch_dot, 0, 0);
-              lv_obj_set_pos(touch_dot, 10, 10);
-
-              // Touch callbacks
-              lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_PRESSED,  NULL);
-              lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_RELEASED, NULL);
-
-              lvgl_port_unlock();
+                      lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_PRESSED,  NULL);
+                      lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_RELEASED, NULL);
+                  }
+                  lvgl_port_unlock();
+              }
               Serial.println("[UI] Built");
           }
 
           void setup_time() {
+              Serial.println("[NTP] configTzTime calling...");
               configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.google.com");
-              Serial.println("[NTP] configTzTime called");
+              Serial.println("[NTP] configTzTime done");
           }
 
-          // ---------- Setup ----------
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n=== Gemini OS Full Integration ===");
+              Serial.println("\n=== Gemini OS Fixed ===");
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
               pinMode(PWR_BTN, INPUT_PULLUP);
@@ -336,24 +345,21 @@ jobs:
               delay(300);
               build_ui();
 
-              Serial.println("[WiFi] Starting...");
               WiFi.mode(WIFI_STA);
               WiFi.setSleep(false);
               WiFi.begin(ssid, password);
-
-              Serial.println("[READY] Test: touch / BOOT / PWR / WiFi");
+              Serial.println("[READY] Test touch/BOOT/PWR/WiFi/NTP");
           }
 
-          // ---------- Loop ----------
           void loop() {
-              // 1. Butoane - edge detection cu log
+              // ---- BUTOANE ----
               bool current_boot = digitalRead(BOOT_BTN);
               bool current_pwr  = digitalRead(PWR_BTN);
 
               if (current_boot != last_boot_state) {
                   last_boot_state = current_boot;
                   Serial.printf("[BTN] BOOT: %s\n", current_boot == LOW ? "APASAT" : "ELIBERAT");
-                  if (lvgl_port_lock(100)) {
+                  if (LOCK_CHECK_50) {
                       lv_label_set_text(lbl_boot, current_boot == LOW ? "BOOT: APASAT" : "BOOT: liber");
                       lv_obj_set_style_text_color(lbl_boot, current_boot == LOW ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF), 0);
                       lvgl_port_unlock();
@@ -363,75 +369,63 @@ jobs:
               if (current_pwr != last_pwr_state) {
                   last_pwr_state = current_pwr;
                   Serial.printf("[BTN] PWR: %s\n", current_pwr == LOW ? "APASAT" : "ELIBERAT");
-                  if (lvgl_port_lock(100)) {
+                  if (LOCK_CHECK_50) {
                       lv_label_set_text(lbl_pwr, current_pwr == LOW ? "PWR: APASAT" : "PWR: liber");
                       lv_obj_set_style_text_color(lbl_pwr, current_pwr == LOW ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF), 0);
                       lvgl_port_unlock();
                   }
               }
 
-              // 2. WiFi & NTP
+              // ---- WIFI + NTP ----
               static bool time_configured = false;
-              static unsigned long wifi_start = 0;
               static unsigned long last_wifi_log = 0;
               static unsigned long last_clock = 0;
               static unsigned long last_ping = 0;
+              static bool ntp_ever_synced = false;
 
               wl_status_t wstat = WiFi.status();
-
-              // Log WiFi status la fiecare 3 secunde
               if (millis() - last_wifi_log > 3000) {
                   last_wifi_log = millis();
-                  const char* s = "?";
-                  switch (wstat) {
-                      case WL_IDLE_STATUS: s = "IDLE"; break;
-                      case WL_NO_SSID_AVAIL: s = "NO_SSID"; break;
-                      case WL_SCAN_COMPLETED: s = "SCAN_DONE"; break;
-                      case WL_CONNECTED: s = "CONNECTED"; break;
-                      case WL_CONNECT_FAILED: s = "FAILED"; break;
-                      case WL_CONNECTION_LOST: s = "LOST"; break;
-                      case WL_DISCONNECTED: s = "DISCONNECTED"; break;
-                  }
-                  Serial.printf("[WiFi] status=%s (%d) ip=%s\n", s, (int)wstat, WiFi.localIP().toString().c_str());
+                  Serial.printf("[WiFi] status=%d ip=%s\n", (int)wstat, WiFi.localIP().toString().c_str());
               }
 
               if (wstat == WL_CONNECTED) {
-                  wifi_start = millis();
                   if (!time_configured) {
-                      Serial.println("[WiFi] CONNECTED! Configuring NTP...");
+                      Serial.println("[WiFi] CONNECTED -> NTP setup");
                       setup_time();
                       time_configured = true;
                   }
 
-                  // Update label IP
-                  static unsigned long last_ip_update = 0;
-                  if (millis() - last_ip_update > 2000) {
-                      last_ip_update = millis();
-                      if (lvgl_port_lock(50)) {
-                          char wbuf[64];
-                          snprintf(wbuf, sizeof(wbuf), "WiFi: %s", WiFi.localIP().toString().c_str());
-                          lv_label_set_text(lbl_wifi, wbuf);
-                          lvgl_port_unlock();
-                      }
+                  // Update IP label
+                  if (LOCK_CHECK_50) {
+                      char wbuf[64];
+                      snprintf(wbuf, sizeof(wbuf), "WiFi: %s", WiFi.localIP().toString().c_str());
+                      lv_label_set_text(lbl_wifi, wbuf);
+                      lvgl_port_unlock();
                   }
 
-                  // Ceas la fiecare secunda
+                  // Clock update
                   if (millis() - last_clock > 1000) {
                       last_clock = millis();
                       struct tm timeinfo;
                       if (getLocalTime(&timeinfo, 100)) {
+                          if (!ntp_ever_synced) {
+                              ntp_ever_synced = true;
+                              Serial.println("[NTP] First time sync OK!");
+                          }
                           char tbuf[16], dbuf[32];
                           strftime(tbuf, sizeof(tbuf), "%H:%M:%S", &timeinfo);
                           strftime(dbuf, sizeof(dbuf), "%d %b %Y", &timeinfo);
-                          if (lvgl_port_lock(50)) {
+                          if (LOCK_CHECK_50) {
                               lv_label_set_text(lbl_clock, tbuf);
                               lv_label_set_text(lbl_date, dbuf);
                               lvgl_port_unlock();
                           }
+                          Serial.printf("[CLOCK] %s %s\n", tbuf, dbuf);
                       }
                   }
 
-                  // Ping TCP la 1.1.1.1:53 la fiecare 10s (rapid, non-blocking)
+                  // Ping
                   if (millis() - last_ping > 10000) {
                       last_ping = millis();
                       WiFiClient client;
@@ -439,8 +433,7 @@ jobs:
                       bool ok = client.connect("1.1.1.1", 53, 2000);
                       unsigned long lat = millis() - t0;
                       client.stop();
-                      Serial.printf("[PING] %s %lu ms\n", ok ? "OK" : "FAIL", lat);
-                      if (lvgl_port_lock(50)) {
+                      if (LOCK_CHECK_50) {
                           char pbuf[48];
                           if (ok) {
                               snprintf(pbuf, sizeof(pbuf), "Internet: OK (%lu ms)", lat);
@@ -455,34 +448,19 @@ jobs:
                   }
               } else {
                   time_configured = false;
-                  if (wifi_start == 0) wifi_start = millis();
-                  unsigned long elapsed = millis() - wifi_start;
-
-                  static unsigned long last_status_update = 0;
-                  if (millis() - last_status_update > 1000) {
-                      last_status_update = millis();
-                      if (lvgl_port_lock(50)) {
-                          char wbuf[48];
-                          if (elapsed < 15000) {
-                              snprintf(wbuf, sizeof(wbuf), "WiFi: conectare... %lus", elapsed/1000);
-                          } else {
-                              snprintf(wbuf, sizeof(wbuf), "WiFi: EROARE");
-                          }
-                          lv_label_set_text(lbl_wifi, wbuf);
-                          lvgl_port_unlock();
-                      }
-                  }
               }
 
-              delay(20);
+              delay(50);
           }
           ''').lstrip()
 
+          ino = ino.replace("LOCK_CHECK_1000", LOCK_CHECK_1000)
+          ino = ino.replace("LOCK_CHECK_50", LOCK_CHECK_50)
           ino = ino.replace("I2C_INIT_CALL", f"{i2c_init_func}();")
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] Full Integration .ino generat")
+          print("[OK] Fixed .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -499,14 +477,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/full-integration-0x0.bin \
+            -o package_bin/gemini-fixed-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/full-integration-0x0.bin
+          ls -lh package_bin/gemini-fixed-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: full-integration-firmware
-          path: package_bin/full-integration-0x0.bin
+          name: gemini-fixed-firmware
+          path: package_bin/gemini-fixed-0x0.bin
           if-no-files-found: error
