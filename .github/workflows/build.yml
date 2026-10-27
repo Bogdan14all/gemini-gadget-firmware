@@ -1,11 +1,11 @@
-name: Build Gemini OS - v13 Gemini Live (Fixed)
+name: Build Gemini OS - v62 Full All-In-One Hardware Diagnostic Suite
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v13 Gemini Live
+    name: Build v62
     runs-on: ubuntu-latest
 
     steps:
@@ -32,9 +32,9 @@ jobs:
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32
+          arduino-cli core install esp32:esp32@3.0.7
 
-      - name: Install libraries (LVGL 8.3.11 + WebSockets + ArduinoJson)
+      - name: Install LVGL 8.3.11
         shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
@@ -42,17 +42,17 @@ jobs:
             cp -r Arduino_Libraries/* ~/Arduino/libraries/ 2>/dev/null || true
           fi
           arduino-cli lib install "lvgl"@8.3.11
-          arduino-cli lib install "WebSockets"@2.5.2
-          arduino-cli lib install "ArduinoJson"@7.0.4
 
           cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
           #ifndef LV_CONF_H
           #define LV_CONF_H
+
           #define LV_COLOR_DEPTH 16
           #define LV_COLOR_16_SWAP 1
           #define LV_MEM_CUSTOM 0
           #define LV_MEM_SIZE (128U * 1024U)
           #define LV_TICK_CUSTOM 0
+
           #define LV_FONT_MONTSERRAT_12 1
           #define LV_FONT_MONTSERRAT_14 1
           #define LV_FONT_MONTSERRAT_16 1
@@ -60,408 +60,418 @@ jobs:
           #define LV_FONT_MONTSERRAT_20 1
           #define LV_FONT_MONTSERRAT_28 1
           #define LV_FONT_DEFAULT &lv_font_montserrat_20
+
           #define LV_USE_DEMO_WIDGETS 0
           #define LV_USE_DEMO_MUSIC 0
           #define LV_USE_DEMO_BENCHMARK 0
           #define LV_USE_DEMO_STRESS 0
+
           #define LV_USE_LOG 0
+          #define LV_USE_ASSERT_NULL 0
+          #define LV_USE_ASSERT_MALLOC 0
+          #define LV_USE_ASSERT_STYLE 0
+          #define LV_USE_ASSERT_MEM_INTEGRITY 0
+          #define LV_USE_ASSERT_OBJ 0
+
           #endif
           EOF
           sed -i 's/^[ \t]*//' ~/Arduino/libraries/lv_conf.h
 
-      - name: Copy 08_Audio_Test as base & Patch
+      - name: Inject Gemini OS v62 All-In-One Code
         shell: bash
         run: |
-          rm -rf sketch
-          cp -r Examples/Arduino/08_Audio_Test sketch
-          cd sketch
-          
-          find . -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.ino" \) \
+          SKETCH_DIR="Examples/Arduino/08_Audio_Test"
+
+          # Remove demo includes
+          find "$SKETCH_DIR" -type f \( -name "*.c" -o -name "*.h" -o -name "*.ino" -o -name "*.cpp" \) \
             -exec sed -i 's|#include "demos/lv_demos.h"|// #include "demos/lv_demos.h"|g' {} + 2>/dev/null || true
-          find . -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.ino" \) \
-            -exec sed -i 's|lv_demo_widgets();|// lv_demo_widgets();|g' {} + 2>/dev/null || true
-          rm -f 08_Audio_Test.ino
+          find "$SKETCH_DIR" -type f \( -name "*.c" -o -name "*.h" -o -name "*.ino" -o -name "*.cpp" \) \
+            -exec sed -i 's|#include <demos/lv_demos.h>|// #include <demos/lv_demos.h>|g' {} + 2>/dev/null || true
 
-          python3 - << 'PYEOF'
-          import re, os, glob
-
-          sketch_dir = "."
-          port_path = f"{sketch_dir}/lvgl_port.c"
-          h_path = f"{sketch_dir}/lvgl_port.h"
-
-          with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
-              h_content = f.read()
-          with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
-              c_content = f.read()
-
-          if "lvgl_port_lock" not in h_content:
-              if "example_lvgl_lock" in c_content:
-                  c_content += """
-          bool lvgl_port_lock(uint32_t timeout_ms) { return example_lvgl_lock(timeout_ms); }
-          void lvgl_port_unlock(void) { example_lvgl_unlock(); }
-          """
-              else:
-                  mux_var = "lvgl_port_mux"
-                  c_content = re.sub(
-                      r'(#include[^\n]+\n)(?![^\n]*#include)',
-                      r'\1\nstatic SemaphoreHandle_t ' + mux_var + ' = NULL;\n',
-                      c_content, count=1, flags=re.DOTALL)
-                  c_content = re.sub(
-                      r'(esp_err_t\s+lvgl_port_init\s*\([^)]*\)\s*\{)',
-                      r'\1\n    ' + mux_var + ' = xSemaphoreCreateMutex();',
-                      c_content, count=1)
-                  c_content += f"""
-          bool lvgl_port_lock(uint32_t timeout_ms) {{
-              if ({mux_var} == NULL) return false;
-              return xSemaphoreTake({mux_var}, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
-          }}
-          void lvgl_port_unlock(void) {{
-              if ({mux_var} != NULL) xSemaphoreGive({mux_var});
-          }}
-          """
-              h_content += """
-          #ifdef __cplusplus
-          extern "C" {
-          #endif
-          bool lvgl_port_lock(uint32_t timeout_ms);
-          void lvgl_port_unlock(void);
-          #ifdef __cplusplus
-          }
-          #endif
-          """
-              with open(h_path, "w", encoding="utf-8") as f:
-                  f.write(h_content)
-              with open(port_path, "w", encoding="utf-8") as f:
-                  f.write(c_content)
-
-          i2c_init_func = "bsp_i2c_init"
-          for hh in glob.glob(f"{sketch_dir}/*.h"):
-              with open(hh, "r", encoding="utf-8", errors="ignore") as f:
-                  h = f.read()
-              for f_name, f_args in re.findall(r'(?:esp_err_t|void|int|bool)\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*;', h):
-                  if "i2c" in f_name.lower() and "init" in f_name.lower() and f_args.strip() in ("", "void"):
-                      i2c_init_func = f_name
-                      break
-
-          with open("i2c_func.txt", "w") as f:
-              f.write(i2c_init_func)
-          PYEOF
-
-      - name: Create secrets.h from GitHub Secrets
-        shell: bash
-        run: |
-          echo "#pragma once" > sketch/secrets.h
-          echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
-
-      - name: Write sketch.ino
-        shell: bash
-        run: |
-          I2C_FUNC=$(cat sketch/i2c_func.txt)
-
-          python3 - << PYEOF
-          import textwrap
-
-          i2c_init = "$I2C_FUNC"
-
-          code = textwrap.dedent(r'''
+          cat << 'INOPAYLOAD' > "$SKETCH_DIR/08_Audio_Test.ino"
           #include <Arduino.h>
           #include <WiFi.h>
-          #include <WebSocketsClient.h>
-          #include <ArduinoJson.h>
-          #include <base64.h>
-
-          #include "secrets.h"
-
+          #include <time.h>
+          #include <WiFiClient.h>
+          #include <math.h>
+          
           extern "C" {
-          #include "lvgl_port.h"
           #include "i2c_bsp.h"
-          #include "src/codec_board/codec_board.h"
-          #include "src/codec_board/codec_init.h"
-          #include "src/tca9554/esp_io_expander_tca9554.h"
+          #include "lvgl_port.h"
+          #include "audio_bsp.h"
           }
-
-          const char* WIFI_SSID = "TP-Link_2.4G_9318_Guest";
-          const char* WIFI_PASS = "revelion";
-          const char* GEMINI_API_KEY = SECRET_GEMINI_API_KEY;
-
-          esp_codec_dev_handle_t playback = NULL;
-          esp_codec_dev_handle_t record = NULL;
-          esp_io_expander_handle_t io_expander = NULL;
-          WebSocketsClient ws;
-
-          volatile int g_state = 0;
-          volatile int g_rx_kb = 0;
-          volatile int g_tx_kb = 0;
-          volatile int g_peak  = 0;
-          volatile int g_setup_ok = 0;
-
-          lv_obj_t *lbl_state = NULL;
-          lv_obj_t *lbl_rx    = NULL;
-          lv_obj_t *lbl_tx    = NULL;
-          lv_obj_t *lbl_peak  = NULL;
-
-          static int16_t buf_in_stereo[2048];
-          static int16_t buf_mono_24k[1024];
-          static int16_t buf_mono_16k[682];
-          static int16_t buf_out_stereo[256];
-
-          void tca9554_init_local() {
-              i2c_master_bus_handle_t bus;
-              ESP_ERROR_CHECK(i2c_master_get_bus_handle(0, &bus));
-              esp_io_expander_new_i2c_tca9554(bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander);
-              esp_io_expander_set_dir(io_expander, IO_EXPANDER_PIN_NUM_7, IO_EXPANDER_OUTPUT);
-              esp_io_expander_set_level(io_expander, IO_EXPANDER_PIN_NUM_7, 1);
-              Serial.println("[TCA] Codec reset released");
-          }
-
-          void audio_init_local() {
-              set_codec_board_type((char*)"S3_LCD_3_49");
-              codec_init_cfg_t cfg = {
-                  .in_mode = CODEC_I2S_MODE_TDM,
-                  .out_mode = CODEC_I2S_MODE_TDM,
-                  .in_use_tdm = false,
-                  .reuse_dev = false,
-              };
-              ESP_ERROR_CHECK(init_codec(&cfg));
-              playback = get_playback_handle();
-              record   = get_record_handle();
-              Serial.println("[AUDIO] Codec initialized");
-          }
-
-          void audio_open_local() {
-              esp_codec_dev_set_out_vol(playback, 100.0);
-              esp_codec_dev_set_in_gain(record, 35.0);
-              esp_codec_dev_sample_info_t fs = {};
-              fs.sample_rate = 24000;
-              fs.channel = 2;
-              fs.bits_per_sample = 16;
-              esp_codec_dev_open(playback, &fs);
-              esp_codec_dev_open(record, &fs);
-              Serial.println("[AUDIO] Opened @24kHz stereo");
-          }
-
-          void wsEvent(WStype_t type, uint8_t* payload, size_t len) {
-              switch (type) {
-                  case WStype_CONNECTED: {
-                      Serial.println("[WS] CONNECTED");
-                      g_state = 2;
-                      JsonDocument doc;
-                      doc["setup"]["model"] = "models/gemini-2.5-flash-live-preview";
-                      doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
-                      doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Kore";
-                      String out;
-                      serializeJson(doc, out);
-                      ws.sendTXT(out);
-                      Serial.printf("[WS] Setup sent: %s\n", out.c_str());
-                      g_setup_ok = 1;
-                      g_state = 3;
-                      break;
+          #include <lvgl.h>
+          
+          #define LCD_BL    42
+          #define BOOT_BTN  0
+          #define PWR_BTN   16
+          
+          const char* ssid     = "TP-Link_2.4G_9318_Guest";
+          const char* password = "revelion";
+          
+          // ---------- UI HANDLES ----------
+          lv_obj_t *lbl_title      = NULL;
+          lv_obj_t *lbl_clock      = NULL;
+          lv_obj_t *lbl_date       = NULL;
+          lv_obj_t *lbl_touch_xy   = NULL;
+          lv_obj_t *lbl_touch_st   = NULL;
+          lv_obj_t *lbl_boot       = NULL;
+          lv_obj_t *lbl_pwr        = NULL;
+          lv_obj_t *lbl_wifi       = NULL;
+          lv_obj_t *lbl_ping       = NULL;
+          lv_obj_t *lbl_mic_status = NULL;
+          lv_obj_t *lbl_mic_peak   = NULL;
+          lv_obj_t *bar_mic_level  = NULL;
+          lv_obj_t *lbl_spk_status = NULL;
+          lv_obj_t *btn_spk_test   = NULL;
+          lv_obj_t *touch_dot      = NULL;
+          
+          // ---------- STATE ----------
+          volatile bool g_boot_pressed = false;
+          volatile bool g_pwr_pressed  = false;
+          volatile int  g_mic_peak     = 0;
+          volatile int  g_mic_level    = 0;
+          volatile bool g_mic_active   = false;
+          volatile bool g_playing_beep = false;
+          
+          char g_clock_str[16] = "--:--:--";
+          char g_date_str[32]  = "-- --- ----";
+          char g_wifi_str[64]  = "WiFi: conectare...";
+          char g_ping_str[48]  = "Internet: --";
+          
+          bool last_boot_state = HIGH;
+          bool last_pwr_state  = HIGH;
+          
+          // ---------- SPEAKER BEEP GENERATOR ----------
+          void play_speaker_test_beep() {
+              if (g_playing_beep) return;
+              g_playing_beep = true;
+              Serial.println("[SPEAKER] Playing test tone (1kHz)...");
+              
+              const int sample_rate = 24000;
+              const float freq = 1000.0;
+              const int num_samples = sample_rate / 2;
+              int16_t *buffer = (int16_t*)malloc(num_samples * 2 * sizeof(int16_t));
+              if (buffer) {
+                  for (int i = 0; i < num_samples; i++) {
+                      int16_t sample = (int16_t)(10000.0 * sinf(2.0 * 3.14159265 * freq * i / sample_rate));
+                      buffer[i * 2]     = sample;
+                      buffer[i * 2 + 1] = sample;
                   }
-                  case WStype_DISCONNECTED:
-                      Serial.println("[WS] DISCONNECTED");
-                      g_state = 1;
-                      break;
-                  case WStype_TEXT: {
-                      int n = len > 200 ? 200 : len;
-                      Serial.printf("[WS] TEXT: %.*s\n", n, payload);
-                      break;
-                  }
-                  case WStype_BIN: {
-                      int mono_count = len / 2;
-                      for (int off = 0; off < mono_count; off += 128) {
-                          int n = mono_count - off;
-                          if (n > 128) n = 128;
-                          int16_t *src = (int16_t*)payload + off;
-                          for (int i = 0; i < n; i++) {
-                              buf_out_stereo[i*2]   = src[i];
-                              buf_out_stereo[i*2+1] = src[i];
-                          }
-                          esp_codec_dev_write(playback, buf_out_stereo, n * 4);
-                      }
-                      g_rx_kb += len / 1024;
-                      break;
-                  }
-                  case WStype_ERROR:
-                      Serial.println("[WS] ERROR");
-                      break;
-                  default: break;
+                  audio_write(buffer, num_samples * 2 * sizeof(int16_t));
+                  free(buffer);
+              }
+              g_playing_beep = false;
+              Serial.println("[SPEAKER] Beep complete!");
+          }
+          
+          static void spk_btn_event_cb(lv_event_t *e) {
+              lv_event_code_t code = lv_event_get_code(e);
+              if (code == LV_EVENT_CLICKED) {
+                  play_speaker_test_beep();
               }
           }
-
-          void ui_timer_cb(lv_timer_t *t) {
-              if (lbl_state) {
-                  const char* s = "?";
-                  switch (g_state) {
-                      case 0: s = "Init"; break;
-                      case 1: s = "WiFi/WS..."; break;
-                      case 2: s = "Setup"; break;
-                      case 3: s = "LIVE!"; break;
-                  }
-                  lv_label_set_text(lbl_state, s);
-                  lv_obj_set_style_text_color(lbl_state,
-                      g_state == 3 ? lv_color_hex(0x22C55E) : lv_color_hex(0xFFFFFF), 0);
-              }
-              if (lbl_rx) {
-                  char b[32]; snprintf(b, sizeof(b), "RX: %d KB", g_rx_kb);
-                  lv_label_set_text(lbl_rx, b);
-              }
-              if (lbl_tx) {
-                  char b[32]; snprintf(b, sizeof(b), "TX: %d KB", g_tx_kb);
-                  lv_label_set_text(lbl_tx, b);
-              }
-              if (lbl_peak) {
-                  char b[32]; snprintf(b, sizeof(b), "Peak: %d", g_peak);
-                  lv_label_set_text(lbl_peak, b);
+          
+          // ---------- TOUCH EVENT ----------
+          static void touch_event_cb(lv_event_t *e) {
+              lv_event_code_t code = lv_event_get_code(e);
+              lv_indev_t *indev = lv_indev_get_act();
+              if (!indev || !lbl_touch_xy || !lbl_touch_st) return;
+              lv_point_t p;
+              lv_indev_get_point(indev, &p);
+              
+              char buf[40];
+              snprintf(buf, sizeof(buf), "Touch X:%d Y:%d", p.x, p.y);
+              lv_label_set_text(lbl_touch_xy, buf);
+              if (touch_dot) lv_obj_set_pos(touch_dot, p.x - 10, p.y - 10);
+              
+              if (code == LV_EVENT_PRESSED) {
+                  lv_label_set_text(lbl_touch_st, "Touch: APASAT");
+                  lv_obj_set_style_text_color(lbl_touch_st, lv_color_hex(0xFF0000), 0);
+                  if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0xFF0000), 0);
+              } else if (code == LV_EVENT_RELEASED) {
+                  lv_label_set_text(lbl_touch_st, "Touch: Eliberat");
+                  lv_obj_set_style_text_color(lbl_touch_st, lv_color_hex(0x00AA00), 0);
+                  if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);
               }
           }
-
+          
+          // ---------- UI UPDATE CALLBACK (Safe) ----------
+          static void ui_update_cb(void *arg) {
+              bool b = g_boot_pressed;
+              bool p = g_pwr_pressed;
+              bool mic_on = g_mic_active;
+          
+              if (lbl_boot) {
+                  lv_label_set_text(lbl_boot, b ? "BOOT: APASAT" : "BOOT: liber");
+                  lv_obj_set_style_text_color(lbl_boot, b ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF), 0);
+              }
+              if (lbl_pwr) {
+                  lv_label_set_text(lbl_pwr, p ? "PWR: APASAT" : "PWR: liber");
+                  lv_obj_set_style_text_color(lbl_pwr, p ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF), 0);
+              }
+              if (lbl_clock) lv_label_set_text(lbl_clock, g_clock_str);
+              if (lbl_date)  lv_label_set_text(lbl_date, g_date_str);
+              if (lbl_wifi)  lv_label_set_text(lbl_wifi, g_wifi_str);
+              if (lbl_ping)  lv_label_set_text(lbl_ping, g_ping_str);
+              if (lbl_mic_status) {
+                  lv_label_set_text(lbl_mic_status, mic_on ? "MIC: ACTIV" : "MIC: MUT");
+                  lv_obj_set_style_text_color(lbl_mic_status,
+                      mic_on ? lv_color_hex(0x22C55E) : lv_color_hex(0xEF4444), 0);
+              }
+              if (lbl_mic_peak) {
+                  char pbuf[32]; snprintf(pbuf, sizeof(pbuf), "Mic Peak: %d", g_mic_peak);
+                  lv_label_set_text(lbl_mic_peak, pbuf);
+              }
+              if (bar_mic_level) {
+                  lv_bar_set_value(bar_mic_level, g_mic_level, LV_ANIM_OFF);
+                  lv_obj_set_style_bg_color(bar_mic_level,
+                      mic_on ? lv_color_hex(0x22C55E) : lv_color_hex(0xEF4444),
+                      LV_PART_INDICATOR);
+              }
+              if (lbl_spk_status) {
+                  lv_label_set_text(lbl_spk_status, g_playing_beep ? "DIFUZOR: REDARE" : "TEST DIFUZOR");
+              }
+          }
+          
           void build_ui() {
+              pinMode(LCD_BL, OUTPUT);
+              digitalWrite(LCD_BL, LOW);
+          
               lvgl_port_lock(1000);
               lv_obj_t *scr = lv_scr_act();
+              if (!scr) { lvgl_port_unlock(); return; }
+          
               lv_obj_clean(scr);
               lv_obj_set_style_bg_color(scr, lv_color_hex(0x0F172A), 0);
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-
-              lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Gemini Live");
-              lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
-              lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
-              lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
-
-              lbl_state = lv_label_create(scr);
-              lv_label_set_text(lbl_state, "Init");
-              lv_obj_set_style_text_color(lbl_state, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_state, &lv_font_montserrat_28, 0);
-              lv_obj_align(lbl_state, LV_ALIGN_CENTER, 0, -60);
-
-              lbl_peak = lv_label_create(scr);
-              lv_label_set_text(lbl_peak, "Peak: 0");
-              lv_obj_set_style_text_color(lbl_peak, lv_color_hex(0x94A3B8), 0);
-              lv_obj_set_style_text_font(lbl_peak, &lv_font_montserrat_16, 0);
-              lv_obj_align(lbl_peak, LV_ALIGN_CENTER, 0, 0);
-
-              lbl_rx = lv_label_create(scr);
-              lv_label_set_text(lbl_rx, "RX: 0 KB");
-              lv_obj_set_style_text_color(lbl_rx, lv_color_hex(0x22C55E), 0);
-              lv_obj_set_style_text_font(lbl_rx, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_rx, LV_ALIGN_CENTER, 0, 50);
-
-              lbl_tx = lv_label_create(scr);
-              lv_label_set_text(lbl_tx, "TX: 0 KB");
-              lv_obj_set_style_text_color(lbl_tx, lv_color_hex(0x38BDF8), 0);
-              lv_obj_set_style_text_font(lbl_tx, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_tx, LV_ALIGN_CENTER, 0, 80);
-
+          
+              lbl_title = lv_label_create(scr);
+              lv_label_set_text(lbl_title, "Gemini OS v62 Suite");
+              lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x38BDF8), 0);
+              lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_18, 0);
+              lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, 8);
+          
+              lbl_clock = lv_label_create(scr);
+              lv_label_set_text(lbl_clock, "--:--:--");
+              lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0xFFFFFF), 0);
+              lv_obj_set_style_text_font(lbl_clock, &lv_font_montserrat_28, 0);
+              lv_obj_align(lbl_clock, LV_ALIGN_TOP_MID, 0, 32);
+          
+              lbl_date = lv_label_create(scr);
+              lv_label_set_text(lbl_date, "-- --- ----");
+              lv_obj_set_style_text_color(lbl_date, lv_color_hex(0x94A3B8), 0);
+              lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_12, 0);
+              lv_obj_align(lbl_date, LV_ALIGN_TOP_MID, 0, 68);
+          
+              // Box Microfon
+              lv_obj_t *mic_box = lv_obj_create(scr);
+              lv_obj_set_size(mic_box, 154, 90);
+              lv_obj_align(mic_box, LV_ALIGN_TOP_MID, 0, 90);
+              lv_obj_set_style_bg_color(mic_box, lv_color_hex(0x1E293B), 0);
+              lv_obj_set_style_border_width(mic_box, 2, 0);
+              lv_obj_set_style_border_color(mic_box, lv_color_hex(0x475569), 0);
+              lv_obj_set_style_radius(mic_box, 8, 0);
+              lv_obj_clear_flag(mic_box, LV_OBJ_FLAG_SCROLLABLE);
+          
+              lbl_mic_status = lv_label_create(mic_box);
+              lv_label_set_text(lbl_mic_status, "MIC: MUT");
+              lv_obj_set_style_text_color(lbl_mic_status, lv_color_hex(0xEF4444), 0);
+              lv_obj_set_style_text_font(lbl_mic_status, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_mic_status, LV_ALIGN_TOP_MID, 0, 2);
+          
+              bar_mic_level = lv_bar_create(mic_box);
+              lv_obj_set_size(bar_mic_level, 130, 10);
+              lv_obj_align(bar_mic_level, LV_ALIGN_TOP_MID, 0, 26);
+              lv_bar_set_range(bar_mic_level, 0, 100);
+              lv_obj_set_style_bg_color(bar_mic_level, lv_color_hex(0x0F172A), LV_PART_MAIN);
+              lv_obj_set_style_bg_color(bar_mic_level, lv_color_hex(0xEF4444), LV_PART_INDICATOR);
+          
+              lbl_mic_peak = lv_label_create(mic_box);
+              lv_label_set_text(lbl_mic_peak, "Mic Peak: 0");
+              lv_obj_set_style_text_color(lbl_mic_peak, lv_color_hex(0xFFFFFF), 0);
+              lv_obj_set_style_text_font(lbl_mic_peak, &lv_font_montserrat_12, 0);
+              lv_obj_align(lbl_mic_peak, LV_ALIGN_TOP_MID, 0, 42);
+          
+              // Buton Test Difuzor
+              btn_spk_test = lv_btn_create(scr);
+              lv_obj_set_size(btn_spk_test, 154, 38);
+              lv_obj_align(btn_spk_test, LV_ALIGN_TOP_MID, 0, 190);
+              lv_obj_set_style_bg_color(btn_spk_test, lv_color_hex(0x2563EB), 0);
+              lv_obj_add_event_cb(btn_spk_test, spk_btn_event_cb, LV_EVENT_CLICKED, NULL);
+          
+              lbl_spk_status = lv_label_create(btn_spk_test);
+              lv_label_set_text(lbl_spk_status, "TEST DIFUZOR");
+              lv_obj_set_style_text_font(lbl_spk_status, &lv_font_montserrat_14, 0);
+              lv_obj_center(lbl_spk_status);
+          
+              // Stari Touch & Butoane
+              lbl_touch_xy = lv_label_create(scr);
+              lv_label_set_text(lbl_touch_xy, "Touch X:-- Y:--");
+              lv_obj_set_style_text_color(lbl_touch_xy, lv_color_hex(0xFFFFFF), 0);
+              lv_obj_set_style_text_font(lbl_touch_xy, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_touch_xy, LV_ALIGN_TOP_MID, 0, 240);
+          
+              lbl_touch_st = lv_label_create(scr);
+              lv_label_set_text(lbl_touch_st, "Touch: Eliberat");
+              lv_obj_set_style_text_color(lbl_touch_st, lv_color_hex(0x00AA00), 0);
+              lv_obj_set_style_text_font(lbl_touch_st, &lv_font_montserrat_12, 0);
+              lv_obj_align(lbl_touch_st, LV_ALIGN_TOP_MID, 0, 262);
+          
+              lbl_boot = lv_label_create(scr);
+              lv_label_set_text(lbl_boot, "BOOT: liber");
+              lv_obj_set_style_text_color(lbl_boot, lv_color_hex(0xFFFFFF), 0);
+              lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_boot, LV_ALIGN_TOP_MID, 0, 285);
+          
+              lbl_pwr = lv_label_create(scr);
+              lv_label_set_text(lbl_pwr, "PWR: liber");
+              lv_obj_set_style_text_color(lbl_pwr, lv_color_hex(0xFFFFFF), 0);
+              lv_obj_set_style_text_font(lbl_pwr, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_pwr, LV_ALIGN_TOP_MID, 0, 310);
+          
+              lbl_wifi = lv_label_create(scr);
+              lv_label_set_text(lbl_wifi, "WiFi: conectare...");
+              lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x64748B), 0);
+              lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_12, 0);
+              lv_obj_align(lbl_wifi, LV_ALIGN_TOP_MID, 0, 335);
+          
+              lbl_ping = lv_label_create(scr);
+              lv_label_set_text(lbl_ping, "Internet: --");
+              lv_obj_set_style_text_color(lbl_ping, lv_color_hex(0x64748B), 0);
+              lv_obj_set_style_text_font(lbl_ping, &lv_font_montserrat_12, 0);
+              lv_obj_align(lbl_ping, LV_ALIGN_TOP_MID, 0, 355);
+          
+              touch_dot = lv_obj_create(scr);
+              lv_obj_set_size(touch_dot, 20, 20);
+              lv_obj_set_style_radius(touch_dot, LV_RADIUS_CIRCLE, 0);
+              lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);
+              lv_obj_set_style_bg_opa(touch_dot, LV_OPA_80, 0);
+              lv_obj_set_style_border_width(touch_dot, 0, 0);
+              lv_obj_set_pos(touch_dot, 10, 10);
+          
+              lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_PRESSED,  NULL);
+              lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_RELEASED, NULL);
+          
               lvgl_port_unlock();
-              lv_timer_create(ui_timer_cb, 500, NULL);
-              Serial.println("[UI] Built");
+              Serial.println("[UI] Gemini OS v62 Built!");
           }
-
+          
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v13-gemini-live-fixed");
-
-              I2C_INIT_CALL
+              Serial.println("\n[BOOT] Gemini OS v62 All-In-One Diagnostic Suite");
+          
+              pinMode(BOOT_BTN, INPUT_PULLUP);
+              pinMode(PWR_BTN, INPUT_PULLUP);
+          
+              bsp_i2c_init();
               delay(50);
-
               lvgl_port_init();
-              delay(300);
+              delay(200);
+          
+              // Init Official Audio Hardware (ES7210 + ES8311)
+              audio_init();
+              delay(200);
+          
               build_ui();
-
-              tca9554_init_local();
-              delay(100);
-              audio_init_local();
-              delay(100);
-              audio_open_local();
-              delay(100);
-
-              g_state = 1;
-              WiFi.mode(WIFI_STA);
-              WiFi.begin(WIFI_SSID, WIFI_PASS);
+          
               Serial.println("[WiFi] Connecting...");
-
-              int tries = 0;
-              while (WiFi.status() != WL_CONNECTED && tries < 30) {
-                  delay(500);
-                  Serial.print(".");
-                  tries++;
-              }
-              Serial.println();
-              if (WiFi.status() != WL_CONNECTED) {
-                  Serial.println("[WiFi] FAILED");
-                  return;
-              }
-              Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
-
-              String path = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + String(GEMINI_API_KEY);
-              ws.beginSSL("generativelanguage.googleapis.com", 443, path.c_str());
-              ws.onEvent(wsEvent);
-              ws.setReconnectInterval(5000);
-              Serial.println("[WS] Connecting...");
+              WiFi.mode(WIFI_STA);
+              WiFi.setSleep(false);
+              WiFi.begin(ssid, password);
           }
-
+          
           void loop() {
-              ws.loop();
-
-              if (g_state == 3) {
-                  static uint32_t last = 0;
-                  if (millis() - last > 60) {
-                      last = millis();
-
-                      int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
-                      if (r == ESP_OK) {
-                          int frames = (sizeof(buf_in_stereo)/sizeof(int16_t)) / 2;
-                          int32_t peak = 0;
-                          for (int i = 0; i < frames; i++) {
-                              int16_t s = buf_in_stereo[i*2];
-                              int32_t a = s < 0 ? -s : s;
-                              if (a > peak) peak = a;
-                              buf_mono_24k[i] = s;
-                          }
-                          g_peak = (int)peak;
-
-                          int out_count = frames * 2 / 3;
-                          if (out_count > (int)(sizeof(buf_mono_16k)/sizeof(int16_t)))
-                              out_count = sizeof(buf_mono_16k)/sizeof(int16_t);
-                          for (int i = 0; i < out_count; i++) {
-                              int src = (i * 3) / 2;
-                              if (src >= frames) src = frames - 1;
-                              buf_mono_16k[i] = buf_mono_24k[src];
-                          }
-
-                          String b64_str = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
-                          if (b64_str.length() > 0) {
-                              JsonDocument doc;
-                              doc["realtimeInput"]["audio"]["mimeType"] = "audio/pcm;rate=16000";
-                              doc["realtimeInput"]["audio"]["data"] = b64_str;
-                              String out;
-                              serializeJson(doc, out);
-                              ws.sendTXT(out);
-                              g_tx_kb += (out_count * 2) / 1024;
-                          }
+              // Butoane cu Debounce
+              bool b_raw = digitalRead(BOOT_BTN);
+              bool p_raw = digitalRead(PWR_BTN);
+          
+              if (b_raw != last_boot_state) {
+                  last_boot_state = b_raw;
+                  g_boot_pressed = (b_raw == LOW);
+                  Serial.printf("[BTN] BOOT: %s\n", g_boot_pressed ? "APASAT" : "ELIBERAT");
+                  if (g_boot_pressed) play_speaker_test_beep();
+                  lv_async_call(ui_update_cb, NULL);
+              }
+          
+              if (p_raw != last_pwr_state) {
+                  last_pwr_state = p_raw;
+                  g_pwr_pressed = (p_raw == LOW);
+                  Serial.printf("[BTN] PWR: %s\n", g_pwr_pressed ? "APASAT" : "ELIBERAT");
+                  lv_async_call(ui_update_cb, NULL);
+              }
+          
+              // Citire Microfon
+              static int16_t mic_buf[512];
+              size_t bytes_read = 0;
+              if (audio_read(mic_buf, sizeof(mic_buf), &bytes_read) == 0 && bytes_read > 0) {
+                  int samples = bytes_read / sizeof(int16_t);
+                  int32_t peak = 0;
+                  for (int i = 0; i < samples; i++) {
+                      int32_t v = mic_buf[i];
+                      if (v < 0) v = -v;
+                      if (v > peak) peak = v;
+                  }
+                  g_mic_peak = (int)peak;
+                  g_mic_level = (int)((peak * 100) / 32768);
+                  if (g_mic_level > 100) g_mic_level = 100;
+                  g_mic_active = (peak > 300);
+                  lv_async_call(ui_update_cb, NULL);
+              }
+          
+              // Wi-Fi / NTP / Ping
+              wl_status_t wstat = WiFi.status();
+              static bool ntp_done = false;
+              if (wstat == WL_CONNECTED) {
+                  static bool was_connected = false;
+                  if (!was_connected) {
+                      was_connected = true;
+                      snprintf(g_wifi_str, sizeof(g_wifi_str), "WiFi: %s", WiFi.localIP().toString().c_str());
+                      lv_async_call(ui_update_cb, NULL);
+                  }
+                  if (!ntp_done) {
+                      ntp_done = true;
+                      configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.google.com");
+                  }
+                  static unsigned long last_clock = 0;
+                  if (millis() - last_clock > 1000) {
+                      last_clock = millis();
+                      struct tm ti;
+                      if (getLocalTime(&ti, 50)) {
+                          strftime(g_clock_str, sizeof(g_clock_str), "%H:%M:%S", &ti);
+                          strftime(g_date_str, sizeof(g_date_str), "%d %b %Y", &ti);
+                          lv_async_call(ui_update_cb, NULL);
                       }
                   }
+                  static unsigned long last_ping = 0;
+                  if (millis() - last_ping > 10000) {
+                      last_ping = millis();
+                      WiFiClient c;
+                      unsigned long t0 = millis();
+                      bool ok = c.connect("1.1.1.1", 53, 2000);
+                      unsigned long lat = millis() - t0;
+                      c.stop();
+                      if (ok) {
+                          snprintf(g_ping_str, sizeof(g_ping_str), "Internet: OK (%lu ms)", lat);
+                      } else {
+                          snprintf(g_ping_str, sizeof(g_ping_str), "Internet: FAIL");
+                      }
+                      lv_async_call(ui_update_cb, NULL);
+                  }
               }
-
-              delay(10);
+          
+              delay(20);
           }
-          ''')
+          INOPAYLOAD
 
-          code = code.replace("I2C_INIT_CALL", f"{i2c_init}();")
-
-          with open("sketch/sketch.ino", "w", encoding="utf-8") as f:
-              f.write(code.lstrip())
-          print("[OK] sketch.ino written")
-          PYEOF
-
-      - name: Compile
+      - name: Compile Gemini OS v62
         run: |
-          SKETCH_PATH="sketch/sketch.ino"
+          SKETCH_PATH="Examples/Arduino/08_Audio_Test/08_Audio_Test.ino"
           FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
           arduino-cli compile --fqbn "$FQBN" --output-dir build_output "$SKETCH_PATH"
 
-      - name: Merge
+      - name: Merge into Single .bin
         shell: bash
         run: |
           mkdir -p package_bin
@@ -469,14 +479,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v13-live-0x0.bin \
+            -o package_bin/gemini-v62-diagnostic-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v13-live-0x0.bin
+          ls -lh package_bin/gemini-v62-diagnostic-0x0.bin
 
-      - name: Upload
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v13-live
-          path: package_bin/gemini-v13-live-0x0.bin
+          name: gemini-v62-diagnostic
+          path: package_bin/gemini-v62-diagnostic-0x0.bin
           if-no-files-found: error
