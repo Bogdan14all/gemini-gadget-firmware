@@ -1,11 +1,11 @@
-name: Build Gemini OS - v26 Gemini Live (Exact Official Specs)
+name: Build Gemini OS - v27 Gemini Live (Back to Working Model)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v26 Gemini Live
+    name: Build v27 Gemini Live
     runs-on: ubuntu-latest
 
     steps:
@@ -244,29 +244,32 @@ jobs:
                   case WStype_CONNECTED: {
                       Serial.println("[WS] CONNECTED");
                       g_state = 2;
-                      delay(100); // Lăsăm socket-ul să se stabilizeze
+                      delay(100); // Stabilizare socket
 
                       JsonDocument doc;
-                      // Structură EXACTĂ conform Google GenAI SDK Live API
-                      doc["setup"]["model"] = "models/gemini-2.0-flash-exp";
-                      doc["setup"]["generation_config"]["response_modalities"][0] = "AUDIO";
-                      doc["setup"]["generation_config"]["speech_config"]["voice_config"]["prebuilt_voice_config"]["voice_name"] = "Puck";
+                      // Modelul care ne-a dat LIVE! (verde)
+                      doc["setup"]["model"] = "models/gemini-2.0-flash-live-001";
+                      doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
+                      doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Puck";
+                      // System Instruction
+                      doc["setup"]["systemInstruction"]["parts"][0]["text"] = "Raspunde intotdeauna exclusiv in limba romana, intr-un mod concis si natural.";
                       
                       String out;
                       serializeJson(doc, out);
                       ws.sendTXT(out);
-                      Serial.printf("[WS] Setup sent: %s\n", out.c_str());
+                      Serial.printf("[WS] Setup sent.\n");
                       break;
                   }
                   case WStype_DISCONNECTED:
-                      Serial.printf("[WS] DISCONNECTED. Payload: %.*s\n", (int)len, payload);
+                      Serial.printf("[WS] DISCONNECTED\n");
                       g_state = 1;
                       break;
                   case WStype_TEXT: {
-                      Serial.printf("[WS] TEXT: %.*s\n", (int)(len > 200 ? 200 : len), payload);
                       if (strstr((char*)payload, "setupComplete") != NULL) {
                           Serial.println("[WS] >>> SETUP COMPLETE! Suntem LIVE! <<<");
                           g_state = 3;
+                      } else {
+                          Serial.printf("[WS] TEXT: %.*s\n", (int)(len > 150 ? 150 : len), payload);
                       }
                       break;
                   }
@@ -285,9 +288,6 @@ jobs:
                       g_rx_kb += len / 1024;
                       break;
                   }
-                  case WStype_ERROR:
-                      Serial.printf("[WS] ERROR: %.*s\n", (int)len, payload);
-                      break;
                   default: break;
               }
           }
@@ -364,7 +364,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v26-gemini-live-exact-spec");
+              Serial.println("\n[BOOT] v27-gemini-live-back-to-working");
 
               I2C_INIT_CALL
               delay(50);
@@ -431,8 +431,9 @@ jobs:
                       String b64_str = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
                       if (b64_str.length() > 0) {
                           JsonDocument doc;
-                          doc["realtime_input"]["audio"]["mime_type"] = "audio/pcm;rate=16000";
-                          doc["realtime_input"]["audio"]["data"] = b64_str;
+                          // Formatul corect de array (mediaChunks)
+                          doc["realtimeInput"]["mediaChunks"][0]["mimeType"] = "audio/pcm;rate=16000";
+                          doc["realtimeInput"]["mediaChunks"][0]["data"] = b64_str;
                           String out;
                           serializeJson(doc, out);
                           ws.sendTXT(out);
@@ -466,14 +467,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v26-live-0x0.bin \
-            --flash_mode keep --flash_size 16MB --flash_freq 80m \
+            -o package_bin/gemini-v27-live-0x0.bin \
+            --flash_mode keep --flash_size 16MB --flash_freq 80fm \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v26-live-0x0.bin
+          ls -lh package_bin/gemini-v27-live-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v26-live
-          path: package_bin/gemini-v26-live-0x0.bin
+          name: gemini-v27-live
+          path: package_bin/gemini-v27-live-0x0.bin
           if-no-files-found: error
