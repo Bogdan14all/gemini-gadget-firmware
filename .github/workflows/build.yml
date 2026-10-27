@@ -1,11 +1,11 @@
-name: Build Gemini OS - v62 Full All-In-One Hardware Diagnostic Suite
+name: Build Gemini OS - v63 Core Fix (driver/i2c_master.h)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v62
+    name: Build v63
     runs-on: ubuntu-latest
 
     steps:
@@ -25,14 +25,14 @@ jobs:
           pip install "esptool<5"
           sudo apt-get update && sudo apt-get install -y zip
 
-      - name: Setup Arduino CLI & ESP32 Core
+      - name: Setup Arduino CLI & ESP32 Core (Latest for driver/i2c_master.h support)
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
           sudo mv bin/arduino-cli /usr/local/bin/
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32@3.0.7
+          arduino-cli core install esp32:esp32
 
       - name: Install LVGL 8.3.11
         shell: bash
@@ -51,6 +51,8 @@ jobs:
           #define LV_COLOR_16_SWAP 1
           #define LV_MEM_CUSTOM 0
           #define LV_MEM_SIZE (128U * 1024U)
+
+          /* IMPORTANT: 0 - exemplul apeleaza lv_tick_inc() el insusi */
           #define LV_TICK_CUSTOM 0
 
           #define LV_FONT_MONTSERRAT_12 1
@@ -58,7 +60,11 @@ jobs:
           #define LV_FONT_MONTSERRAT_16 1
           #define LV_FONT_MONTSERRAT_18 1
           #define LV_FONT_MONTSERRAT_20 1
+          #define LV_FONT_MONTSERRAT_22 0
+          #define LV_FONT_MONTSERRAT_24 0
+          #define LV_FONT_MONTSERRAT_26 0
           #define LV_FONT_MONTSERRAT_28 1
+          #define LV_FONT_MONTSERRAT_30 0
           #define LV_FONT_DEFAULT &lv_font_montserrat_20
 
           #define LV_USE_DEMO_WIDGETS 0
@@ -77,395 +83,17 @@ jobs:
           EOF
           sed -i 's/^[ \t]*//' ~/Arduino/libraries/lv_conf.h
 
-      - name: Inject Gemini OS v62 All-In-One Code
+      - name: Patch demo includes
         shell: bash
         run: |
-          SKETCH_DIR="Examples/Arduino/08_Audio_Test"
-
-          # Remove demo includes
-          find "$SKETCH_DIR" -type f \( -name "*.c" -o -name "*.h" -o -name "*.ino" -o -name "*.cpp" \) \
+          find Examples/Arduino/08_Audio_Test -type f \( -name "*.c" -o -name "*.h" -o -name "*.ino" -o -name "*.cpp" \) \
             -exec sed -i 's|#include "demos/lv_demos.h"|// #include "demos/lv_demos.h"|g' {} + 2>/dev/null || true
-          find "$SKETCH_DIR" -type f \( -name "*.c" -o -name "*.h" -o -name "*.ino" -o -name "*.cpp" \) \
+          find Examples/Arduino/08_Audio_Test -type f \( -name "*.c" -o -name "*.h" -o -name "*.ino" -o -name "*.cpp" \) \
             -exec sed -i 's|#include <demos/lv_demos.h>|// #include <demos/lv_demos.h>|g' {} + 2>/dev/null || true
+          find Examples/Arduino/08_Audio_Test -type f \( -name "*.c" -o -name "*.h" -o -name "*.ino" -o -name "*.cpp" \) \
+            -exec sed -i 's|lv_demo_widgets();|// lv_demo_widgets();|g' {} + 2>/dev/null || true
 
-          cat << 'INOPAYLOAD' > "$SKETCH_DIR/08_Audio_Test.ino"
-          #include <Arduino.h>
-          #include <WiFi.h>
-          #include <time.h>
-          #include <WiFiClient.h>
-          #include <math.h>
-          
-          extern "C" {
-          #include "i2c_bsp.h"
-          #include "lvgl_port.h"
-          #include "audio_bsp.h"
-          }
-          #include <lvgl.h>
-          
-          #define LCD_BL    42
-          #define BOOT_BTN  0
-          #define PWR_BTN   16
-          
-          const char* ssid     = "TP-Link_2.4G_9318_Guest";
-          const char* password = "revelion";
-          
-          // ---------- UI HANDLES ----------
-          lv_obj_t *lbl_title      = NULL;
-          lv_obj_t *lbl_clock      = NULL;
-          lv_obj_t *lbl_date       = NULL;
-          lv_obj_t *lbl_touch_xy   = NULL;
-          lv_obj_t *lbl_touch_st   = NULL;
-          lv_obj_t *lbl_boot       = NULL;
-          lv_obj_t *lbl_pwr        = NULL;
-          lv_obj_t *lbl_wifi       = NULL;
-          lv_obj_t *lbl_ping       = NULL;
-          lv_obj_t *lbl_mic_status = NULL;
-          lv_obj_t *lbl_mic_peak   = NULL;
-          lv_obj_t *bar_mic_level  = NULL;
-          lv_obj_t *lbl_spk_status = NULL;
-          lv_obj_t *btn_spk_test   = NULL;
-          lv_obj_t *touch_dot      = NULL;
-          
-          // ---------- STATE ----------
-          volatile bool g_boot_pressed = false;
-          volatile bool g_pwr_pressed  = false;
-          volatile int  g_mic_peak     = 0;
-          volatile int  g_mic_level    = 0;
-          volatile bool g_mic_active   = false;
-          volatile bool g_playing_beep = false;
-          
-          char g_clock_str[16] = "--:--:--";
-          char g_date_str[32]  = "-- --- ----";
-          char g_wifi_str[64]  = "WiFi: conectare...";
-          char g_ping_str[48]  = "Internet: --";
-          
-          bool last_boot_state = HIGH;
-          bool last_pwr_state  = HIGH;
-          
-          // ---------- SPEAKER BEEP GENERATOR ----------
-          void play_speaker_test_beep() {
-              if (g_playing_beep) return;
-              g_playing_beep = true;
-              Serial.println("[SPEAKER] Playing test tone (1kHz)...");
-              
-              const int sample_rate = 24000;
-              const float freq = 1000.0;
-              const int num_samples = sample_rate / 2;
-              int16_t *buffer = (int16_t*)malloc(num_samples * 2 * sizeof(int16_t));
-              if (buffer) {
-                  for (int i = 0; i < num_samples; i++) {
-                      int16_t sample = (int16_t)(10000.0 * sinf(2.0 * 3.14159265 * freq * i / sample_rate));
-                      buffer[i * 2]     = sample;
-                      buffer[i * 2 + 1] = sample;
-                  }
-                  audio_write(buffer, num_samples * 2 * sizeof(int16_t));
-                  free(buffer);
-              }
-              g_playing_beep = false;
-              Serial.println("[SPEAKER] Beep complete!");
-          }
-          
-          static void spk_btn_event_cb(lv_event_t *e) {
-              lv_event_code_t code = lv_event_get_code(e);
-              if (code == LV_EVENT_CLICKED) {
-                  play_speaker_test_beep();
-              }
-          }
-          
-          // ---------- TOUCH EVENT ----------
-          static void touch_event_cb(lv_event_t *e) {
-              lv_event_code_t code = lv_event_get_code(e);
-              lv_indev_t *indev = lv_indev_get_act();
-              if (!indev || !lbl_touch_xy || !lbl_touch_st) return;
-              lv_point_t p;
-              lv_indev_get_point(indev, &p);
-              
-              char buf[40];
-              snprintf(buf, sizeof(buf), "Touch X:%d Y:%d", p.x, p.y);
-              lv_label_set_text(lbl_touch_xy, buf);
-              if (touch_dot) lv_obj_set_pos(touch_dot, p.x - 10, p.y - 10);
-              
-              if (code == LV_EVENT_PRESSED) {
-                  lv_label_set_text(lbl_touch_st, "Touch: APASAT");
-                  lv_obj_set_style_text_color(lbl_touch_st, lv_color_hex(0xFF0000), 0);
-                  if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0xFF0000), 0);
-              } else if (code == LV_EVENT_RELEASED) {
-                  lv_label_set_text(lbl_touch_st, "Touch: Eliberat");
-                  lv_obj_set_style_text_color(lbl_touch_st, lv_color_hex(0x00AA00), 0);
-                  if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);
-              }
-          }
-          
-          // ---------- UI UPDATE CALLBACK (Safe) ----------
-          static void ui_update_cb(void *arg) {
-              bool b = g_boot_pressed;
-              bool p = g_pwr_pressed;
-              bool mic_on = g_mic_active;
-          
-              if (lbl_boot) {
-                  lv_label_set_text(lbl_boot, b ? "BOOT: APASAT" : "BOOT: liber");
-                  lv_obj_set_style_text_color(lbl_boot, b ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF), 0);
-              }
-              if (lbl_pwr) {
-                  lv_label_set_text(lbl_pwr, p ? "PWR: APASAT" : "PWR: liber");
-                  lv_obj_set_style_text_color(lbl_pwr, p ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF), 0);
-              }
-              if (lbl_clock) lv_label_set_text(lbl_clock, g_clock_str);
-              if (lbl_date)  lv_label_set_text(lbl_date, g_date_str);
-              if (lbl_wifi)  lv_label_set_text(lbl_wifi, g_wifi_str);
-              if (lbl_ping)  lv_label_set_text(lbl_ping, g_ping_str);
-              if (lbl_mic_status) {
-                  lv_label_set_text(lbl_mic_status, mic_on ? "MIC: ACTIV" : "MIC: MUT");
-                  lv_obj_set_style_text_color(lbl_mic_status,
-                      mic_on ? lv_color_hex(0x22C55E) : lv_color_hex(0xEF4444), 0);
-              }
-              if (lbl_mic_peak) {
-                  char pbuf[32]; snprintf(pbuf, sizeof(pbuf), "Mic Peak: %d", g_mic_peak);
-                  lv_label_set_text(lbl_mic_peak, pbuf);
-              }
-              if (bar_mic_level) {
-                  lv_bar_set_value(bar_mic_level, g_mic_level, LV_ANIM_OFF);
-                  lv_obj_set_style_bg_color(bar_mic_level,
-                      mic_on ? lv_color_hex(0x22C55E) : lv_color_hex(0xEF4444),
-                      LV_PART_INDICATOR);
-              }
-              if (lbl_spk_status) {
-                  lv_label_set_text(lbl_spk_status, g_playing_beep ? "DIFUZOR: REDARE" : "TEST DIFUZOR");
-              }
-          }
-          
-          void build_ui() {
-              pinMode(LCD_BL, OUTPUT);
-              digitalWrite(LCD_BL, LOW);
-          
-              lvgl_port_lock(1000);
-              lv_obj_t *scr = lv_scr_act();
-              if (!scr) { lvgl_port_unlock(); return; }
-          
-              lv_obj_clean(scr);
-              lv_obj_set_style_bg_color(scr, lv_color_hex(0x0F172A), 0);
-              lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-          
-              lbl_title = lv_label_create(scr);
-              lv_label_set_text(lbl_title, "Gemini OS v62 Suite");
-              lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x38BDF8), 0);
-              lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_18, 0);
-              lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, 8);
-          
-              lbl_clock = lv_label_create(scr);
-              lv_label_set_text(lbl_clock, "--:--:--");
-              lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_clock, &lv_font_montserrat_28, 0);
-              lv_obj_align(lbl_clock, LV_ALIGN_TOP_MID, 0, 32);
-          
-              lbl_date = lv_label_create(scr);
-              lv_label_set_text(lbl_date, "-- --- ----");
-              lv_obj_set_style_text_color(lbl_date, lv_color_hex(0x94A3B8), 0);
-              lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_date, LV_ALIGN_TOP_MID, 0, 68);
-          
-              // Box Microfon
-              lv_obj_t *mic_box = lv_obj_create(scr);
-              lv_obj_set_size(mic_box, 154, 90);
-              lv_obj_align(mic_box, LV_ALIGN_TOP_MID, 0, 90);
-              lv_obj_set_style_bg_color(mic_box, lv_color_hex(0x1E293B), 0);
-              lv_obj_set_style_border_width(mic_box, 2, 0);
-              lv_obj_set_style_border_color(mic_box, lv_color_hex(0x475569), 0);
-              lv_obj_set_style_radius(mic_box, 8, 0);
-              lv_obj_clear_flag(mic_box, LV_OBJ_FLAG_SCROLLABLE);
-          
-              lbl_mic_status = lv_label_create(mic_box);
-              lv_label_set_text(lbl_mic_status, "MIC: MUT");
-              lv_obj_set_style_text_color(lbl_mic_status, lv_color_hex(0xEF4444), 0);
-              lv_obj_set_style_text_font(lbl_mic_status, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_mic_status, LV_ALIGN_TOP_MID, 0, 2);
-          
-              bar_mic_level = lv_bar_create(mic_box);
-              lv_obj_set_size(bar_mic_level, 130, 10);
-              lv_obj_align(bar_mic_level, LV_ALIGN_TOP_MID, 0, 26);
-              lv_bar_set_range(bar_mic_level, 0, 100);
-              lv_obj_set_style_bg_color(bar_mic_level, lv_color_hex(0x0F172A), LV_PART_MAIN);
-              lv_obj_set_style_bg_color(bar_mic_level, lv_color_hex(0xEF4444), LV_PART_INDICATOR);
-          
-              lbl_mic_peak = lv_label_create(mic_box);
-              lv_label_set_text(lbl_mic_peak, "Mic Peak: 0");
-              lv_obj_set_style_text_color(lbl_mic_peak, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_mic_peak, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_mic_peak, LV_ALIGN_TOP_MID, 0, 42);
-          
-              // Buton Test Difuzor
-              btn_spk_test = lv_btn_create(scr);
-              lv_obj_set_size(btn_spk_test, 154, 38);
-              lv_obj_align(btn_spk_test, LV_ALIGN_TOP_MID, 0, 190);
-              lv_obj_set_style_bg_color(btn_spk_test, lv_color_hex(0x2563EB), 0);
-              lv_obj_add_event_cb(btn_spk_test, spk_btn_event_cb, LV_EVENT_CLICKED, NULL);
-          
-              lbl_spk_status = lv_label_create(btn_spk_test);
-              lv_label_set_text(lbl_spk_status, "TEST DIFUZOR");
-              lv_obj_set_style_text_font(lbl_spk_status, &lv_font_montserrat_14, 0);
-              lv_obj_center(lbl_spk_status);
-          
-              // Stari Touch & Butoane
-              lbl_touch_xy = lv_label_create(scr);
-              lv_label_set_text(lbl_touch_xy, "Touch X:-- Y:--");
-              lv_obj_set_style_text_color(lbl_touch_xy, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_touch_xy, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_touch_xy, LV_ALIGN_TOP_MID, 0, 240);
-          
-              lbl_touch_st = lv_label_create(scr);
-              lv_label_set_text(lbl_touch_st, "Touch: Eliberat");
-              lv_obj_set_style_text_color(lbl_touch_st, lv_color_hex(0x00AA00), 0);
-              lv_obj_set_style_text_font(lbl_touch_st, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_touch_st, LV_ALIGN_TOP_MID, 0, 262);
-          
-              lbl_boot = lv_label_create(scr);
-              lv_label_set_text(lbl_boot, "BOOT: liber");
-              lv_obj_set_style_text_color(lbl_boot, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_boot, LV_ALIGN_TOP_MID, 0, 285);
-          
-              lbl_pwr = lv_label_create(scr);
-              lv_label_set_text(lbl_pwr, "PWR: liber");
-              lv_obj_set_style_text_color(lbl_pwr, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_pwr, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_pwr, LV_ALIGN_TOP_MID, 0, 310);
-          
-              lbl_wifi = lv_label_create(scr);
-              lv_label_set_text(lbl_wifi, "WiFi: conectare...");
-              lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x64748B), 0);
-              lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_wifi, LV_ALIGN_TOP_MID, 0, 335);
-          
-              lbl_ping = lv_label_create(scr);
-              lv_label_set_text(lbl_ping, "Internet: --");
-              lv_obj_set_style_text_color(lbl_ping, lv_color_hex(0x64748B), 0);
-              lv_obj_set_style_text_font(lbl_ping, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_ping, LV_ALIGN_TOP_MID, 0, 355);
-          
-              touch_dot = lv_obj_create(scr);
-              lv_obj_set_size(touch_dot, 20, 20);
-              lv_obj_set_style_radius(touch_dot, LV_RADIUS_CIRCLE, 0);
-              lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);
-              lv_obj_set_style_bg_opa(touch_dot, LV_OPA_80, 0);
-              lv_obj_set_style_border_width(touch_dot, 0, 0);
-              lv_obj_set_pos(touch_dot, 10, 10);
-          
-              lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_PRESSED,  NULL);
-              lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_RELEASED, NULL);
-          
-              lvgl_port_unlock();
-              Serial.println("[UI] Gemini OS v62 Built!");
-          }
-          
-          void setup() {
-              Serial.begin(115200);
-              delay(500);
-              Serial.println("\n[BOOT] Gemini OS v62 All-In-One Diagnostic Suite");
-          
-              pinMode(BOOT_BTN, INPUT_PULLUP);
-              pinMode(PWR_BTN, INPUT_PULLUP);
-          
-              bsp_i2c_init();
-              delay(50);
-              lvgl_port_init();
-              delay(200);
-          
-              // Init Official Audio Hardware (ES7210 + ES8311)
-              audio_init();
-              delay(200);
-          
-              build_ui();
-          
-              Serial.println("[WiFi] Connecting...");
-              WiFi.mode(WIFI_STA);
-              WiFi.setSleep(false);
-              WiFi.begin(ssid, password);
-          }
-          
-          void loop() {
-              // Butoane cu Debounce
-              bool b_raw = digitalRead(BOOT_BTN);
-              bool p_raw = digitalRead(PWR_BTN);
-          
-              if (b_raw != last_boot_state) {
-                  last_boot_state = b_raw;
-                  g_boot_pressed = (b_raw == LOW);
-                  Serial.printf("[BTN] BOOT: %s\n", g_boot_pressed ? "APASAT" : "ELIBERAT");
-                  if (g_boot_pressed) play_speaker_test_beep();
-                  lv_async_call(ui_update_cb, NULL);
-              }
-          
-              if (p_raw != last_pwr_state) {
-                  last_pwr_state = p_raw;
-                  g_pwr_pressed = (p_raw == LOW);
-                  Serial.printf("[BTN] PWR: %s\n", g_pwr_pressed ? "APASAT" : "ELIBERAT");
-                  lv_async_call(ui_update_cb, NULL);
-              }
-          
-              // Citire Microfon
-              static int16_t mic_buf[512];
-              size_t bytes_read = 0;
-              if (audio_read(mic_buf, sizeof(mic_buf), &bytes_read) == 0 && bytes_read > 0) {
-                  int samples = bytes_read / sizeof(int16_t);
-                  int32_t peak = 0;
-                  for (int i = 0; i < samples; i++) {
-                      int32_t v = mic_buf[i];
-                      if (v < 0) v = -v;
-                      if (v > peak) peak = v;
-                  }
-                  g_mic_peak = (int)peak;
-                  g_mic_level = (int)((peak * 100) / 32768);
-                  if (g_mic_level > 100) g_mic_level = 100;
-                  g_mic_active = (peak > 300);
-                  lv_async_call(ui_update_cb, NULL);
-              }
-          
-              // Wi-Fi / NTP / Ping
-              wl_status_t wstat = WiFi.status();
-              static bool ntp_done = false;
-              if (wstat == WL_CONNECTED) {
-                  static bool was_connected = false;
-                  if (!was_connected) {
-                      was_connected = true;
-                      snprintf(g_wifi_str, sizeof(g_wifi_str), "WiFi: %s", WiFi.localIP().toString().c_str());
-                      lv_async_call(ui_update_cb, NULL);
-                  }
-                  if (!ntp_done) {
-                      ntp_done = true;
-                      configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.google.com");
-                  }
-                  static unsigned long last_clock = 0;
-                  if (millis() - last_clock > 1000) {
-                      last_clock = millis();
-                      struct tm ti;
-                      if (getLocalTime(&ti, 50)) {
-                          strftime(g_clock_str, sizeof(g_clock_str), "%H:%M:%S", &ti);
-                          strftime(g_date_str, sizeof(g_date_str), "%d %b %Y", &ti);
-                          lv_async_call(ui_update_cb, NULL);
-                      }
-                  }
-                  static unsigned long last_ping = 0;
-                  if (millis() - last_ping > 10000) {
-                      last_ping = millis();
-                      WiFiClient c;
-                      unsigned long t0 = millis();
-                      bool ok = c.connect("1.1.1.1", 53, 2000);
-                      unsigned long lat = millis() - t0;
-                      c.stop();
-                      if (ok) {
-                          snprintf(g_ping_str, sizeof(g_ping_str), "Internet: OK (%lu ms)", lat);
-                      } else {
-                          snprintf(g_ping_str, sizeof(g_ping_str), "Internet: FAIL");
-                      }
-                      lv_async_call(ui_update_cb, NULL);
-                  }
-              }
-          
-              delay(20);
-          }
-          INOPAYLOAD
-
-      - name: Compile Gemini OS v62
+      - name: Compile official example
         run: |
           SKETCH_PATH="Examples/Arduino/08_Audio_Test/08_Audio_Test.ino"
           FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
@@ -479,14 +107,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v62-diagnostic-0x0.bin \
+            -o package_bin/gemini-v63-audio-fix-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v62-diagnostic-0x0.bin
+          ls -lh package_bin/gemini-v63-audio-fix-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v62-diagnostic
-          path: package_bin/gemini-v62-diagnostic-0x0.bin
+          name: gemini-v63-audio-fix
+          path: package_bin/gemini-v63-audio-fix-0x0.bin
           if-no-files-found: error
