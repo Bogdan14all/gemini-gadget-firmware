@@ -1,11 +1,11 @@
-name: Build Gemini OS - v29 Gemini Live (Final Correct)
+name: Build Gemini OS - v30 Gemini Live (Native Audio + Sync)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v29 Gemini Live
+    name: Build v30 Gemini Live
     runs-on: ubuntu-latest
 
     steps:
@@ -189,7 +189,7 @@ jobs:
           esp_io_expander_handle_t io_expander = NULL;
           WebSocketsClient ws;
 
-          volatile int g_state = 0;
+          volatile int g_state = 0; // 0=init, 1=wifi, 2=wait_setup, 3=live
           volatile int g_rx_kb = 0;
           volatile int g_tx_kb = 0;
           volatile int g_peak  = 0;
@@ -247,12 +247,11 @@ jobs:
                       delay(100); // Stabilizare socket
 
                       JsonDocument doc;
-                      // Model corect + structura camelCase + systemInstruction cu role
+                      // Model 2.5, structură camelCase, systemInstruction ca string
                       doc["setup"]["model"] = "models/gemini-2.5-flash-native-audio-preview-12-2025";
                       doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
                       doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Puck";
-                      doc["setup"]["systemInstruction"]["role"] = "user";
-                      doc["setup"]["systemInstruction"]["parts"][0]["text"] = "Raspunde intotdeauna exclusiv in limba romana, intr-un mod concis si natural.";
+                      doc["setup"]["systemInstruction"] = "Raspunde intotdeauna exclusiv in limba romana, intr-un mod concis si natural.";
                       
                       String out;
                       serializeJson(doc, out);
@@ -265,11 +264,10 @@ jobs:
                       g_state = 1;
                       break;
                   case WStype_TEXT: {
+                      Serial.printf("[WS] TEXT: %.*s\n", (int)(len > 200 ? 200 : len), payload);
                       if (strstr((char*)payload, "setupComplete") != NULL) {
                           Serial.println("[WS] >>> SETUP COMPLETE! Suntem LIVE! <<<");
                           g_state = 3;
-                      } else {
-                          Serial.printf("[WS] TEXT: %.*s\n", (int)(len > 150 ? 150 : len), payload);
                       }
                       break;
                   }
@@ -288,6 +286,9 @@ jobs:
                       g_rx_kb += len / 1024;
                       break;
                   }
+                  case WStype_ERROR:
+                      Serial.printf("[WS] ERROR: %.*s\n", (int)len, payload);
+                      break;
                   default: break;
               }
           }
@@ -364,7 +365,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v29-gemini-live-final-correct");
+              Serial.println("\n[BOOT] v30-gemini-live-native-audio-sync");
 
               I2C_INIT_CALL
               delay(50);
@@ -401,13 +402,14 @@ jobs:
               String path = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + String(GEMINI_API_KEY);
               ws.beginSSL("generativelanguage.googleapis.com", 443, path.c_str());
               ws.onEvent(wsEvent);
-              ws.setReconnectInterval(10000); // 10 secunde
+              ws.setReconnectInterval(10000);
               Serial.println("[WS] Connecting...");
           }
 
           void loop() {
               ws.loop();
 
+              // Trimitem audio DOAR dacă starea este 3 (LIVE!)
               if (g_state == 3) {
                   int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
                   if (r == ESP_OK) {
@@ -431,7 +433,7 @@ jobs:
                       String b64_str = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
                       if (b64_str.length() > 0) {
                           JsonDocument doc;
-                          // Format audio NOU (recomandat pentru 2.5)
+                          // Noul format audio (recomandat pentru 2.5)
                           doc["realtimeInput"]["audio"]["mimeType"] = "audio/pcm;rate=16000";
                           doc["realtimeInput"]["audio"]["data"] = b64_str;
                           String out;
@@ -445,7 +447,7 @@ jobs:
               delay(5);
           }
           ''')
-          
+
           code = code.replace("I2C_INIT_CALL", f"{i2c_init}();")
 
           with open("sketch/sketch.ino", "w", encoding="utf-8") as f:
@@ -467,14 +469,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v29-live-0x0.bin \
+            -o package_bin/gemini-v30-live-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v29-live-0x0.bin
+          ls -lh package_bin/gemini-v30-live-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v29-live
-          path: package_bin/gemini-v29-live-0x0.bin
+          name: gemini-v30-live
+          path: package_bin/gemini-v30-live-0x0.bin
           if-no-files-found: error
