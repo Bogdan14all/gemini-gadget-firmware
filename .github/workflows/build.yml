@@ -1,11 +1,11 @@
-name: Build Gemini OS - v5 Audio Diagnostic
+name: Build Gemini OS - v5.1 Audio Dual Indicator
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v5 (audio diag + preserved v4.1 UI)
+    name: Build v5.1
     runs-on: ubuntu-latest
 
     steps:
@@ -29,27 +29,19 @@ jobs:
         shell: bash
         continue-on-error: true
         run: |
-          echo "=== Downloading esp_codec_dev ES7210 driver for reference ==="
           mkdir -p /tmp/esp_diag
           for url in \
             "https://raw.githubusercontent.com/espressif/esp-adf/master/components/esp_codec_dev/device/es7210/es7210.c" \
-            "https://raw.githubusercontent.com/espressif/esp-adf/master/components/esp_codec_dev/device/es7210/es7210_reg.h" \
-            "https://raw.githubusercontent.com/espressif/esp-adf/master/components/esp_codec_dev/device/es8311/es8311.c" \
-            "https://raw.githubusercontent.com/espressif/esp-adf/master/components/esp_codec_dev/device/es8311/es8311_reg.h"
+            "https://raw.githubusercontent.com/espressif/esp-adf/master/components/esp_codec_dev/device/es7210/es7210_reg.h"
           do
             fname=$(basename "$url")
-            echo "--- Downloading $fname ---"
-            curl -sL "$url" -o "/tmp/esp_diag/$fname" || echo "(failed)"
+            curl -sL "$url" -o "/tmp/esp_diag/$fname" || echo "(failed $fname)"
           done
-          echo ""
           echo "=== ES7210 REGISTER DEFINES ==="
-          grep -E "#define ES7210_REG|#define ES7210_.*_ADDR|#define ES7210_I2S" /tmp/esp_diag/es7210_reg.h 2>/dev/null | head -80 || echo "(no data)"
+          grep -E "#define ES7210_REG" /tmp/esp_diag/es7210_reg.h 2>/dev/null | head -60 || echo "(no data)"
           echo ""
-          echo "=== ES7210 INIT SEQUENCE (first 100 lines of init function) ==="
-          awk '/esp_err_t es7210_init|es7210_config_fmt|es7210_start/,/^}/' /tmp/esp_diag/es7210.c 2>/dev/null | head -150 || echo "(no data)"
-          echo ""
-          echo "=== ES7210 REGISTER VALUES in init ==="
-          grep -nE "es7210_write_reg|es7210_write|ES7210_REG_" /tmp/esp_diag/es7210.c 2>/dev/null | head -60 || echo "(no data)"
+          echo "=== ES7210 WRITE SEQUENCE ==="
+          grep -nE "es7210_write|ES7210_REG_" /tmp/esp_diag/es7210.c 2>/dev/null | head -80 || echo "(no data)"
 
       - name: Setup Arduino CLI & ESP32 Core
         run: |
@@ -95,7 +87,7 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Patch Drivers & Generate v5 Sketch
+      - name: Patch Drivers & Generate v5.1 Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -230,22 +222,29 @@ jobs:
           lv_obj_t *lbl_pwr      = NULL;
           lv_obj_t *lbl_wifi     = NULL;
           lv_obj_t *lbl_ping     = NULL;
-          lv_obj_t *lbl_audio    = NULL;
           lv_obj_t *lbl_tick     = NULL;
           lv_obj_t *touch_dot    = NULL;
+          // --- MIC indicators ---
+          lv_obj_t *lbl_mic_status = NULL;   // "MIC: ACTIV" / "MIC: MUT"
+          lv_obj_t *lbl_mic_peak   = NULL;   // "Peak: N"
+          lv_obj_t *lbl_mic_rx     = NULL;   // "RX: ok/total"
+          lv_obj_t *bar_mic_level  = NULL;   // level bar
 
           // ---------- STATE ----------
           volatile bool g_boot_pressed = false;
           volatile bool g_pwr_pressed  = false;
           volatile int  g_tick         = 0;
-          volatile int  g_audio_peak   = 0;
-          volatile bool g_audio_has_data = false;
+          volatile int  g_mic_peak     = 0;
+          volatile int  g_mic_level    = 0;   // 0-100
+          volatile bool g_mic_active   = false;
+          volatile int  g_mic_ok       = 0;   // citiri cu date
+          volatile int  g_mic_total    = 0;   // citiri totale
+          volatile int  g_mic_read_fail= 0;   // erori I2S
 
           char g_clock_str[16] = "--:--:--";
           char g_date_str[32]  = "-- --- ----";
           char g_wifi_str[64]  = "WiFi: conectare...";
           char g_ping_str[48]  = "Internet: --";
-          char g_audio_str[48] = "Audio: --";
 
           bool last_boot_state = HIGH;
           bool last_pwr_state  = HIGH;
@@ -281,29 +280,16 @@ jobs:
               return val;
           }
 
-          // ---------- TCA9554 readback ----------
-          void diag_tca9554() {
-              uint8_t cfg = i2c_read_reg(0x20, 0x03);
-              uint8_t out = i2c_read_reg(0x20, 0x01);
-              Serial.printf("[TCA DIAG] cfg=0x%02X out=0x%02X\n", cfg, out);
+          void diag_readback() {
+              Serial.println("[READBACK]");
+              Serial.printf("  TCA cfg=0x%02X out=0x%02X\n", i2c_read_reg(0x20, 0x03), i2c_read_reg(0x20, 0x01));
+              Serial.printf("  ES7210 P=0x%02X C=0x%02X F=0x%02X T0=0x%02X T1=0x%02X F2=0x%02X TDM=0x%02X G=0x%02X B12=0x%02X B34=0x%02X\n",
+                  i2c_read_reg(0x40,0x00), i2c_read_reg(0x40,0x01), i2c_read_reg(0x40,0x08),
+                  i2c_read_reg(0x40,0x09), i2c_read_reg(0x40,0x0A), i2c_read_reg(0x40,0x11),
+                  i2c_read_reg(0x40,0x12), i2c_read_reg(0x40,0x13), i2c_read_reg(0x40,0x41),
+                  i2c_read_reg(0x40,0x42));
           }
 
-          // ---------- ES7210 readback ----------
-          void diag_es7210() {
-              Serial.println("[ES7210 READBACK]");
-              Serial.printf("  0x00 (Power)  = 0x%02X\n", i2c_read_reg(0x40, 0x00));
-              Serial.printf("  0x01 (Clock)  = 0x%02X\n", i2c_read_reg(0x40, 0x01));
-              Serial.printf("  0x08 (Format) = 0x%02X\n", i2c_read_reg(0x40, 0x08));
-              Serial.printf("  0x09 (Time0)  = 0x%02X\n", i2c_read_reg(0x40, 0x09));
-              Serial.printf("  0x0A (Time1)  = 0x%02X\n", i2c_read_reg(0x40, 0x0A));
-              Serial.printf("  0x11 (Format2)= 0x%02X\n", i2c_read_reg(0x40, 0x11));
-              Serial.printf("  0x12 (TDM)    = 0x%02X\n", i2c_read_reg(0x40, 0x12));
-              Serial.printf("  0x13 (Gain1)  = 0x%02X\n", i2c_read_reg(0x40, 0x13));
-              Serial.printf("  0x41 (Bias12) = 0x%02X\n", i2c_read_reg(0x40, 0x41));
-              Serial.printf("  0x42 (Bias34) = 0x%02X\n", i2c_read_reg(0x40, 0x42));
-          }
-
-          // ---------- I2S TDM init ----------
           bool i2s_init_tdm() {
               i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
               if (i2s_new_channel(&chan_cfg, NULL, &rx_handle) != ESP_OK) {
@@ -326,7 +312,6 @@ jobs:
                   }
               };
               tdm_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
-
               if (i2s_channel_init_tdm_mode(rx_handle, &tdm_cfg) != ESP_OK) {
                   Serial.println("[I2S] init_tdm FAIL");
                   return false;
@@ -339,9 +324,8 @@ jobs:
               return true;
           }
 
-          // ---------- ES7210 init ----------
           void es7210_init_regs() {
-              Serial.println("[ES7210] Writing registers...");
+              Serial.println("[ES7210] Writing...");
               i2c_write_reg(0x40, 0x00, 0xFF); delay(20);
               i2c_write_reg(0x40, 0x00, 0x41);
               i2c_write_reg(0x40, 0x01, 0x1F);
@@ -382,10 +366,11 @@ jobs:
               }
           }
 
-          // ---------- ASYNC UI UPDATE ----------
+          // ---------- ASYNC UI ----------
           static void ui_update_cb(void *arg) {
               bool b = g_boot_pressed;
               bool p = g_pwr_pressed;
+              bool mic_on = g_mic_active;
 
               if (lbl_boot) {
                   lv_label_set_text(lbl_boot, b ? "BOOT: APASAT" : "BOOT: liber");
@@ -399,15 +384,30 @@ jobs:
               if (lbl_date)  lv_label_set_text(lbl_date, g_date_str);
               if (lbl_wifi)  lv_label_set_text(lbl_wifi, g_wifi_str);
               if (lbl_ping)  lv_label_set_text(lbl_ping, g_ping_str);
-              if (lbl_audio) {
-                  lv_label_set_text(lbl_audio, g_audio_str);
-                  lv_obj_set_style_text_color(lbl_audio,
-                      g_audio_has_data ? lv_color_hex(0x00CC00) : lv_color_hex(0xFF0000), 0);
-              }
               if (lbl_tick) {
-                  char tbuf[32];
-                  snprintf(tbuf, sizeof(tbuf), "UI_CB:%d", g_tick);
+                  char tbuf[32]; snprintf(tbuf, sizeof(tbuf), "UI_CB:%d", g_tick);
                   lv_label_set_text(lbl_tick, tbuf);
+              }
+
+              // --- MIC indicator ---
+              if (lbl_mic_status) {
+                  lv_label_set_text(lbl_mic_status, mic_on ? "MIC: ACTIV" : "MIC: MUT");
+                  lv_obj_set_style_text_color(lbl_mic_status,
+                      mic_on ? lv_color_hex(0x22C55E) : lv_color_hex(0xEF4444), 0);
+              }
+              if (lbl_mic_peak) {
+                  char pbuf[32]; snprintf(pbuf, sizeof(pbuf), "Peak: %d", g_mic_peak);
+                  lv_label_set_text(lbl_mic_peak, pbuf);
+              }
+              if (lbl_mic_rx) {
+                  char rbuf[32]; snprintf(rbuf, sizeof(rbuf), "RX: %d/%d", g_mic_ok, g_mic_total);
+                  lv_label_set_text(lbl_mic_rx, rbuf);
+              }
+              if (bar_mic_level) {
+                  lv_bar_set_value(bar_mic_level, g_mic_level, LV_ANIM_OFF);
+                  lv_obj_set_style_bg_color(bar_mic_level,
+                      mic_on ? lv_color_hex(0x22C55E) : lv_color_hex(0xEF4444),
+                      LV_PART_INDICATOR);
               }
           }
 
@@ -425,7 +425,7 @@ jobs:
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Gemini OS v5");
+              lv_label_set_text(title, "Gemini OS v5.1");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
               lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
@@ -442,47 +442,77 @@ jobs:
               lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_12, 0);
               lv_obj_align(lbl_date, LV_ALIGN_TOP_MID, 0, 78);
 
+              // ============ MIC CARD ============
+              lv_obj_t *mic_box = lv_obj_create(scr);
+              lv_obj_set_size(mic_box, 150, 130);
+              lv_obj_align(mic_box, LV_ALIGN_TOP_MID, 0, 105);
+              lv_obj_set_style_bg_color(mic_box, lv_color_hex(0x1E293B), 0);
+              lv_obj_set_style_border_width(mic_box, 2, 0);
+              lv_obj_set_style_border_color(mic_box, lv_color_hex(0x475569), 0);
+              lv_obj_set_style_radius(mic_box, 8, 0);
+              lv_obj_clear_flag(mic_box, LV_OBJ_FLAG_SCROLLABLE);
+
+              lbl_mic_status = lv_label_create(mic_box);
+              lv_label_set_text(lbl_mic_status, "MIC: MUT");
+              lv_obj_set_style_text_color(lbl_mic_status, lv_color_hex(0xEF4444), 0);
+              lv_obj_set_style_text_font(lbl_mic_status, &lv_font_montserrat_18, 0);
+              lv_obj_align(lbl_mic_status, LV_ALIGN_TOP_MID, 0, 5);
+
+              bar_mic_level = lv_bar_create(mic_box);
+              lv_obj_set_size(bar_mic_level, 120, 12);
+              lv_obj_align(bar_mic_level, LV_ALIGN_TOP_MID, 0, 35);
+              lv_bar_set_range(bar_mic_level, 0, 100);
+              lv_obj_set_style_bg_color(bar_mic_level, lv_color_hex(0x0F172A), LV_PART_MAIN);
+              lv_obj_set_style_bg_color(bar_mic_level, lv_color_hex(0xEF4444), LV_PART_INDICATOR);
+
+              lbl_mic_peak = lv_label_create(mic_box);
+              lv_label_set_text(lbl_mic_peak, "Peak: 0");
+              lv_obj_set_style_text_color(lbl_mic_peak, lv_color_hex(0xFFFFFF), 0);
+              lv_obj_set_style_text_font(lbl_mic_peak, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_mic_peak, LV_ALIGN_TOP_MID, 0, 55);
+
+              lbl_mic_rx = lv_label_create(mic_box);
+              lv_label_set_text(lbl_mic_rx, "RX: 0/0");
+              lv_obj_set_style_text_color(lbl_mic_rx, lv_color_hex(0x94A3B8), 0);
+              lv_obj_set_style_text_font(lbl_mic_rx, &lv_font_montserrat_12, 0);
+              lv_obj_align(lbl_mic_rx, LV_ALIGN_TOP_MID, 0, 80);
+
+              // ============ TOUCH ============
               lbl_touch_xy = lv_label_create(scr);
               lv_label_set_text(lbl_touch_xy, "X:--  Y:--");
               lv_obj_set_style_text_color(lbl_touch_xy, lv_color_hex(0xFFFFFF), 0);
               lv_obj_set_style_text_font(lbl_touch_xy, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_touch_xy, LV_ALIGN_CENTER, 0, -60);
+              lv_obj_align(lbl_touch_xy, LV_ALIGN_CENTER, 0, -30);
 
               lbl_touch_st = lv_label_create(scr);
               lv_label_set_text(lbl_touch_st, "Eliberat");
               lv_obj_set_style_text_color(lbl_touch_st, lv_color_hex(0x00AA00), 0);
               lv_obj_set_style_text_font(lbl_touch_st, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_touch_st, LV_ALIGN_CENTER, 0, -40);
+              lv_obj_align(lbl_touch_st, LV_ALIGN_CENTER, 0, -10);
 
               lbl_boot = lv_label_create(scr);
               lv_label_set_text(lbl_boot, "BOOT: liber");
               lv_obj_set_style_text_color(lbl_boot, lv_color_hex(0xFFFFFF), 0);
               lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_boot, LV_ALIGN_CENTER, 0, -15);
+              lv_obj_align(lbl_boot, LV_ALIGN_CENTER, 0, 15);
 
               lbl_pwr = lv_label_create(scr);
               lv_label_set_text(lbl_pwr, "PWR: liber");
               lv_obj_set_style_text_color(lbl_pwr, lv_color_hex(0xFFFFFF), 0);
               lv_obj_set_style_text_font(lbl_pwr, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_pwr, LV_ALIGN_CENTER, 0, 10);
+              lv_obj_align(lbl_pwr, LV_ALIGN_CENTER, 0, 40);
 
               lbl_wifi = lv_label_create(scr);
               lv_label_set_text(lbl_wifi, "WiFi: conectare...");
               lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x64748B), 0);
               lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 40);
+              lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 70);
 
               lbl_ping = lv_label_create(scr);
               lv_label_set_text(lbl_ping, "Internet: --");
               lv_obj_set_style_text_color(lbl_ping, lv_color_hex(0x64748B), 0);
               lv_obj_set_style_text_font(lbl_ping, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_ping, LV_ALIGN_CENTER, 0, 60);
-
-              lbl_audio = lv_label_create(scr);
-              lv_label_set_text(lbl_audio, "Audio: --");
-              lv_obj_set_style_text_color(lbl_audio, lv_color_hex(0xFF0000), 0);
-              lv_obj_set_style_text_font(lbl_audio, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_audio, LV_ALIGN_CENTER, 0, 85);
+              lv_obj_align(lbl_ping, LV_ALIGN_CENTER, 0, 90);
 
               lbl_tick = lv_label_create(scr);
               lv_label_set_text(lbl_tick, "UI_CB:0");
@@ -508,8 +538,8 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] BUILD v5-audio-diag");
-              Serial.println("=== Gemini OS v5 ===");
+              Serial.println("\n[BOOT] BUILD v5.1-audio-dual-indicator");
+              Serial.println("=== Gemini OS v5.1 ===");
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
               pinMode(PWR_BTN, INPUT_PULLUP);
@@ -524,16 +554,13 @@ jobs:
                   Serial.println("[FATAL] I2C bus 0 unavailable");
                   return;
               }
-              Serial.println("[I2C] Bus 0 acquired");
 
-              // TCA9554 reset (delay-uri lungi)
-              if (i2c_bus) {
-                  i2c_write_reg(0x20, 0x03, 0x00); delay(20);
-                  i2c_write_reg(0x20, 0x01, 0x00); delay(150);
-                  i2c_write_reg(0x20, 0x01, 0xFF); delay(300);
-              }
+              // TCA9554 reset (secventa lunga)
+              i2c_write_reg(0x20, 0x03, 0x00); delay(20);
+              i2c_write_reg(0x20, 0x01, 0x00); delay(150);
+              i2c_write_reg(0x20, 0x01, 0xFF); delay(300);
 
-              // I2S FIRST (MCLK must be running before ES7210 config)
+              // I2S FIRST (MCLK must run before ES7210 config)
               if (!i2s_init_tdm()) {
                   Serial.println("[FATAL] I2S TDM init failed");
                   return;
@@ -544,10 +571,10 @@ jobs:
               es7210_init_regs();
               delay(100);
 
-              // Readback to confirm I2C works
-              diag_tca9554();
-              diag_es7210();
+              // Verify I2C readback
+              diag_readback();
 
+              Serial.println("[MIC] AUTO-STARTED - speak now!");
               Serial.println("[WiFi] Starting...");
               WiFi.mode(WIFI_STA);
               WiFi.setSleep(false);
@@ -571,18 +598,16 @@ jobs:
                   lv_async_call(ui_update_cb, NULL);
               }
 
-              // ---------- AUDIO READ ----------
-              static unsigned long last_audio = 0;
-              static int read_ok = 0;
-              static int read_fail = 0;
-              static int read_nonzero = 0;
-              if (millis() - last_audio > 1000) {
-                  last_audio = millis();
+              // ---------- MIC READ (every 200ms) ----------
+              static unsigned long last_mic = 0;
+              if (millis() - last_mic > 200) {
+                  last_mic = millis();
                   static int16_t mic_buf[1024];
                   size_t bytes_read = 0;
                   esp_err_t err = i2s_channel_read(rx_handle, mic_buf, sizeof(mic_buf), &bytes_read, 100);
+
+                  g_mic_total++;
                   if (err == ESP_OK && bytes_read > 0) {
-                      read_ok++;
                       int samples = bytes_read / sizeof(int16_t);
                       int32_t peak = 0;
                       for (int i = 0; i < samples; i++) {
@@ -590,24 +615,35 @@ jobs:
                           if (v < 0) v = -v;
                           if (v > peak) peak = v;
                       }
-                      if (peak > 0) read_nonzero++;
-                      g_audio_peak = peak;
-                      g_audio_has_data = (peak > 0);
-                      snprintf(g_audio_str, sizeof(g_audio_str), "Audio: peak=%d %s", (int)peak, peak > 0 ? "DATA!" : "(zeros)");
-                      lv_async_call(ui_update_cb, NULL);
+                      g_mic_peak = (int)peak;
+                      g_mic_level = (int)((peak * 100) / 32768);
+                      if (g_mic_level > 100) g_mic_level = 100;
 
-                      // RAW bytes (first 16 bytes)
-                      uint8_t* bp = (uint8_t*)mic_buf;
-                      Serial.printf("[AUDIO] read=%d bytes peak=%d RAW=", (int)bytes_read, (int)peak);
-                      for (int i = 0; i < 16 && i < bytes_read; i++) Serial.printf("%02X ", bp[i]);
-                      Serial.printf(" | ok=%d fail=%d nonzero=%d\n", read_ok, read_fail, read_nonzero);
+                      if (peak > 0) {
+                          g_mic_ok++;
+                          g_mic_active = true;
+                      } else {
+                          g_mic_active = false;
+                      }
+
+                      // Log full RAW bytes only on change
+                      static int32_t last_logged_peak = -1;
+                      if (peak != last_logged_peak) {
+                          last_logged_peak = peak;
+                          uint8_t* bp = (uint8_t*)mic_buf;
+                          Serial.printf("[MIC] peak=%5d lvl=%3d%% bytes=%d RAW=", (int)peak, g_mic_level, (int)bytes_read);
+                          for (int i = 0; i < 8 && i < bytes_read; i++) Serial.printf("%02X ", bp[i]);
+                          Serial.printf(" | ok=%d/%d\n", g_mic_ok, g_mic_total);
+                      }
                   } else {
-                      read_fail++;
-                      Serial.printf("[AUDIO] READ FAIL err=%d ok=%d fail=%d\n", (int)err, read_ok, read_fail);
+                      g_mic_read_fail++;
+                      Serial.printf("[MIC] READ FAIL err=%d total=%d fail=%d\n",
+                                    (int)err, g_mic_total, g_mic_read_fail);
                   }
+                  lv_async_call(ui_update_cb, NULL);
               }
 
-              // ---------- WIFI + NTP ----------
+              // ---------- WIFI ----------
               wl_status_t wstat = WiFi.status();
               static bool ntp_done = false;
               if (wstat == WL_CONNECTED) {
@@ -664,7 +700,7 @@ jobs:
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] v5 audio diag .ino generat")
+          print("[OK] v5.1 audio dual indicator .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -681,14 +717,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v5-audio-diag-0x0.bin \
+            -o package_bin/gemini-v5.1-audio-dual-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v5-audio-diag-0x0.bin
+          ls -lh package_bin/gemini-v5.1-audio-dual-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v5-audio-diag
-          path: package_bin/gemini-v5-audio-diag-0x0.bin
+          name: gemini-v5.1-audio-dual
+          path: package_bin/gemini-v5.1-audio-dual-0x0.bin
           if-no-files-found: error
