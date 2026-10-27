@@ -1,11 +1,11 @@
-name: Build Gemini OS - v16 Gemini Live (Final)
+name: Build Gemini OS - v17 Gemini Live (Model & Config Fix)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v16 Gemini Live
+    name: Build v17 Gemini Live
     runs-on: ubuntu-latest
 
     steps:
@@ -202,7 +202,7 @@ jobs:
 
           static int16_t buf_in_stereo[1024];
           static int16_t buf_mono_24k[512];
-          static int16_t buf_mono_16k[341]; // 512 * 2 / 3
+          static int16_t buf_mono_16k[341];
           static int16_t buf_out_stereo[256];
 
           void tca9554_init_local() {
@@ -246,7 +246,7 @@ jobs:
                       Serial.println("[WS] CONNECTED");
                       g_state = 2;
                       JsonDocument doc;
-                      doc["setup"]["model"] = "models/gemini-2.5-flash-native-audio-latest";
+                      doc["setup"]["model"] = "models/gemini-3.1-flash-live-preview";
                       doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
                       doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Kore";
                       String out;
@@ -360,7 +360,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v16-gemini-live-final");
+              Serial.println("\n[BOOT] v17-gemini-live-model-fix");
 
               I2C_INIT_CALL
               delay(50);
@@ -405,7 +405,6 @@ jobs:
               ws.loop();
 
               if (g_state == 3) {
-                  // Citim 512 frames (1024 bytes) la 24kHz = ~21ms
                   int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
                   if (r == ESP_OK) {
                       int frames = (sizeof(buf_in_stereo)/sizeof(int16_t)) / 2;
@@ -418,7 +417,6 @@ jobs:
                       }
                       g_peak = (int)peak;
 
-                      // Downsample 24k -> 16k (take 2 out of every 3 samples)
                       int out_count = frames * 2 / 3;
                       for (int i = 0; i < out_count; i++) {
                           int src = (i * 3) / 2;
@@ -464,14 +462,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v16-live-final-0x0.bin \
+            -o package_bin/gemini-v17-live-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v16-live-final-0x0.bin
+          ls -lh package_bin/gemini-v17-live-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v16-live-final
-          path: package_bin/gemini-v16-live-final-0x0.bin
+          name: gemini-v17-live
+          path: package_bin/gemini-v17-live-0x0.bin
           if-no-files-found: error
