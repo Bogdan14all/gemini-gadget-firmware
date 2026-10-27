@@ -1,11 +1,11 @@
-name: Build Gemini OS - v3 lv_timer
+name: Build Gemini OS - v4 Async Update
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v3 (lv_timer)
+    name: Build v4 (lv_async_call)
     runs-on: ubuntu-latest
 
     steps:
@@ -69,7 +69,7 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Patch Drivers & Generate v3 Sketch
+      - name: Patch Drivers & Generate v4 Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -108,7 +108,6 @@ jobs:
           with open(port_path, "w", encoding="utf-8") as f:
               f.write(code)
 
-          # Inject lock IF MISSING (just in case build_ui needs it)
           h_path = f"{sketch_dir}/lvgl_port.h"
           with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
               h_content = f.read()
@@ -180,6 +179,7 @@ jobs:
           const char* ssid     = "TP-Link_2.4G_9318_Guest";
           const char* password = "revelion";
 
+          // ---------- UI HANDLES ----------
           lv_obj_t *lbl_clock       = NULL;
           lv_obj_t *lbl_date        = NULL;
           lv_obj_t *lbl_touch_xy    = NULL;
@@ -190,16 +190,23 @@ jobs:
           lv_obj_t *lbl_ping        = NULL;
           lv_obj_t *touch_dot       = NULL;
 
+          // ---------- STATE (thread-safe: volatile) ----------
+          volatile bool g_boot_pressed  = false;   // true = apasat (LOW)
+          volatile bool g_pwr_pressed   = false;
+          volatile bool g_wifi_connected = false;
+          volatile long g_ping_ms       = -1;
+          char g_wifi_ip[32]            = "?";
+          char g_clock_str[16]          = "--:--:--";
+          char g_date_str[32]           = "-- --- ----";
+          char g_wifi_str[64]           = "WiFi: conectare...";
+          char g_ping_str[48]           = "Internet: --";
+
           bool last_boot_state = HIGH;
           bool last_pwr_state  = HIGH;
+          unsigned long last_heartbeat = 0;
+          int hb_counter = 0;
 
-          // Variabile partajate pentru loop() <-> timer
-          volatile int  g_wifi_status   = 0;
-          volatile long g_ping_ms       = -1;
-          volatile bool g_ntp_synced    = false;
-          char          g_wifi_ip[32]   = "";
-
-          // ---------- TOUCH ----------
+          // ---------- TOUCH CALLBACK (runs in LVGL task, safe) ----------
           static void touch_event_cb(lv_event_t *e) {
               lv_event_code_t code = lv_event_get_code(e);
               lv_indev_t *indev = lv_indev_get_act();
@@ -222,65 +229,27 @@ jobs:
               }
           }
 
-          // ---------- lv_timer callback (runs in LVGL task, NO lock needed) ----------
-          void ui_timer_cb(lv_timer_t *t) {
-              // Buttons
-              bool b = digitalRead(BOOT_BTN);
-              bool p = digitalRead(PWR_BTN);
-
-              if (b != last_boot_state) {
-                  last_boot_state = b;
-                  Serial.printf("[BTN] BOOT: %s\n", b == LOW ? "APASAT" : "ELIBERAT");
-              }
-              if (p != last_pwr_state) {
-                  last_pwr_state = p;
-                  Serial.printf("[BTN] PWR: %s\n", p == LOW ? "APASAT" : "ELIBERAT");
-              }
-
-              // Button labels
+          // ---------- ASYNC UPDATE CALLBACK (runs in LVGL task) ----------
+          // Acesta e apelat din loop() prin lv_async_call() - GARANTAT thread-safe
+          static void ui_update_cb(void *arg) {
               if (lbl_boot) {
-                  lv_label_set_text(lbl_boot, b == LOW ? "BOOT: APASAT" : "BOOT: liber");
-                  lv_obj_set_style_text_color(lbl_boot, b == LOW ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF), 0);
+                  lv_label_set_text(lbl_boot, g_boot_pressed ? "BOOT: APASAT" : "BOOT: liber");
+                  lv_obj_set_style_text_color(lbl_boot, g_boot_pressed ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF), 0);
               }
               if (lbl_pwr) {
-                  lv_label_set_text(lbl_pwr, p == LOW ? "PWR: APASAT" : "PWR: liber");
-                  lv_obj_set_style_text_color(lbl_pwr, p == LOW ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF), 0);
+                  lv_label_set_text(lbl_pwr, g_pwr_pressed ? "PWR: APASAT" : "PWR: liber");
+                  lv_obj_set_style_text_color(lbl_pwr, g_pwr_pressed ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF), 0);
               }
-
-              // Clock
-              if (g_ntp_synced && lbl_clock && lbl_date) {
-                  struct tm ti;
-                  if (getLocalTime(&ti, 10)) {
-                      char tbuf[16], dbuf[32];
-                      strftime(tbuf, sizeof(tbuf), "%H:%M:%S", &ti);
-                      strftime(dbuf, sizeof(dbuf), "%d %b %Y", &ti);
-                      lv_label_set_text(lbl_clock, tbuf);
-                      lv_label_set_text(lbl_date, dbuf);
-                  }
-              }
-
-              // WiFi
               if (lbl_wifi) {
-                  if (g_wifi_status == WL_CONNECTED) {
-                      char wbuf[64];
-                      snprintf(wbuf, sizeof(wbuf), "WiFi: %s", g_wifi_ip);
-                      lv_label_set_text(lbl_wifi, wbuf);
-                      lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x38BDF8), 0);
-                  } else {
-                      lv_label_set_text(lbl_wifi, "WiFi: conectare...");
-                  }
+                  lv_label_set_text(lbl_wifi, g_wifi_str);
+                  lv_obj_set_style_text_color(lbl_wifi, g_wifi_connected ? lv_color_hex(0x38BDF8) : lv_color_hex(0x64748B), 0);
               }
-
-              // Ping
-              if (lbl_ping && g_ping_ms >= 0) {
-                  char pbuf[48];
-                  snprintf(pbuf, sizeof(pbuf), "Internet: OK (%ld ms)", g_ping_ms);
-                  lv_label_set_text(lbl_ping, pbuf);
-                  lv_obj_set_style_text_color(lbl_ping, lv_color_hex(0x00CC00), 0);
-              }
+              if (lbl_clock) lv_label_set_text(lbl_clock, g_clock_str);
+              if (lbl_date)  lv_label_set_text(lbl_date, g_date_str);
+              if (lbl_ping)  lv_label_set_text(lbl_ping, g_ping_str);
           }
 
-          // ---------- UI ----------
+          // ---------- UI BUILD (runs in setup thread, needs lock) ----------
           void build_ui() {
               pinMode(LCD_BL, OUTPUT);
               digitalWrite(LCD_BL, LOW);
@@ -288,14 +257,14 @@ jobs:
               lvgl_port_lock(1000);
               lv_obj_t *scr = lv_screen_active();
               if (!scr) scr = lv_scr_act();
-              if (!scr) { lvgl_port_unlock(); return; }
+              if (!scr) { lvgl_port_unlock(); Serial.println("[UI] FATAL: no screen!"); return; }
 
               lv_obj_clean(scr);
               lv_obj_set_style_bg_color(scr, lv_color_hex(0x0F172A), 0);
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Gemini OS v3");
+              lv_label_set_text(title, "Gemini OS v4");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
               lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
@@ -338,7 +307,7 @@ jobs:
 
               lbl_wifi = lv_label_create(scr);
               lv_label_set_text(lbl_wifi, "WiFi: conectare...");
-              lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x38BDF8), 0);
+              lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x64748B), 0);
               lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_12, 0);
               lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 60);
 
@@ -360,18 +329,14 @@ jobs:
               lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_RELEASED, NULL);
 
               lvgl_port_unlock();
-
-              // Create the timer - runs in LVGL task, no lock needed
-              lv_timer_create(ui_timer_cb, 100, NULL);
-
-              Serial.println("[UI] Built + timer started");
+              Serial.println("[UI] Built");
           }
 
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] BUILD v3-lvtimer");
-              Serial.println("=== Gemini OS v3 ===");
+              Serial.println("\n[BOOT] BUILD v4-async");
+              Serial.println("=== Gemini OS v4 ===");
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
               pinMode(PWR_BTN, INPUT_PULLUP);
@@ -389,27 +354,57 @@ jobs:
           }
 
           void loop() {
-              wl_status_t wstat = WiFi.status();
-              g_wifi_status = wstat;
+              // ---------- BUTOANE ----------
+              bool b_raw = digitalRead(BOOT_BTN);
+              bool p_raw = digitalRead(PWR_BTN);
+              bool b_pressed = (b_raw == LOW);
+              bool p_pressed = (p_raw == LOW);
 
+              if (b_raw != last_boot_state) {
+                  last_boot_state = b_raw;
+                  g_boot_pressed = b_pressed;
+                  Serial.printf("[BTN] BOOT: %s\n", b_pressed ? "APASAT" : "ELIBERAT");
+                  lv_async_call(ui_update_cb, NULL);
+              }
+              if (p_raw != last_pwr_state) {
+                  last_pwr_state = p_raw;
+                  g_pwr_pressed = p_pressed;
+                  Serial.printf("[BTN] PWR: %s\n", p_pressed ? "APASAT" : "ELIBERAT");
+                  lv_async_call(ui_update_cb, NULL);
+              }
+
+              // ---------- WIFI ----------
+              wl_status_t wstat = WiFi.status();
               if (wstat == WL_CONNECTED) {
                   strncpy(g_wifi_ip, WiFi.localIP().toString().c_str(), sizeof(g_wifi_ip) - 1);
+                  bool was_connected = g_wifi_connected;
+                  g_wifi_connected = true;
 
-                  // NTP once
-                  static bool ntp_done = false;
-                  if (!ntp_done) {
-                      ntp_done = true;
+                  if (!was_connected) {
+                      Serial.printf("[WiFi] CONNECTED %s\n", g_wifi_ip);
+                      snprintf(g_wifi_str, sizeof(g_wifi_str), "WiFi: %s", g_wifi_ip);
+                      lv_async_call(ui_update_cb, NULL);
+
+                      // Configure NTP once
                       Serial.println("[NTP] configTzTime calling...");
                       configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.google.com");
                       Serial.println("[NTP] done");
                   }
 
-                  // Check if time synced
-                  struct tm ti;
-                  if (getLocalTime(&ti, 10)) {
-                      if (!g_ntp_synced) {
-                          g_ntp_synced = true;
-                          Serial.printf("[NTP] SYNCED: %02d:%02d:%02d\n", ti.tm_hour, ti.tm_min, ti.tm_sec);
+                  // Clock update every second
+                  static unsigned long last_clock = 0;
+                  static bool first_sync = false;
+                  if (millis() - last_clock > 1000) {
+                      last_clock = millis();
+                      struct tm ti;
+                      if (getLocalTime(&ti, 50)) {
+                          if (!first_sync) {
+                              first_sync = true;
+                              Serial.printf("[NTP] SYNCED: %02d:%02d:%02d\n", ti.tm_hour, ti.tm_min, ti.tm_sec);
+                          }
+                          strftime(g_clock_str, sizeof(g_clock_str), "%H:%M:%S", &ti);
+                          strftime(g_date_str, sizeof(g_date_str), "%d %b %Y", &ti);
+                          lv_async_call(ui_update_cb, NULL);
                       }
                   }
 
@@ -424,25 +419,28 @@ jobs:
                       c.stop();
                       if (ok) {
                           g_ping_ms = (long)lat;
+                          snprintf(g_ping_str, sizeof(g_ping_str), "Internet: OK (%lu ms)", lat);
                           Serial.printf("[PING] OK %lu ms\n", lat);
+                          lv_async_call(ui_update_cb, NULL);
                       } else {
                           Serial.println("[PING] FAIL");
                       }
                   }
               } else {
-                  strncpy(g_wifi_ip, "?", sizeof(g_wifi_ip));
+                  g_wifi_connected = false;
               }
 
-              // Periodic status dump (raw button states)
-              static unsigned long last_status = 0;
-              if (millis() - last_status > 2000) {
-                  last_status = millis();
-                  Serial.printf("[STATUS] BOOT=%d PWR=%d WiFi=%d Ping=%ld NTP=%d\n",
-                                digitalRead(BOOT_BTN),
-                                digitalRead(PWR_BTN),
-                                (int)WiFi.status(),
-                                (long)g_ping_ms,
-                                (int)g_ntp_synced);
+              // ---------- HEARTBEAT ----------
+              if (millis() - last_heartbeat > 5000) {
+                  last_heartbeat = millis();
+                  hb_counter++;
+                  Serial.printf("[HB %d] WiFi=%d IP=%s BOOT=%d PWR=%d Ping=%ld\n",
+                                hb_counter,
+                                (int)wstat,
+                                WiFi.localIP().toString().c_str(),
+                                (int)b_raw,
+                                (int)p_raw,
+                                (long)g_ping_ms);
               }
 
               delay(20);
@@ -453,7 +451,7 @@ jobs:
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] v3 lv_timer .ino generat")
+          print("[OK] v4 async .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -470,14 +468,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v3-lvtimer-0x0.bin \
+            -o package_bin/gemini-v4-async-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v3-lvtimer-0x0.bin
+          ls -lh package_bin/gemini-v4-async-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v3-lvtimer
-          path: package_bin/gemini-v3-lvtimer-0x0.bin
+          name: gemini-v4-async
+          path: package_bin/gemini-v4-async-0x0.bin
           if-no-files-found: error
