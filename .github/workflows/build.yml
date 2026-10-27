@@ -1,11 +1,11 @@
-name: Build Gemini OS - v4.1 Async (Back to Working Base)
+name: Build Gemini OS - v5 Audio Diagnostic
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v4.1
+    name: Build v5 (audio diag + preserved v4.1 UI)
     runs-on: ubuntu-latest
 
     steps:
@@ -24,6 +24,32 @@ jobs:
         run: |
           pip install "esptool<5"
           sudo apt-get update && sudo apt-get install -y zip
+
+      - name: Diagnostic - Extract ES7210 registers from esp_codec_dev
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "=== Downloading esp_codec_dev ES7210 driver for reference ==="
+          mkdir -p /tmp/esp_diag
+          for url in \
+            "https://raw.githubusercontent.com/espressif/esp-adf/master/components/esp_codec_dev/device/es7210/es7210.c" \
+            "https://raw.githubusercontent.com/espressif/esp-adf/master/components/esp_codec_dev/device/es7210/es7210_reg.h" \
+            "https://raw.githubusercontent.com/espressif/esp-adf/master/components/esp_codec_dev/device/es8311/es8311.c" \
+            "https://raw.githubusercontent.com/espressif/esp-adf/master/components/esp_codec_dev/device/es8311/es8311_reg.h"
+          do
+            fname=$(basename "$url")
+            echo "--- Downloading $fname ---"
+            curl -sL "$url" -o "/tmp/esp_diag/$fname" || echo "(failed)"
+          done
+          echo ""
+          echo "=== ES7210 REGISTER DEFINES ==="
+          grep -E "#define ES7210_REG|#define ES7210_.*_ADDR|#define ES7210_I2S" /tmp/esp_diag/es7210_reg.h 2>/dev/null | head -80 || echo "(no data)"
+          echo ""
+          echo "=== ES7210 INIT SEQUENCE (first 100 lines of init function) ==="
+          awk '/esp_err_t es7210_init|es7210_config_fmt|es7210_start/,/^}/' /tmp/esp_diag/es7210.c 2>/dev/null | head -150 || echo "(no data)"
+          echo ""
+          echo "=== ES7210 REGISTER VALUES in init ==="
+          grep -nE "es7210_write_reg|es7210_write|ES7210_REG_" /tmp/esp_diag/es7210.c 2>/dev/null | head -60 || echo "(no data)"
 
       - name: Setup Arduino CLI & ESP32 Core
         run: |
@@ -69,7 +95,7 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Patch Drivers & Generate v4.1 Sketch
+      - name: Patch Drivers & Generate v5 Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -165,6 +191,8 @@ jobs:
           #include <WiFi.h>
           #include <time.h>
           #include <WiFiClient.h>
+          #include <driver/i2s_tdm.h>
+          #include <driver/i2c_master.h>
 
           extern "C" {
           #include "i2c_bsp.h"
@@ -176,39 +204,167 @@ jobs:
           #define BOOT_BTN  0
           #define PWR_BTN   16
 
+          #define I2S_MCLK  7
+          #define I2S_WS    46
+          #define I2S_BCLK  15
+          #define I2S_DIN   6
+          #define I2S_DOUT  45
+
+          #define SAMPLE_RATE 24000
+
           const char* ssid     = "TP-Link_2.4G_9318_Guest";
           const char* password = "revelion";
 
-          // ---------- UI HANDLES ----------
-          lv_obj_t *lbl_clock       = NULL;
-          lv_obj_t *lbl_date        = NULL;
-          lv_obj_t *lbl_touch_xy    = NULL;
-          lv_obj_t *lbl_touch_state = NULL;
-          lv_obj_t *lbl_boot        = NULL;
-          lv_obj_t *lbl_pwr         = NULL;
-          lv_obj_t *lbl_wifi        = NULL;
-          lv_obj_t *lbl_ping        = NULL;
-          lv_obj_t *lbl_tick        = NULL;  // diagnostic
-          lv_obj_t *touch_dot       = NULL;
+          i2s_chan_handle_t rx_handle = NULL;
+          i2c_master_bus_handle_t i2c_bus = NULL;
+          i2c_master_dev_handle_t dev_7210 = NULL;
+          i2c_master_dev_handle_t dev_8311 = NULL;
+          i2c_master_dev_handle_t dev_9554 = NULL;
 
-          // ---------- STATE (shared, written by loop, read by async cb) ----------
+          // ---------- UI HANDLES ----------
+          lv_obj_t *lbl_clock    = NULL;
+          lv_obj_t *lbl_date     = NULL;
+          lv_obj_t *lbl_touch_xy = NULL;
+          lv_obj_t *lbl_touch_st = NULL;
+          lv_obj_t *lbl_boot     = NULL;
+          lv_obj_t *lbl_pwr      = NULL;
+          lv_obj_t *lbl_wifi     = NULL;
+          lv_obj_t *lbl_ping     = NULL;
+          lv_obj_t *lbl_audio    = NULL;
+          lv_obj_t *lbl_tick     = NULL;
+          lv_obj_t *touch_dot    = NULL;
+
+          // ---------- STATE ----------
           volatile bool g_boot_pressed = false;
           volatile bool g_pwr_pressed  = false;
           volatile int  g_tick         = 0;
+          volatile int  g_audio_peak   = 0;
+          volatile bool g_audio_has_data = false;
 
           char g_clock_str[16] = "--:--:--";
           char g_date_str[32]  = "-- --- ----";
           char g_wifi_str[64]  = "WiFi: conectare...";
           char g_ping_str[48]  = "Internet: --";
+          char g_audio_str[48] = "Audio: --";
 
           bool last_boot_state = HIGH;
           bool last_pwr_state  = HIGH;
 
-          // ---------- TOUCH (runs in LVGL task, safe) ----------
+          // ---------- I2C helpers ----------
+          i2c_master_dev_handle_t get_dev(uint8_t addr) {
+              i2c_master_dev_handle_t *slot = NULL;
+              if (addr == 0x40) slot = &dev_7210;
+              else if (addr == 0x18) slot = &dev_8311;
+              else if (addr == 0x20) slot = &dev_9554;
+              if (!slot) return NULL;
+              if (*slot) return *slot;
+              i2c_device_config_t cfg = {};
+              cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+              cfg.device_address = addr;
+              cfg.scl_speed_hz = 100000;
+              if (i2c_master_bus_add_device(i2c_bus, &cfg, slot) != ESP_OK) return NULL;
+              return *slot;
+          }
+
+          bool i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val) {
+              i2c_master_dev_handle_t dev = get_dev(addr);
+              if (!dev) return false;
+              uint8_t buf[2] = { reg, val };
+              return i2c_master_transmit(dev, buf, 2, 100) == ESP_OK;
+          }
+
+          uint8_t i2c_read_reg(uint8_t addr, uint8_t reg) {
+              i2c_master_dev_handle_t dev = get_dev(addr);
+              if (!dev) return 0xFF;
+              uint8_t val = 0;
+              if (i2c_master_transmit_receive(dev, &reg, 1, &val, 1, 100) != ESP_OK) return 0xFF;
+              return val;
+          }
+
+          // ---------- TCA9554 readback ----------
+          void diag_tca9554() {
+              uint8_t cfg = i2c_read_reg(0x20, 0x03);
+              uint8_t out = i2c_read_reg(0x20, 0x01);
+              Serial.printf("[TCA DIAG] cfg=0x%02X out=0x%02X\n", cfg, out);
+          }
+
+          // ---------- ES7210 readback ----------
+          void diag_es7210() {
+              Serial.println("[ES7210 READBACK]");
+              Serial.printf("  0x00 (Power)  = 0x%02X\n", i2c_read_reg(0x40, 0x00));
+              Serial.printf("  0x01 (Clock)  = 0x%02X\n", i2c_read_reg(0x40, 0x01));
+              Serial.printf("  0x08 (Format) = 0x%02X\n", i2c_read_reg(0x40, 0x08));
+              Serial.printf("  0x09 (Time0)  = 0x%02X\n", i2c_read_reg(0x40, 0x09));
+              Serial.printf("  0x0A (Time1)  = 0x%02X\n", i2c_read_reg(0x40, 0x0A));
+              Serial.printf("  0x11 (Format2)= 0x%02X\n", i2c_read_reg(0x40, 0x11));
+              Serial.printf("  0x12 (TDM)    = 0x%02X\n", i2c_read_reg(0x40, 0x12));
+              Serial.printf("  0x13 (Gain1)  = 0x%02X\n", i2c_read_reg(0x40, 0x13));
+              Serial.printf("  0x41 (Bias12) = 0x%02X\n", i2c_read_reg(0x40, 0x41));
+              Serial.printf("  0x42 (Bias34) = 0x%02X\n", i2c_read_reg(0x40, 0x42));
+          }
+
+          // ---------- I2S TDM init ----------
+          bool i2s_init_tdm() {
+              i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+              if (i2s_new_channel(&chan_cfg, NULL, &rx_handle) != ESP_OK) {
+                  Serial.println("[I2S] new_channel FAIL");
+                  return false;
+              }
+              i2s_tdm_config_t tdm_cfg = {
+                  .clk_cfg = I2S_TDM_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
+                  .slot_cfg = I2S_TDM_PHILIPS_SLOT_DEFAULT_CONFIG(
+                      I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO,
+                      (i2s_tdm_slot_mask_t)(I2S_TDM_SLOT0 | I2S_TDM_SLOT1 | I2S_TDM_SLOT2 | I2S_TDM_SLOT3)
+                  ),
+                  .gpio_cfg = {
+                      .mclk = (gpio_num_t)I2S_MCLK,
+                      .bclk = (gpio_num_t)I2S_BCLK,
+                      .ws   = (gpio_num_t)I2S_WS,
+                      .dout = (gpio_num_t)I2S_DOUT,
+                      .din  = (gpio_num_t)I2S_DIN,
+                      .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false }
+                  }
+              };
+              tdm_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+
+              if (i2s_channel_init_tdm_mode(rx_handle, &tdm_cfg) != ESP_OK) {
+                  Serial.println("[I2S] init_tdm FAIL");
+                  return false;
+              }
+              if (i2s_channel_enable(rx_handle) != ESP_OK) {
+                  Serial.println("[I2S] enable FAIL");
+                  return false;
+              }
+              Serial.println("[I2S] TDM OK");
+              return true;
+          }
+
+          // ---------- ES7210 init ----------
+          void es7210_init_regs() {
+              Serial.println("[ES7210] Writing registers...");
+              i2c_write_reg(0x40, 0x00, 0xFF); delay(20);
+              i2c_write_reg(0x40, 0x00, 0x41);
+              i2c_write_reg(0x40, 0x01, 0x1F);
+              i2c_write_reg(0x40, 0x02, 0x00);
+              i2c_write_reg(0x40, 0x08, 0x10);
+              i2c_write_reg(0x40, 0x09, 0x30);
+              i2c_write_reg(0x40, 0x0A, 0x30);
+              i2c_write_reg(0x40, 0x11, 0x60);
+              i2c_write_reg(0x40, 0x12, 0x02);
+              i2c_write_reg(0x40, 0x13, 0xFF);
+              i2c_write_reg(0x40, 0x14, 0xFF);
+              i2c_write_reg(0x40, 0x15, 0xFF);
+              i2c_write_reg(0x40, 0x16, 0xFF);
+              i2c_write_reg(0x40, 0x41, 0x70);
+              i2c_write_reg(0x40, 0x42, 0x70);
+              Serial.println("[ES7210] Written");
+          }
+
+          // ---------- TOUCH ----------
           static void touch_event_cb(lv_event_t *e) {
               lv_event_code_t code = lv_event_get_code(e);
               lv_indev_t *indev = lv_indev_get_act();
-              if (!indev || !lbl_touch_xy || !lbl_touch_state) return;
+              if (!indev || !lbl_touch_xy || !lbl_touch_st) return;
               lv_point_t p;
               lv_indev_get_point(indev, &p);
               char buf[40];
@@ -216,23 +372,20 @@ jobs:
               lv_label_set_text(lbl_touch_xy, buf);
               if (touch_dot) lv_obj_set_pos(touch_dot, p.x - 10, p.y - 10);
               if (code == LV_EVENT_PRESSED) {
-                  lv_label_set_text(lbl_touch_state, "APASAT");
-                  lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0xFF0000), 0);
+                  lv_label_set_text(lbl_touch_st, "APASAT");
+                  lv_obj_set_style_text_color(lbl_touch_st, lv_color_hex(0xFF0000), 0);
                   if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0xFF0000), 0);
-                  Serial.printf("[TOUCH] PRESSED x=%d y=%d\n", p.x, p.y);
               } else if (code == LV_EVENT_RELEASED) {
-                  lv_label_set_text(lbl_touch_state, "Eliberat");
-                  lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);
+                  lv_label_set_text(lbl_touch_st, "Eliberat");
+                  lv_obj_set_style_text_color(lbl_touch_st, lv_color_hex(0x00AA00), 0);
                   if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);
               }
           }
 
-          // ---------- ASYNC UI UPDATE (runs in LVGL task, thread-safe) ----------
+          // ---------- ASYNC UI UPDATE ----------
           static void ui_update_cb(void *arg) {
-              // Read snapshot of state, update labels
               bool b = g_boot_pressed;
               bool p = g_pwr_pressed;
-              int t = g_tick;
 
               if (lbl_boot) {
                   lv_label_set_text(lbl_boot, b ? "BOOT: APASAT" : "BOOT: liber");
@@ -244,20 +397,20 @@ jobs:
               }
               if (lbl_clock) lv_label_set_text(lbl_clock, g_clock_str);
               if (lbl_date)  lv_label_set_text(lbl_date, g_date_str);
-              if (lbl_wifi) {
-                  lv_label_set_text(lbl_wifi, g_wifi_str);
-                  lv_obj_set_style_text_color(lbl_wifi,
-                      strstr(g_wifi_str, "192.168") ? lv_color_hex(0x38BDF8) : lv_color_hex(0x64748B), 0);
-              }
+              if (lbl_wifi)  lv_label_set_text(lbl_wifi, g_wifi_str);
               if (lbl_ping)  lv_label_set_text(lbl_ping, g_ping_str);
+              if (lbl_audio) {
+                  lv_label_set_text(lbl_audio, g_audio_str);
+                  lv_obj_set_style_text_color(lbl_audio,
+                      g_audio_has_data ? lv_color_hex(0x00CC00) : lv_color_hex(0xFF0000), 0);
+              }
               if (lbl_tick) {
-                  char buf[32];
-                  snprintf(buf, sizeof(buf), "UI_CB:%d", t);
-                  lv_label_set_text(lbl_tick, buf);
+                  char tbuf[32];
+                  snprintf(tbuf, sizeof(tbuf), "UI_CB:%d", g_tick);
+                  lv_label_set_text(lbl_tick, tbuf);
               }
           }
 
-          // ---------- UI BUILD (setup context, needs lock) ----------
           void build_ui() {
               pinMode(LCD_BL, OUTPUT);
               digitalWrite(LCD_BL, LOW);
@@ -265,67 +418,72 @@ jobs:
               lvgl_port_lock(1000);
               lv_obj_t *scr = lv_screen_active();
               if (!scr) scr = lv_scr_act();
-              if (!scr) { lvgl_port_unlock(); Serial.println("[UI] FATAL"); return; }
+              if (!scr) { lvgl_port_unlock(); return; }
 
               lv_obj_clean(scr);
               lv_obj_set_style_bg_color(scr, lv_color_hex(0x0F172A), 0);
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Gemini OS v4.1");
+              lv_label_set_text(title, "Gemini OS v5");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
-              lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
+              lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
 
               lbl_clock = lv_label_create(scr);
               lv_label_set_text(lbl_clock, "--:--:--");
               lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0xFFFFFF), 0);
               lv_obj_set_style_text_font(lbl_clock, &lv_font_montserrat_28, 0);
-              lv_obj_align(lbl_clock, LV_ALIGN_TOP_MID, 0, 45);
+              lv_obj_align(lbl_clock, LV_ALIGN_TOP_MID, 0, 40);
 
               lbl_date = lv_label_create(scr);
               lv_label_set_text(lbl_date, "-- --- ----");
               lv_obj_set_style_text_color(lbl_date, lv_color_hex(0x94A3B8), 0);
               lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_date, LV_ALIGN_TOP_MID, 0, 85);
+              lv_obj_align(lbl_date, LV_ALIGN_TOP_MID, 0, 78);
 
               lbl_touch_xy = lv_label_create(scr);
               lv_label_set_text(lbl_touch_xy, "X:--  Y:--");
               lv_obj_set_style_text_color(lbl_touch_xy, lv_color_hex(0xFFFFFF), 0);
               lv_obj_set_style_text_font(lbl_touch_xy, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_touch_xy, LV_ALIGN_CENTER, 0, -40);
+              lv_obj_align(lbl_touch_xy, LV_ALIGN_CENTER, 0, -60);
 
-              lbl_touch_state = lv_label_create(scr);
-              lv_label_set_text(lbl_touch_state, "Eliberat");
-              lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);
-              lv_obj_set_style_text_font(lbl_touch_state, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_touch_state, LV_ALIGN_CENTER, 0, -20);
+              lbl_touch_st = lv_label_create(scr);
+              lv_label_set_text(lbl_touch_st, "Eliberat");
+              lv_obj_set_style_text_color(lbl_touch_st, lv_color_hex(0x00AA00), 0);
+              lv_obj_set_style_text_font(lbl_touch_st, &lv_font_montserrat_12, 0);
+              lv_obj_align(lbl_touch_st, LV_ALIGN_CENTER, 0, -40);
 
               lbl_boot = lv_label_create(scr);
               lv_label_set_text(lbl_boot, "BOOT: liber");
               lv_obj_set_style_text_color(lbl_boot, lv_color_hex(0xFFFFFF), 0);
               lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_boot, LV_ALIGN_CENTER, 0, 5);
+              lv_obj_align(lbl_boot, LV_ALIGN_CENTER, 0, -15);
 
               lbl_pwr = lv_label_create(scr);
               lv_label_set_text(lbl_pwr, "PWR: liber");
               lv_obj_set_style_text_color(lbl_pwr, lv_color_hex(0xFFFFFF), 0);
               lv_obj_set_style_text_font(lbl_pwr, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_pwr, LV_ALIGN_CENTER, 0, 30);
+              lv_obj_align(lbl_pwr, LV_ALIGN_CENTER, 0, 10);
 
               lbl_wifi = lv_label_create(scr);
               lv_label_set_text(lbl_wifi, "WiFi: conectare...");
               lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x64748B), 0);
               lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 60);
+              lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 40);
 
               lbl_ping = lv_label_create(scr);
               lv_label_set_text(lbl_ping, "Internet: --");
               lv_obj_set_style_text_color(lbl_ping, lv_color_hex(0x64748B), 0);
               lv_obj_set_style_text_font(lbl_ping, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_ping, LV_ALIGN_CENTER, 0, 85);
+              lv_obj_align(lbl_ping, LV_ALIGN_CENTER, 0, 60);
 
-              // Diagnostic counter - visible proof that async call works
+              lbl_audio = lv_label_create(scr);
+              lv_label_set_text(lbl_audio, "Audio: --");
+              lv_obj_set_style_text_color(lbl_audio, lv_color_hex(0xFF0000), 0);
+              lv_obj_set_style_text_font(lbl_audio, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_audio, LV_ALIGN_CENTER, 0, 85);
+
               lbl_tick = lv_label_create(scr);
               lv_label_set_text(lbl_tick, "UI_CB:0");
               lv_obj_set_style_text_color(lbl_tick, lv_color_hex(0x64748B), 0);
@@ -350,8 +508,8 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] BUILD v4.1-async-back-to-base");
-              Serial.println("=== Gemini OS v4.1 ===");
+              Serial.println("\n[BOOT] BUILD v5-audio-diag");
+              Serial.println("=== Gemini OS v5 ===");
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
               pinMode(PWR_BTN, INPUT_PULLUP);
@@ -362,6 +520,34 @@ jobs:
               delay(300);
               build_ui();
 
+              if (i2c_master_get_bus_handle(0, &i2c_bus) != ESP_OK) {
+                  Serial.println("[FATAL] I2C bus 0 unavailable");
+                  return;
+              }
+              Serial.println("[I2C] Bus 0 acquired");
+
+              // TCA9554 reset (delay-uri lungi)
+              if (i2c_bus) {
+                  i2c_write_reg(0x20, 0x03, 0x00); delay(20);
+                  i2c_write_reg(0x20, 0x01, 0x00); delay(150);
+                  i2c_write_reg(0x20, 0x01, 0xFF); delay(300);
+              }
+
+              // I2S FIRST (MCLK must be running before ES7210 config)
+              if (!i2s_init_tdm()) {
+                  Serial.println("[FATAL] I2S TDM init failed");
+                  return;
+              }
+              delay(200);
+
+              // ES7210 init
+              es7210_init_regs();
+              delay(100);
+
+              // Readback to confirm I2C works
+              diag_tca9554();
+              diag_es7210();
+
               Serial.println("[WiFi] Starting...");
               WiFi.mode(WIFI_STA);
               WiFi.setSleep(false);
@@ -369,10 +555,9 @@ jobs:
           }
 
           void loop() {
-              // ---------- BUTOANE (edge detect) ----------
+              // ---------- BUTOANE ----------
               bool b_raw = digitalRead(BOOT_BTN);
               bool p_raw = digitalRead(PWR_BTN);
-
               if (b_raw != last_boot_state) {
                   last_boot_state = b_raw;
                   g_boot_pressed = (b_raw == LOW);
@@ -386,10 +571,45 @@ jobs:
                   lv_async_call(ui_update_cb, NULL);
               }
 
-              // ---------- WIFI ----------
+              // ---------- AUDIO READ ----------
+              static unsigned long last_audio = 0;
+              static int read_ok = 0;
+              static int read_fail = 0;
+              static int read_nonzero = 0;
+              if (millis() - last_audio > 1000) {
+                  last_audio = millis();
+                  static int16_t mic_buf[1024];
+                  size_t bytes_read = 0;
+                  esp_err_t err = i2s_channel_read(rx_handle, mic_buf, sizeof(mic_buf), &bytes_read, 100);
+                  if (err == ESP_OK && bytes_read > 0) {
+                      read_ok++;
+                      int samples = bytes_read / sizeof(int16_t);
+                      int32_t peak = 0;
+                      for (int i = 0; i < samples; i++) {
+                          int32_t v = mic_buf[i];
+                          if (v < 0) v = -v;
+                          if (v > peak) peak = v;
+                      }
+                      if (peak > 0) read_nonzero++;
+                      g_audio_peak = peak;
+                      g_audio_has_data = (peak > 0);
+                      snprintf(g_audio_str, sizeof(g_audio_str), "Audio: peak=%d %s", (int)peak, peak > 0 ? "DATA!" : "(zeros)");
+                      lv_async_call(ui_update_cb, NULL);
+
+                      // RAW bytes (first 16 bytes)
+                      uint8_t* bp = (uint8_t*)mic_buf;
+                      Serial.printf("[AUDIO] read=%d bytes peak=%d RAW=", (int)bytes_read, (int)peak);
+                      for (int i = 0; i < 16 && i < bytes_read; i++) Serial.printf("%02X ", bp[i]);
+                      Serial.printf(" | ok=%d fail=%d nonzero=%d\n", read_ok, read_fail, read_nonzero);
+                  } else {
+                      read_fail++;
+                      Serial.printf("[AUDIO] READ FAIL err=%d ok=%d fail=%d\n", (int)err, read_ok, read_fail);
+                  }
+              }
+
+              // ---------- WIFI + NTP ----------
               wl_status_t wstat = WiFi.status();
               static bool ntp_done = false;
-
               if (wstat == WL_CONNECTED) {
                   static bool was_connected = false;
                   if (!was_connected) {
@@ -397,32 +617,20 @@ jobs:
                       snprintf(g_wifi_str, sizeof(g_wifi_str), "WiFi: %s", WiFi.localIP().toString().c_str());
                       lv_async_call(ui_update_cb, NULL);
                   }
-
                   if (!ntp_done) {
                       ntp_done = true;
-                      Serial.println("[NTP] configTzTime...");
                       configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.google.com");
-                      Serial.println("[NTP] done");
                   }
-
-                  // Clock every second
                   static unsigned long last_clock = 0;
-                  static bool first_sync = false;
                   if (millis() - last_clock > 1000) {
                       last_clock = millis();
                       struct tm ti;
                       if (getLocalTime(&ti, 50)) {
-                          if (!first_sync) {
-                              first_sync = true;
-                              Serial.printf("[NTP] SYNCED: %02d:%02d:%02d\n", ti.tm_hour, ti.tm_min, ti.tm_sec);
-                          }
                           strftime(g_clock_str, sizeof(g_clock_str), "%H:%M:%S", &ti);
                           strftime(g_date_str, sizeof(g_date_str), "%d %b %Y", &ti);
                           lv_async_call(ui_update_cb, NULL);
                       }
                   }
-
-                  // Ping every 10s
                   static unsigned long last_ping = 0;
                   if (millis() - last_ping > 10000) {
                       last_ping = millis();
@@ -433,11 +641,6 @@ jobs:
                       c.stop();
                       if (ok) {
                           snprintf(g_ping_str, sizeof(g_ping_str), "Internet: OK (%lu ms)", lat);
-                          Serial.printf("[PING] OK %lu ms\n", lat);
-                          lv_async_call(ui_update_cb, NULL);
-                      } else {
-                          snprintf(g_ping_str, sizeof(g_ping_str), "Internet: FAIL");
-                          Serial.println("[PING] FAIL");
                           lv_async_call(ui_update_cb, NULL);
                       }
                   }
@@ -445,24 +648,12 @@ jobs:
                   snprintf(g_wifi_str, sizeof(g_wifi_str), "WiFi: conectare...");
               }
 
-              // ---------- TICK (diagnostic UI_CB counter) ----------
+              // ---------- TICK ----------
               static unsigned long last_tick = 0;
               if (millis() - last_tick > 500) {
                   last_tick = millis();
                   g_tick++;
                   lv_async_call(ui_update_cb, NULL);
-              }
-
-              // ---------- HEARTBEAT (confirm loop is alive) ----------
-              static unsigned long last_hb = 0;
-              static int hb = 0;
-              if (millis() - last_hb > 5000) {
-                  last_hb = millis();
-                  hb++;
-                  Serial.printf("[HB %d] WiFi=%d IP=%s BOOT=%d PWR=%d Ping=%s\n",
-                                hb, (int)wstat,
-                                WiFi.localIP().toString().c_str(),
-                                b_raw, p_raw, g_ping_str);
               }
 
               delay(20);
@@ -473,7 +664,7 @@ jobs:
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] v4.1 .ino generat")
+          print("[OK] v5 audio diag .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -490,14 +681,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v4.1-0x0.bin \
+            -o package_bin/gemini-v5-audio-diag-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v4.1-0x0.bin
+          ls -lh package_bin/gemini-v5-audio-diag-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v4.1-async
-          path: package_bin/gemini-v4.1-0x0.bin
+          name: gemini-v5-audio-diag
+          path: package_bin/gemini-v5-audio-diag-0x0.bin
           if-no-files-found: error
