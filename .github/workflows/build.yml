@@ -204,7 +204,6 @@ jobs:
           static int16_t buf_mono_24k[1024];
           static int16_t buf_mono_16k[682];
           static int16_t buf_out_stereo[256];
-          static char b64_out_buf[2048];
 
           void tca9554_init_local() {
               i2c_master_bus_handle_t bus;
@@ -431,12 +430,11 @@ jobs:
                               buf_mono_16k[i] = buf_mono_24k[src];
                           }
 
-                          int b64_len = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t), b64_out_buf);
-                          if (b64_len > 0) {
-                              b64_out_buf[b64_len] = '\0';
+                          String b64_str = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
+                          if (b64_str.length() > 0) {
                               JsonDocument doc;
                               doc["realtimeInput"]["audio"]["mimeType"] = "audio/pcm;rate=16000";
-                              doc["realtimeInput"]["audio"]["data"] = b64_out_buf;
+                              doc["realtimeInput"]["audio"]["data"] = b64_str;
                               String out;
                               serializeJson(doc, out);
                               ws.sendTXT(out);
