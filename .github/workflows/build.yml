@@ -1,11 +1,11 @@
-name: Build Gemini OS - v21 Gemini Live (AI Studio Model)
+name: Build Gemini OS - v22 Gemini Live (Correct Model & Setup)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v21 Gemini Live
+    name: Build v22 Gemini Live
     runs-on: ubuntu-latest
 
     steps:
@@ -248,7 +248,7 @@ jobs:
                       doc["setup"]["model"] = "models/gemini-2.5-flash-native-audio-preview-12-2025";
                       doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
                       doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Kore";
-                      doc["setup"]["systemInstruction"] = "Raspunde intotdeauna exclusiv in limba romana, intr-un mod concis si natural.";
+                      doc["setup"]["systemInstruction"]["parts"][0]["text"] = "Raspunde intotdeauna exclusiv in limba romana, intr-un mod concis si natural.";
                       String out;
                       serializeJson(doc, out);
                       ws.sendTXT(out);
@@ -264,7 +264,7 @@ jobs:
                           Serial.println("[WS] >>> SETUP COMPLETE! Suntem LIVE! <<<");
                           g_state = 3;
                       } else {
-                          Serial.printf("[WS] TEXT: %.*s\n", (int)(len > 100 ? 100 : len), payload);
+                          Serial.printf("[WS] TEXT: %.*s\n", (int)(len > 200 ? 200 : len), payload);
                       }
                       break;
                   }
@@ -359,7 +359,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v21-gemini-live-ai-studio-model");
+              Serial.println("\n[BOOT] v22-gemini-live-native-audio");
 
               I2C_INIT_CALL
               delay(50);
@@ -461,14 +461,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v21-live-0x0.bin \
+            -o package_bin/gemini-v22-live-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v21-live-0x0.bin
+          ls -lh package_bin/gemini-v22-live-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v21-live
-          path: package_bin/gemini-v21-live-0x0.bin
+          name: gemini-v22-live
+          path: package_bin/gemini-v22-live-0x0.bin
           if-no-files-found: error
