@@ -1,11 +1,11 @@
-name: Build Gemini OS - Baseline Integration
+name: Build Gemini OS - Instant Buttons Test
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Baseline (Display + Touch + Buttons + WiFi)
+    name: Build Baseline (Instant Buttons)
     runs-on: ubuntu-latest
 
     steps:
@@ -68,7 +68,7 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Patch Drivers & Generate Baseline Sketch
+      - name: Patch Drivers & Generate Instant Button Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -85,7 +85,6 @@ jobs:
 
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
-          # Patch lvgl_port.c
           port_path = f"{sketch_dir}/lvgl_port.c"
           with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
               code = f.read()
@@ -108,7 +107,6 @@ jobs:
           with open(port_path, "w", encoding="utf-8") as f:
               f.write(code)
 
-          # Inject lock/unlock
           h_path = f"{sketch_dir}/lvgl_port.h"
           with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
               h_content = f.read()
@@ -150,7 +148,6 @@ jobs:
               with open(port_path, "w", encoding="utf-8") as f:
                   f.write(c_content)
 
-          # Detect I2C init function
           i2c_init_func = "bsp_i2c_init"
           for h_path in glob.glob(f"{sketch_dir}/*.h"):
               with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -162,7 +159,6 @@ jobs:
                       i2c_init_func = f_name
                       break
 
-          # Generate baseline .ino
           ino = textwrap.dedent(r'''
           #include <Arduino.h>
           #include <WiFi.h>
@@ -178,21 +174,20 @@ jobs:
           #define BOOT_BTN  0
           #define PWR_BTN   16
 
-          // ---------- WiFi ----------
           const char* ssid     = "TP-Link_2.4G_9318_Guest";
           const char* password = "revelion";
 
-          // ---------- UI HANDLES ----------
-          lv_obj_t *lbl_title       = NULL;
           lv_obj_t *lbl_touch_xy    = NULL;
           lv_obj_t *lbl_touch_state = NULL;
           lv_obj_t *lbl_boot        = NULL;
           lv_obj_t *lbl_pwr         = NULL;
           lv_obj_t *lbl_wifi        = NULL;
-          lv_obj_t *lbl_heartbeat   = NULL;
           lv_obj_t *touch_dot       = NULL;
 
-          // ---------- TOUCH EVENT ----------
+          // Stare anterioara pentru Edge Detection
+          bool last_boot_state = HIGH;
+          bool last_pwr_state  = HIGH;
+
           static void touch_event_cb(lv_event_t *e) {
               lv_event_code_t code = lv_event_get_code(e);
               lv_indev_t *indev = lv_indev_get_act();
@@ -200,31 +195,23 @@ jobs:
 
               lv_point_t p;
               lv_indev_get_point(indev, &p);
-
               char buf[40];
               lv_snprintf(buf, sizeof(buf), "X:%d  Y:%d", p.x, p.y);
               lv_label_set_text(lbl_touch_xy, buf);
 
-              if (touch_dot) {
-                  lv_obj_set_pos(touch_dot, p.x - 15, p.y - 15);
-              }
+              if (touch_dot) lv_obj_set_pos(touch_dot, p.x - 15, p.y - 15);
 
               if (code == LV_EVENT_PRESSED) {
-                  lv_label_set_text(lbl_touch_state, "APASAT!");
+                  lv_label_set_text(lbl_touch_state, "TOUCH: APASAT!");
                   lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0xFF0000), 0);
                   if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0xFF0000), 0);
-                  Serial.printf("[TOUCH] PRESSED x=%d y=%d\n", p.x, p.y);
               } else if (code == LV_EVENT_RELEASED) {
-                  lv_label_set_text(lbl_touch_state, "Eliberat");
+                  lv_label_set_text(lbl_touch_state, "TOUCH: Eliberat");
                   lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);
                   if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);
-                  Serial.println("[TOUCH] RELEASED");
-              } else if (code == LV_EVENT_PRESSING) {
-                  lv_label_set_text(lbl_touch_state, "Apasat...");
               }
           }
 
-          // ---------- UI ----------
           void build_ui() {
               pinMode(LCD_BL, OUTPUT);
               digitalWrite(LCD_BL, LOW);
@@ -238,63 +225,42 @@ jobs:
               lv_obj_set_style_bg_color(scr, lv_color_hex(0x0F172A), 0);
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-              // Titlu
-              lbl_title = lv_label_create(scr);
-              lv_label_set_text(lbl_title, "Gemini OS");
-              lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x38BDF8), 0);
-              lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_20, 0);
-              lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, 20);
+              lv_obj_t *title = lv_label_create(scr);
+              lv_label_set_text(title, "Instant Button Test");
+              lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
+              lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+              lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
 
-              // Subtitlu
-              lv_obj_t *sub = lv_label_create(scr);
-              lv_label_set_text(sub, "by Bogdan - Baseline");
-              lv_obj_set_style_text_color(sub, lv_color_hex(0x94A3B8), 0);
-              lv_obj_set_style_text_font(sub, &lv_font_montserrat_12, 0);
-              lv_obj_align(sub, LV_ALIGN_TOP_MID, 0, 50);
-
-              // Touch XY
               lbl_touch_xy = lv_label_create(scr);
               lv_label_set_text(lbl_touch_xy, "X:--  Y:--");
               lv_obj_set_style_text_color(lbl_touch_xy, lv_color_hex(0xFFFFFF), 0);
               lv_obj_set_style_text_font(lbl_touch_xy, &lv_font_montserrat_18, 0);
               lv_obj_align(lbl_touch_xy, LV_ALIGN_CENTER, 0, -80);
 
-              // Touch state
               lbl_touch_state = lv_label_create(scr);
-              lv_label_set_text(lbl_touch_state, "Eliberat");
+              lv_label_set_text(lbl_touch_state, "TOUCH: Eliberat");
               lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);
               lv_obj_set_style_text_font(lbl_touch_state, &lv_font_montserrat_14, 0);
               lv_obj_align(lbl_touch_state, LV_ALIGN_CENTER, 0, -55);
 
-              // BOOT
               lbl_boot = lv_label_create(scr);
               lv_label_set_text(lbl_boot, "BOOT: liber");
               lv_obj_set_style_text_color(lbl_boot, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_boot, LV_ALIGN_CENTER, 0, -20);
+              lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_16, 0);
+              lv_obj_align(lbl_boot, LV_ALIGN_CENTER, 0, -10);
 
-              // PWR
               lbl_pwr = lv_label_create(scr);
               lv_label_set_text(lbl_pwr, "PWR: liber");
               lv_obj_set_style_text_color(lbl_pwr, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_pwr, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_pwr, LV_ALIGN_CENTER, 0, 5);
+              lv_obj_set_style_text_font(lbl_pwr, &lv_font_montserrat_16, 0);
+              lv_obj_align(lbl_pwr, LV_ALIGN_CENTER, 0, 20);
 
-              // WiFi
               lbl_wifi = lv_label_create(scr);
               lv_label_set_text(lbl_wifi, "WiFi: conectare...");
               lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x0284C7), 0);
               lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 45);
+              lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 70);
 
-              // Heartbeat counter
-              lbl_heartbeat = lv_label_create(scr);
-              lv_label_set_text(lbl_heartbeat, "HB: 0");
-              lv_obj_set_style_text_color(lbl_heartbeat, lv_color_hex(0x64748B), 0);
-              lv_obj_set_style_text_font(lbl_heartbeat, &lv_font_montserrat_12, 0);
-              lv_obj_align(lbl_heartbeat, LV_ALIGN_BOTTOM_MID, 0, -20);
-
-              // Touch dot
               touch_dot = lv_obj_create(scr);
               lv_obj_set_size(touch_dot, 30, 30);
               lv_obj_set_style_radius(touch_dot, LV_RADIUS_CIRCLE, 0);
@@ -303,95 +269,74 @@ jobs:
               lv_obj_set_style_border_width(touch_dot, 0, 0);
               lv_obj_set_pos(touch_dot, 10, 10);
 
-              // Touch events
               lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_PRESSED,  NULL);
-              lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_PRESSING, NULL);
               lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_RELEASED, NULL);
 
               lvgl_port_unlock();
               Serial.println("[UI] Built");
           }
 
-          void update_ui(const char* wifi_txt, int hb) {
-              if (!lvgl_port_lock(100)) return;
-              if (lbl_boot)
-                  lv_label_set_text(lbl_boot, digitalRead(BOOT_BTN) == LOW ? "BOOT: APASAT" : "BOOT: liber");
-              if (lbl_pwr)
-                  lv_label_set_text(lbl_pwr, digitalRead(PWR_BTN) == LOW ? "PWR: APASAT" : "PWR: liber");
-              if (lbl_wifi && wifi_txt)
-                  lv_label_set_text(lbl_wifi, wifi_txt);
-              if (lbl_heartbeat) {
-                  char b[32];
-                  lv_snprintf(b, sizeof(b), "HB: %d", hb);
-                  lv_label_set_text(lbl_heartbeat, b);
-              }
-              lvgl_port_unlock();
-          }
-
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n=== Gemini OS Baseline ===");
-              Serial.println("[INIT] Display + Touch + Buttons + WiFi");
+              Serial.println("\n=== Instant Button Test ===");
 
-              // Butoane
               pinMode(BOOT_BTN, INPUT_PULLUP);
               pinMode(PWR_BTN, INPUT_PULLUP);
 
-              // I2C + LVGL
               I2C_INIT_CALL
               delay(50);
               lvgl_port_init();
               delay(300);
               build_ui();
 
-              // Verifica indev
-              lv_indev_t *indev = lv_indev_get_next(NULL);
-              int count = 0;
-              while (indev) { count++; indev = lv_indev_get_next(indev); }
-              Serial.printf("[INDEV] %d input device(s)\n", count);
-
-              // WiFi
-              Serial.println("[WiFi] Connecting...");
               WiFi.mode(WIFI_STA);
               WiFi.setSleep(false);
               WiFi.begin(ssid, password);
 
-              Serial.println("[READY] Atinge ecranul si apasa BOOT/PWR!");
+              Serial.println("[READY] Apasa butoanele BOOT sau PWR acum!");
           }
 
           void loop() {
-              static unsigned long last_ui = 0;
-              static unsigned long last_beat = 0;
-              static int hb = 0;
+              // 1. Citim starea butoanelor
+              bool current_boot = digitalRead(BOOT_BTN);
+              bool current_pwr  = digitalRead(PWR_BTN);
 
-              // Update UI butoane + WiFi la fiecare 200ms
-              if (millis() - last_ui > 200) {
-                  last_ui = millis();
-                  char wbuf[64];
-                  if (WiFi.status() == WL_CONNECTED) {
-                      snprintf(wbuf, sizeof(wbuf), "WiFi: OK  %s", WiFi.localIP().toString().c_str());
-                  } else {
-                      snprintf(wbuf, sizeof(wbuf), "WiFi: connecting...");
-                  }
-                  update_ui(wbuf, hb);
+              // 2. Verificam daca s-a schimbat ceva (Edge Detection)
+              if (current_boot != last_boot_state) {
+                  last_boot_state = current_boot;
+                  Serial.printf("[BTN] BOOT: %s\n", current_boot == LOW ? "APASAT" : "ELIBERAT");
+                  lvgl_port_lock(50);
+                  lv_label_set_text(lbl_boot, current_boot == LOW ? "BOOT: APASAT" : "BOOT: liber");
+                  lv_obj_set_style_text_color(lbl_boot, current_boot == LOW ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF), 0);
+                  lvgl_port_unlock();
               }
 
-              // Heartbeat la fiecare 5s
-              if (millis() - last_beat > 5000) {
-                  last_beat = millis();
-                  hb++;
-                  if (WiFi.status() == WL_CONNECTED) {
-                      Serial.printf("[HB %d] WiFi OK IP=%s BOOT=%d PWR=%d\n",
-                          hb, WiFi.localIP().toString().c_str(),
-                          digitalRead(BOOT_BTN), digitalRead(PWR_BTN));
-                  } else {
-                      Serial.printf("[HB %d] WiFi connecting... BOOT=%d PWR=%d\n",
-                          hb, digitalRead(BOOT_BTN), digitalRead(PWR_BTN));
-                  }
+              if (current_pwr != last_pwr_state) {
+                  last_pwr_state = current_pwr;
+                  Serial.printf("[BTN] PWR: %s\n", current_pwr == LOW ? "APASAT" : "ELIBERAT");
+                  lvgl_port_lock(50);
+                  lv_label_set_text(lbl_pwr, current_pwr == LOW ? "PWR: APASAT" : "PWR: liber");
+                  lv_obj_set_style_text_color(lbl_pwr, current_pwr == LOW ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF), 0);
+                  lvgl_port_unlock();
               }
 
-              delay(20);
+              // 3. Update WiFi text
+              static unsigned long last_wifi = 0;
+              if (millis() - last_wifi > 2000) {
+                  last_wifi = millis();
+                  lvgl_port_lock(50);
+                  if (WiFi.status() == WL_CONNECTED) {
+                      char wbuf[64];
+                      snprintf(wbuf, sizeof(wbuf), "WiFi: OK %s", WiFi.localIP().toString().c_str());
+                      lv_label_set_text(lbl_wifi, wbuf);
+                  } else {
+                      lv_label_set_text(lbl_wifi, "WiFi: conectare...");
+                  }
+                  lvgl_port_unlock();
+              }
+
+              delay(20); // bucla rapida pentru a prinde apasarile scurte
           }
           ''').lstrip()
 
@@ -399,7 +344,7 @@ jobs:
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] Baseline .ino generat")
+          print("[OK] Instant Button Test .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -416,14 +361,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-baseline-0x0.bin \
+            -o package_bin/instant-buttons-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-baseline-0x0.bin
+          ls -lh package_bin/instant-buttons-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-baseline-firmware
-          path: package_bin/gemini-baseline-0x0.bin
+          name: instant-buttons-firmware
+          path: package_bin/instant-buttons-0x0.bin
           if-no-files-found: error
