@@ -1,11 +1,11 @@
-name: Build Gemini OS - v11 Official 08_Audio_Test (LVGL 8)
+name: Build Gemini OS - v11 Official 08_Audio_Test (LVGL 8, tick fix)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v11 (official audio, LVGL 8)
+    name: Build v11
     runs-on: ubuntu-latest
 
     steps:
@@ -51,9 +51,9 @@ jobs:
           #define LV_COLOR_16_SWAP 1
           #define LV_MEM_CUSTOM 0
           #define LV_MEM_SIZE (128U * 1024U)
-          #define LV_TICK_CUSTOM 1
-          #define LV_TICK_CUSTOM_INCLUDE "Arduino.h"
-          #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
+
+          /* IMPORTANT: 0 - exemplul apeleaza lv_tick_inc() el insusi */
+          #define LV_TICK_CUSTOM 0
 
           #define LV_FONT_MONTSERRAT_12 1
           #define LV_FONT_MONTSERRAT_14 1
