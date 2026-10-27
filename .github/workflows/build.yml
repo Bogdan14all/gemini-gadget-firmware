@@ -5,11 +5,11 @@ on:
 
 jobs:
   build:
-    name: Build v11 (official example as-is)
+    name: Build v11 (official audio, LVGL 8)
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Waveshare
+      - name: Checkout Waveshare ESP32-S3-Touch-LCD-3.49
         uses: actions/checkout@v4
         with:
           repository: waveshareteam/ESP32-S3-Touch-LCD-3.49
@@ -25,7 +25,7 @@ jobs:
           pip install "esptool<5"
           sudo apt-get update && sudo apt-get install -y zip
 
-      - name: Setup Arduino CLI
+      - name: Setup Arduino CLI & ESP32 Core
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
           sudo mv bin/arduino-cli /usr/local/bin/
@@ -35,6 +35,7 @@ jobs:
           arduino-cli core install esp32:esp32
 
       - name: Install LVGL 8.3.11
+        shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
           if [ -d "Arduino_Libraries" ]; then
@@ -42,21 +43,63 @@ jobs:
           fi
           arduino-cli lib install "lvgl"@8.3.11
 
+          cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
+          #ifndef LV_CONF_H
+          #define LV_CONF_H
+
+          #define LV_COLOR_DEPTH 16
+          #define LV_COLOR_16_SWAP 1
+          #define LV_MEM_CUSTOM 0
+          #define LV_MEM_SIZE (128U * 1024U)
+          #define LV_TICK_CUSTOM 1
+          #define LV_TICK_CUSTOM_INCLUDE "Arduino.h"
+          #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
+
+          #define LV_FONT_MONTSERRAT_12 1
+          #define LV_FONT_MONTSERRAT_14 1
+          #define LV_FONT_MONTSERRAT_16 1
+          #define LV_FONT_MONTSERRAT_18 1
+          #define LV_FONT_MONTSERRAT_20 1
+          #define LV_FONT_MONTSERRAT_22 0
+          #define LV_FONT_MONTSERRAT_24 0
+          #define LV_FONT_MONTSERRAT_26 0
+          #define LV_FONT_MONTSERRAT_28 1
+          #define LV_FONT_MONTSERRAT_30 0
+          #define LV_FONT_DEFAULT &lv_font_montserrat_20
+
+          #define LV_USE_DEMO_WIDGETS 0
+          #define LV_USE_DEMO_MUSIC 0
+          #define LV_USE_DEMO_BENCHMARK 0
+          #define LV_USE_DEMO_STRESS 0
+
+          #define LV_USE_LOG 0
+          #define LV_USE_ASSERT_NULL 0
+          #define LV_USE_ASSERT_MALLOC 0
+          #define LV_USE_ASSERT_STYLE 0
+          #define LV_USE_ASSERT_MEM_INTEGRITY 0
+          #define LV_USE_ASSERT_OBJ 0
+
+          #endif
+          EOF
+          sed -i 's/^[ \t]*//' ~/Arduino/libraries/lv_conf.h
+
       - name: Patch demo includes
         shell: bash
         run: |
           find Examples/Arduino/08_Audio_Test -type f \( -name "*.c" -o -name "*.h" -o -name "*.ino" -o -name "*.cpp" \) \
             -exec sed -i 's|#include "demos/lv_demos.h"|// #include "demos/lv_demos.h"|g' {} + 2>/dev/null || true
           find Examples/Arduino/08_Audio_Test -type f \( -name "*.c" -o -name "*.h" -o -name "*.ino" -o -name "*.cpp" \) \
+            -exec sed -i 's|#include <demos/lv_demos.h>|// #include <demos/lv_demos.h>|g' {} + 2>/dev/null || true
+          find Examples/Arduino/08_Audio_Test -type f \( -name "*.c" -o -name "*.h" -o -name "*.ino" -o -name "*.cpp" \) \
             -exec sed -i 's|lv_demo_widgets();|// lv_demo_widgets();|g' {} + 2>/dev/null || true
 
-      - name: Compile
+      - name: Compile official example (unmodified)
         run: |
           SKETCH_PATH="Examples/Arduino/08_Audio_Test/08_Audio_Test.ino"
           FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
           arduino-cli compile --fqbn "$FQBN" --output-dir build_output "$SKETCH_PATH"
 
-      - name: Merge
+      - name: Merge into Single .bin
         shell: bash
         run: |
           mkdir -p package_bin
@@ -64,14 +107,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v11-0x0.bin \
+            -o package_bin/gemini-v11-official-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v11-0x0.bin
+          ls -lh package_bin/gemini-v11-official-0x0.bin
 
-      - name: Upload
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: gemini-v11-official
-          path: package_bin/gemini-v11-0x0.bin
+          path: package_bin/gemini-v11-official-0x0.bin
           if-no-files-found: error
