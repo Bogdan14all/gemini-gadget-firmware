@@ -1,11 +1,11 @@
-name: Build Gemini OS - v30 Gemini Live (Native Audio + Sync)
+name: Build Gemini OS - v31 Gemini Live (2.0 + Parse Server Audio)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v30 Gemini Live
+    name: Build v31 Gemini Live
     runs-on: ubuntu-latest
 
     steps:
@@ -153,16 +153,21 @@ jobs:
           echo "#pragma once" > sketch/secrets.h
           echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
 
-      - name: Write sketch.ino
+      - name: Write sketch.ino (clean Python generation)
         shell: bash
         run: |
-          cat << 'EOF' > sketch/sketch.ino
+          I2C_FUNC=$(cat sketch/i2c_func.txt)
+          python3 - << PYEOF
+          import textwrap
+
+          i2c_init = "$I2C_FUNC"
+
+          code = textwrap.dedent(r'''
           #include <Arduino.h>
           #include <WiFi.h>
           #include <WebSocketsClient.h>
           #include <ArduinoJson.h>
           #include <base64.h>
-          #include "mbedtls/base64.h"
 
           #include "secrets.h"
 
@@ -197,7 +202,6 @@ jobs:
           static int16_t buf_mono_24k[512];
           static int16_t buf_mono_16k[341];
           static int16_t buf_out_stereo[256];
-          static uint8_t buf_rx_raw[16384];
 
           void tca9554_init_local() {
               i2c_master_bus_handle_t bus;
@@ -234,23 +238,84 @@ jobs:
               Serial.println("[AUDIO] Opened @24kHz stereo");
           }
 
+          void parse_server_audio(const char* payload, size_t len) {
+              JsonDocument doc;
+              DeserializationError err = deserializeJson(doc, payload, len);
+              if (err) {
+                  Serial.printf("[JSON] parse error: %s\n", err.c_str());
+                  return;
+              }
+
+              // Verificăm setupComplete
+              if (doc["setupComplete"].is<JsonObject>()) {
+                  Serial.println("[WS] >>> SETUP COMPLETE! Suntem LIVE! <<<");
+                  g_state = 3;
+                  return;
+              }
+
+              // Verificăm serverContent.modelTurn.parts
+              JsonObject serverContent = doc["serverContent"];
+              if (serverContent.isNull()) return;
+              JsonObject modelTurn = serverContent["modelTurn"];
+              if (modelTurn.isNull()) return;
+              JsonArray parts = modelTurn["parts"];
+              if (parts.isNull()) return;
+
+              for (JsonObject part : parts) {
+                  JsonObject inlineData = part["inlineData"];
+                  if (inlineData.isNull()) continue;
+                  const char* data = inlineData["data"];
+                  if (!data) continue;
+
+                  // Decodificăm Base64
+                  int data_len = strlen(data);
+                  int decoded_len = base64_decoded_length(data_len);
+                  if (decoded_len <= 0) continue;
+
+                  // Alocăm buffer temporar (putem folosi PSRAM sau heap)
+                  uint8_t* audio_buf = (uint8_t*)malloc(decoded_len);
+                  if (!audio_buf) {
+                      Serial.println("[AUDIO] malloc failed");
+                      continue;
+                  }
+                  int out_len = base64_decode((const uint8_t*)data, data_len, audio_buf, decoded_len);
+                  if (out_len <= 0) {
+                      free(audio_buf);
+                      continue;
+                  }
+
+                  // Redăm audio-ul pe difuzor (PCM 16-bit mono -> stereo)
+                  int16_t* pcm = (int16_t*)audio_buf;
+                  int samples = out_len / sizeof(int16_t);
+                  for (int off = 0; off < samples; off += 128) {
+                      int n = samples - off;
+                      if (n > 128) n = 128;
+                      int16_t* src = pcm + off;
+                      for (int i = 0; i < n; i++) {
+                          buf_out_stereo[i*2]   = src[i];
+                          buf_out_stereo[i*2+1] = src[i];
+                      }
+                      esp_codec_dev_write(playback, buf_out_stereo, n * 4);
+                  }
+
+                  g_rx_kb += out_len / 1024;
+                  free(audio_buf);
+              }
+          }
+
           void wsEvent(WStype_t type, uint8_t* payload, size_t len) {
               switch (type) {
                   case WStype_CONNECTED: {
                       Serial.println("[WS] CONNECTED");
                       g_state = 2;
-                      delay(100);
+                      delay(100); // Stabilizare socket
 
                       JsonDocument doc;
                       doc["setup"]["model"] = "models/gemini-2.0-flash-exp";
                       doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
                       doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Puck";
-
-                      JsonObject sysInst = doc["setup"]["systemInstruction"].to<JsonObject>();
-                      JsonArray parts = sysInst["parts"].to<JsonArray>();
-                      JsonObject p = parts.add<JsonObject>();
-                      p["text"] = "Raspunde scurt in limba romana.";
-
+                      doc["setup"]["systemInstruction"] = "Raspunde intotdeauna exclusiv in limba romana, intr-un mod concis si natural.";
+                      
                       String out;
                       serializeJson(doc, out);
                       ws.sendTXT(out);
@@ -261,50 +326,31 @@ jobs:
                       Serial.printf("[WS] DISCONNECTED\n");
                       g_state = 1;
                       break;
-
                   case WStype_TEXT: {
-                      if (strstr((char*)payload, "setupComplete") != NULL) {
-                          Serial.println("[WS] >>> SETUP COMPLETE! Suntem LIVE! <<<");
-                          g_state = 3;
-                          break;
-                      }
-
-                      if (strstr((char*)payload, "\"inlineData\"") != NULL) {
-                          JsonDocument rxDoc;
-                          DeserializationError err = deserializeJson(rxDoc, payload, len);
-                          if (!err) {
-                              JsonArray parts = rxDoc["serverContent"]["modelTurn"]["parts"].as<JsonArray>();
-                              for (JsonObject pt : parts) {
-                                  const char* b64_data = pt["inlineData"]["data"];
-                                  if (b64_data) {
-                                      size_t b64_len = strlen(b64_data);
-                                      size_t olen = 0;
-                                      if (mbedtls_base64_decode(buf_rx_raw, sizeof(buf_rx_raw), &olen, (const unsigned char*)b64_data, b64_len) == 0 && olen > 0) {
-                                          int mono_count = olen / 2;
-                                          int16_t *src = (int16_t*)buf_rx_raw;
-                                          for (int off = 0; off < mono_count; off += 128) {
-                                              int n = mono_count - off;
-                                              if (n > 128) n = 128;
-                                              for (int i = 0; i < n; i++) {
-                                                  buf_out_stereo[i * 2]     = src[off + i];
-                                                  buf_out_stereo[i * 2 + 1] = src[off + i];
-                                              }
-                                              esp_codec_dev_write(playback, buf_out_stereo, n * 4);
-                                          }
-                                          g_rx_kb += olen / 1024;
-                                      }
-                                  }
-                              }
+                      Serial.printf("[WS] TEXT: %.*s\n", (int)(len > 200 ? 200 : len), payload);
+                      parse_server_audio((const char*)payload, len);
+                      break;
+                  }
+                  case WStype_BIN: {
+                      // Dacă serverul trimite binar direct (rar), îl redăm
+                      int mono_count = len / 2;
+                      for (int off = 0; off < mono_count; off += 128) {
+                          int n = mono_count - off;
+                          if (n > 128) n = 128;
+                          int16_t *src = (int16_t*)payload + off;
+                          for (int i = 0; i < n; i++) {
+                              buf_out_stereo[i*2]   = src[i];
+                              buf_out_stereo[i*2+1] = src[i];
                           }
+                          esp_codec_dev_write(playback, buf_out_stereo, n * 4);
                       }
+                      g_rx_kb += len / 1024;
                       break;
                   }
                   case WStype_ERROR:
                       Serial.printf("[WS] ERROR: %.*s\n", (int)len, payload);
                       break;
-
-                  default:
-                      break;
+                  default: break;
               }
           }
 
@@ -380,9 +426,9 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v30-gemini-live-native-audio-sync");
+              Serial.println("\n[BOOT] v31-gemini-live-2.0-parse-audio");
 
-              I2C_INIT_CALL;
+              I2C_INIT_CALL
               delay(50);
 
               lvgl_port_init();
@@ -414,6 +460,7 @@ jobs:
               }
               Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
 
+              // Endpoint v1beta (sau v1alpha, ambele funcționează cu 2.0)
               String path = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + String(GEMINI_API_KEY);
               ws.beginSSL("generativelanguage.googleapis.com", 443, path.c_str());
               ws.onEvent(wsEvent);
@@ -447,12 +494,8 @@ jobs:
                       String b64_str = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
                       if (b64_str.length() > 0) {
                           JsonDocument doc;
-                          JsonObject realtimeInput = doc["realtimeInput"].to<JsonObject>();
-                          JsonArray mediaChunks = realtimeInput["mediaChunks"].to<JsonArray>();
-                          JsonObject chunk = mediaChunks.add<JsonObject>();
-                          chunk["mimeType"] = "audio/pcm;rate=16000";
-                          chunk["data"] = b64_str;
-
+                          doc["realtimeInput"]["mediaChunks"][0]["mimeType"] = "audio/pcm;rate=16000";
+                          doc["realtimeInput"]["mediaChunks"][0]["data"] = b64_str;
                           String out;
                           serializeJson(doc, out);
                           ws.sendTXT(out);
@@ -461,13 +504,16 @@ jobs:
                   }
               }
 
-              delay(2);
+              delay(5);
           }
-          EOF
+          ''')
 
-          I2C_FUNC=$(cat sketch/i2c_func.txt)
-          sed -i "s/I2C_INIT_CALL;/${I2C_FUNC}();/" sketch/sketch.ino
-          echo "[OK] sketch.ino configurat cu $I2C_FUNC"
+          code = code.replace("I2C_INIT_CALL", f"{i2c_init}();")
+
+          with open("sketch/sketch.ino", "w", encoding="utf-8") as f:
+              f.write(code.lstrip())
+          print("[OK] sketch.ino written")
+          PYEOF
 
       - name: Compile
         run: |
@@ -483,14 +529,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v30-live-0x0.bin \
+            -o package_bin/gemini-v31-live-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v30-live-0x0.bin
+          ls -lh package_bin/gemini-v31-live-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v30-live
-          path: package_bin/gemini-v30-live-0x0.bin
+          name: gemini-v31-live
+          path: package_bin/gemini-v31-live-0x0.bin
           if-no-files-found: error
