@@ -5,33 +5,52 @@ on:
 
 jobs:
   diag:
+    name: Diagnostic
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout Waveshare V2
         uses: actions/checkout@v4
         with:
           repository: waveshareteam/ESP32-S3-Touch-LCD-3.49-V2
           submodules: recursive
 
-      - name: Show structure
+      - name: Show root
         run: |
           echo "=== ROOT ==="
           ls -la
-          echo ""
+
+      - name: Show Arduino folder
+        run: |
           echo "=== Arduino/ ==="
-          ls -la Arduino/ 2>/dev/null || echo "(no Arduino dir)"
-          echo ""
+          ls -la Arduino/ 2>/dev/null || echo "(nu exista Arduino/)"
+
+      - name: Show Arduino/examples
+        run: |
           echo "=== Arduino/examples/ ==="
-          ls -la Arduino/examples/ 2>/dev/null || echo "(no examples)"
-          echo ""
-          echo "=== Search for .ino files ==="
-          find . -name "*.ino" 2>/dev/null | head -50
-          echo ""
-          echo "=== Search for audio-related files ==="
+          ls -la Arduino/examples/ 2>/dev/null || echo "(nu exista)"
+
+      - name: Show all .ino files
+        run: |
+          echo "=== Toate fisierele .ino ==="
+          find . -name "*.ino" -not -path "*/node_modules/*" 2>/dev/null | head -100
+
+      - name: Show audio-related files
+        run: |
+          echo "=== Fisiere cu 'audio' in nume ==="
           find . -iname "*audio*" 2>/dev/null | head -30
           echo ""
-          echo "=== Search for esp_codec_dev ==="
+          echo "=== Fisiere cu 'codec' in nume ==="
           find . -iname "*codec*" 2>/dev/null | head -30
           echo ""
-          echo "=== Search for es8311/es7210 ==="
-          find . -iname "*8311*" -o -iname "*7210*" 2>/dev/null | head -30
+          echo "=== ES8311 / ES7210 ==="
+          find . \( -iname "*8311*" -o -iname "*7210*" \) 2>/dev/null | head -30
+
+      - name: Show examples with sketches
+        run: |
+          echo "=== Foldere care contin .ino (exemple) ==="
+          find . -name "*.ino" -not -path "*/node_modules/*" 2>/dev/null | while read f; do
+            echo "--- $f ---"
+            head -5 "$f"
+            echo ""
+          done | head -200
