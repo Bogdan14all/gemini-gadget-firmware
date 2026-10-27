@@ -1,11 +1,11 @@
-name: Build Gemini OS - v5.2 Audio Fix (MCLK GPIO16)
+name: Build Gemini OS - v5.3 Audio Fix & Stability
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v5.2
+    name: Build v5.3
     runs-on: ubuntu-latest
 
     steps:
@@ -69,7 +69,7 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Patch Drivers & Generate v5.2 Sketch
+      - name: Patch Drivers & Generate v5.3 Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -178,8 +178,7 @@ jobs:
           #define BOOT_BTN  0
           #define PWR_BTN   16
 
-          // !!! FIX: MCLK pe GPIO16 (conform rapoartelor pentru placi similare)
-          #define I2S_MCLK  16
+          #define I2S_MCLK  7   // Pin conform schemei xiaozhi
           #define I2S_WS    46
           #define I2S_BCLK  15
           #define I2S_DIN   6
@@ -196,6 +195,7 @@ jobs:
           i2c_master_dev_handle_t dev_8311 = NULL;
           i2c_master_dev_handle_t dev_9554 = NULL;
 
+          // ---------- UI HANDLES ----------
           lv_obj_t *lbl_clock    = NULL;
           lv_obj_t *lbl_date     = NULL;
           lv_obj_t *lbl_touch_xy = NULL;
@@ -211,6 +211,7 @@ jobs:
           lv_obj_t *lbl_mic_rx     = NULL;
           lv_obj_t *bar_mic_level  = NULL;
 
+          // ---------- STATE ----------
           volatile bool g_boot_pressed = false;
           volatile bool g_pwr_pressed  = false;
           volatile int  g_tick         = 0;
@@ -219,7 +220,6 @@ jobs:
           volatile bool g_mic_active   = false;
           volatile int  g_mic_ok       = 0;
           volatile int  g_mic_total    = 0;
-          volatile int  g_mic_read_fail= 0;
 
           char g_clock_str[16] = "--:--:--";
           char g_date_str[32]  = "-- --- ----";
@@ -229,6 +229,12 @@ jobs:
           bool last_boot_state = HIGH;
           bool last_pwr_state  = HIGH;
 
+          // Debounce
+          unsigned long last_boot_change = 0;
+          unsigned long last_pwr_change  = 0;
+          const unsigned long DEBOUNCE_MS = 50;
+
+          // ---------- I2C helpers ----------
           i2c_master_dev_handle_t get_dev(uint8_t addr) {
               i2c_master_dev_handle_t *slot = NULL;
               if (addr == 0x40) slot = &dev_7210;
@@ -269,6 +275,7 @@ jobs:
                   i2c_read_reg(0x40,0x42));
           }
 
+          // ---------- I2S TDM init ----------
           bool i2s_init_tdm() {
               i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
               if (i2s_new_channel(&chan_cfg, NULL, &rx_handle) != ESP_OK) {
@@ -290,7 +297,10 @@ jobs:
                       .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false }
                   }
               };
+              // FORȚĂM POLARITATEA WS LA TRUE (posibilă soluție pentru date zero)
+              tdm_cfg.slot_cfg.ws_pol = true;
               tdm_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+
               if (i2s_channel_init_tdm_mode(rx_handle, &tdm_cfg) != ESP_OK) {
                   Serial.println("[I2S] init_tdm FAIL");
                   return false;
@@ -299,10 +309,11 @@ jobs:
                   Serial.println("[I2S] enable FAIL");
                   return false;
               }
-              Serial.println("[I2S] TDM OK (MCLK=GPIO16)");
+              Serial.println("[I2S] TDM OK (ws_pol=true)");
               return true;
           }
 
+          // ---------- ES7210 init ----------
           void es7210_init_regs() {
               Serial.println("[ES7210] Writing...");
               i2c_write_reg(0x40, 0x00, 0xFF); delay(20);
@@ -323,6 +334,7 @@ jobs:
               Serial.println("[ES7210] Written");
           }
 
+          // ---------- TOUCH ----------
           static void touch_event_cb(lv_event_t *e) {
               lv_event_code_t code = lv_event_get_code(e);
               lv_indev_t *indev = lv_indev_get_act();
@@ -344,6 +356,7 @@ jobs:
               }
           }
 
+          // ---------- ASYNC UI UPDATE ----------
           static void ui_update_cb(void *arg) {
               bool b = g_boot_pressed;
               bool p = g_pwr_pressed;
@@ -400,7 +413,7 @@ jobs:
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Gemini OS v5.2");
+              lv_label_set_text(title, "Gemini OS v5.3");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
               lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
@@ -511,9 +524,10 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] BUILD v5.2-audio-mclk16");
-              Serial.println("=== Gemini OS v5.2 ===");
+              Serial.println("\n[BOOT] BUILD v5.3-stability-fix");
+              Serial.println("=== Gemini OS v5.3 ===");
 
+              // Pull-up intern pentru butoane pentru a preveni pinii flotanți
               pinMode(BOOT_BTN, INPUT_PULLUP);
               pinMode(PWR_BTN, INPUT_PULLUP);
 
@@ -528,8 +542,8 @@ jobs:
                   return;
               }
 
-              // Reset ES7210 cu delay-uri mai lungi
-              i2c_write_reg(0x20, 0x03, 0x00); delay(50);
+              // Secvență de resetare lungă pentru boot rece
+              i2c_write_reg(0x20, 0x03, 0x00); delay(100);
               i2c_write_reg(0x20, 0x01, 0x00); delay(500);
               i2c_write_reg(0x20, 0x01, 0xFF); delay(500);
 
@@ -540,11 +554,9 @@ jobs:
               }
               delay(500); // Lăsăm MCLK să se stabilizeze
 
-              // ES7210 init
               es7210_init_regs();
               delay(200);
 
-              // Verify I2C readback
               diag_readback();
 
               Serial.println("[MIC] AUTO-STARTED - speak now!");
@@ -555,20 +567,34 @@ jobs:
           }
 
           void loop() {
-              // ---------- BUTOANE ----------
+              // ---------- BUTOANE cu debounce ----------
               bool b_raw = digitalRead(BOOT_BTN);
               bool p_raw = digitalRead(PWR_BTN);
+
               if (b_raw != last_boot_state) {
-                  last_boot_state = b_raw;
-                  g_boot_pressed = (b_raw == LOW);
-                  Serial.printf("[BTN] BOOT: %s\n", g_boot_pressed ? "APASAT" : "ELIBERAT");
-                  lv_async_call(ui_update_cb, NULL);
+                  unsigned long now = millis();
+                  if (now - last_boot_change > DEBOUNCE_MS) {
+                      last_boot_change = now;
+                      last_boot_state = b_raw;
+                      g_boot_pressed = (b_raw == LOW);
+                      Serial.printf("[BTN] BOOT: %s\n", g_boot_pressed ? "APASAT" : "ELIBERAT");
+                      lv_async_call(ui_update_cb, NULL);
+                  }
+              } else {
+                  last_boot_change = millis(); // Reset timer dacă starea e stabilă
               }
+
               if (p_raw != last_pwr_state) {
-                  last_pwr_state = p_raw;
-                  g_pwr_pressed = (p_raw == LOW);
-                  Serial.printf("[BTN] PWR: %s\n", g_pwr_pressed ? "APASAT" : "ELIBERAT");
-                  lv_async_call(ui_update_cb, NULL);
+                  unsigned long now = millis();
+                  if (now - last_pwr_change > DEBOUNCE_MS) {
+                      last_pwr_change = now;
+                      last_pwr_state = p_raw;
+                      g_pwr_pressed = (p_raw == LOW);
+                      Serial.printf("[BTN] PWR: %s\n", g_pwr_pressed ? "APASAT" : "ELIBERAT");
+                      lv_async_call(ui_update_cb, NULL);
+                  }
+              } else {
+                  last_pwr_change = millis();
               }
 
               // ---------- MIC READ (every 200ms) ----------
@@ -608,9 +634,7 @@ jobs:
                           Serial.printf(" | ok=%d/%d\n", g_mic_ok, g_mic_total);
                       }
                   } else {
-                      g_mic_read_fail++;
-                      Serial.printf("[MIC] READ FAIL err=%d total=%d fail=%d\n",
-                                    (int)err, g_mic_total, g_mic_read_fail);
+                      Serial.printf("[MIC] READ FAIL err=%d total=%d\n", (int)err, g_mic_total);
                   }
                   lv_async_call(ui_update_cb, NULL);
               }
@@ -664,7 +688,7 @@ jobs:
                   lv_async_call(ui_update_cb, NULL);
               }
 
-              delay(20);
+              delay(50); // Mărit pentru a preveni watchdog-ul
           }
           ''').lstrip()
 
@@ -672,7 +696,7 @@ jobs:
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] v5.2 audio fix (MCLK GPIO16) .ino generat")
+          print("[OK] v5.3 stability fix .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -689,14 +713,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v5.2-audio-mclk16-0x0.bin \
+            -o package_bin/gemini-v5.3-stability-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v5.2-audio-mclk16-0x0.bin
+          ls -lh package_bin/gemini-v5.3-stability-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v5.2-audio-mclk16
-          path: package_bin/gemini-v5.2-audio-mclk16-0x0.bin
+          name: gemini-v5.3-stability
+          path: package_bin/gemini-v5.3-stability-0x0.bin
           if-no-files-found: error
