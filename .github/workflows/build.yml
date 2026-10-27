@@ -1,4 +1,4 @@
-name: Build Gemini OS - v10 Official Audio (Correct Repo)
+name: Build Gemini OS - v10 Official Audio (patched)
 
 on:
   workflow_dispatch:
@@ -72,10 +72,29 @@ jobs:
         shell: bash
         run: |
           rm -rf sketch
-          # Example path in correct repo: Examples/Arduino/08_Audio_Test
           cp -r Examples/Arduino/08_Audio_Test sketch
           echo "[OK] Copied official example"
           ls -la sketch | head -20
+
+      - name: Patch LVGL demo references and API incompatibilities
+        shell: bash
+        run: |
+          cd sketch
+          echo "=== Patching .c/.h/.ino files ==="
+          find . -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
+            -exec sed -i 's|#include "demos/lv_demos.h"|// #include "demos/lv_demos.h"|g' {} + 2>/dev/null || true
+          find . -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
+            -exec sed -i 's|#include <demos/lv_demos.h>|// #include <demos/lv_demos.h>|g' {} + 2>/dev/null || true
+          find . -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
+            -exec sed -i 's|lv_demo_widgets();|// lv_demo_widgets();|g' {} + 2>/dev/null || true
+          find . -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
+            -exec sed -i 's|LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)|2|g' {} + 2>/dev/null || true
+          find . -type f \( -name "*.h" -o -name "*.c" -o -name "*.cpp" -o -name "*.ino" \) \
+            -exec sed -i 's|lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)|2|g' {} + 2>/dev/null || true
+          echo "=== Patch done ==="
+
+          # Asiguram ca lv_conf.h este prezent in sketch
+          cp ~/Arduino/libraries/lv_conf.h ./lv_conf.h
 
       - name: Replace .ino with minimal UI + official audio calls
         shell: bash
