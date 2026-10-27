@@ -1,11 +1,11 @@
-name: Build Gemini OS - v27 Gemini Live (Back to Working Model)
+name: Build Gemini OS - v28 Gemini Live (Native Audio + CamelCase)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v27 Gemini Live
+    name: Build v28 Gemini Live
     runs-on: ubuntu-latest
 
     steps:
@@ -247,17 +247,16 @@ jobs:
                       delay(100); // Stabilizare socket
 
                       JsonDocument doc;
-                      // Modelul care ne-a dat LIVE! (verde)
-                      doc["setup"]["model"] = "models/gemini-2.0-flash-live-001";
+                      // Model valid + camelCase conform documentației
+                      doc["setup"]["model"] = "models/gemini-2.5-flash-native-audio-preview-12-2025";
                       doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
                       doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Puck";
-                      // System Instruction
-                      doc["setup"]["systemInstruction"]["parts"][0]["text"] = "Raspunde intotdeauna exclusiv in limba romana, intr-un mod concis si natural.";
+                      doc["setup"]["systemInstruction"] = "Raspunde intotdeauna exclusiv in limba romana, intr-un mod concis si natural.";
                       
                       String out;
                       serializeJson(doc, out);
                       ws.sendTXT(out);
-                      Serial.printf("[WS] Setup sent.\n");
+                      Serial.printf("[WS] Setup sent: %s\n", out.c_str());
                       break;
                   }
                   case WStype_DISCONNECTED:
@@ -364,7 +363,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v27-gemini-live-back-to-working");
+              Serial.println("\n[BOOT] v28-gemini-live-native-audio-camelcase");
 
               I2C_INIT_CALL
               delay(50);
@@ -431,7 +430,6 @@ jobs:
                       String b64_str = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
                       if (b64_str.length() > 0) {
                           JsonDocument doc;
-                          // Formatul corect de array (mediaChunks)
                           doc["realtimeInput"]["mediaChunks"][0]["mimeType"] = "audio/pcm;rate=16000";
                           doc["realtimeInput"]["mediaChunks"][0]["data"] = b64_str;
                           String out;
@@ -467,14 +465,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v27-live-0x0.bin \
-            --flash_mode keep --flash_size 16MB --flash_freq 80fm \
+            -o package_bin/gemini-v28-live-0x0.bin \
+            --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v27-live-0x0.bin
+          ls -lh package_bin/gemini-v28-live-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v27-live
-          path: package_bin/gemini-v27-live-0x0.bin
+          name: gemini-v28-live
+          path: package_bin/gemini-v28-live-0x0.bin
           if-no-files-found: error
