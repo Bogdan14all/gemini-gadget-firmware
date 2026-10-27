@@ -1,4 +1,4 @@
-name: Build Gemini OS - Mic TDM (Xiaozhi-Style)
+name: Build Gemini OS - Mic TDM (Full Init)
 
 on:
   workflow_dispatch:
@@ -63,7 +63,7 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Generate Mic TDM Sketch
+      - name: Generate Mic Test Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -215,28 +215,32 @@ jobs:
           }
 
           void codec_init() {
-              // Reset ES7210 prin TCA9554
+              // Secvență de reset robustă prin TCA9554
               if (i2c_bus) {
-                  i2c_write_reg(0x20, 0x03, 0x00); delay(10);
-                  i2c_write_reg(0x20, 0x01, 0x00); delay(100);
-                  i2c_write_reg(0x20, 0x01, 0xFF); delay(200);
+                  i2c_write_reg(0x20, 0x03, 0x00); delay(20); // Setează toți pinii ca output
+                  i2c_write_reg(0x20, 0x01, 0x00); delay(150); // Trage pinul 5 (reset) LOW
+                  i2c_write_reg(0x20, 0x01, 0xFF); delay(300); // Eliberează reset-ul (HIGH)
               }
 
               // ES8311 (DAC) - pentru MCLK
               i2c_write_reg(0x18, 0x00, 0x1F); delay(20);
               i2c_write_reg(0x18, 0x00, 0x00);
 
-              // ES7210 (ADC) - Configurare TDM completa
+              // ES7210 (ADC) - Configurare TDM
               i2c_write_reg(0x40, 0x00, 0xFF); delay(20);
               i2c_write_reg(0x40, 0x00, 0x41);
               i2c_write_reg(0x40, 0x01, 0x1F);
               i2c_write_reg(0x40, 0x02, 0x00);
               
-              // Sloturi TDM si format
+              // Sloturi TDM și format
               i2c_write_reg(0x40, 0x09, 0x30);
               i2c_write_reg(0x40, 0x0A, 0x30);
               i2c_write_reg(0x40, 0x11, 0x60);
-              i2c_write_reg(0x40, 0x12, 0x02); // TDM x1 LRCK mode - CRUCIAL
+              i2c_write_reg(0x40, 0x12, 0x02); // Activează TDM - CRUCIAL
+              
+              // Activare MICBIAS (alimentare microfoane)
+              i2c_write_reg(0x40, 0x41, 0x70); // MICBIAS12
+              i2c_write_reg(0x40, 0x42, 0x70); // MICBIAS34
               
               // Gains
               i2c_write_reg(0x40, 0x13, 0xFF);
@@ -244,13 +248,13 @@ jobs:
               i2c_write_reg(0x40, 0x15, 0xFF);
               i2c_write_reg(0x40, 0x16, 0xFF);
               
-              Serial.println("[ES7210] TDM (4-slot) configured");
+              Serial.println("[ES7210] TDM + MICBIAS configured");
           }
 
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n=== Microfon TDM (Xiaozhi-Style) ===");
+              Serial.println("\n=== Microfon TDM (Full Init) ===");
 
               I2C_INIT_CALL
               delay(50);
@@ -277,7 +281,6 @@ jobs:
           }
 
           void loop() {
-              // Buffer pentru TDM: 4 sloturi * 2 bytes = 8 bytes per frame
               static int16_t mic_buf[1024];
               size_t bytes_read = 0;
               esp_err_t err = i2s_channel_read(rx_handle, mic_buf, sizeof(mic_buf), &bytes_read, 1000);
@@ -285,20 +288,16 @@ jobs:
               if (err == ESP_OK && bytes_read > 0) {
                   int samples = bytes_read / sizeof(int16_t);
                   int32_t peak = 0;
-                  // Parsam buffer-ul TDM: slot0=mic1, slot1=ref, slot2=mic2, slot3=unused
                   for (int i = 0; i < samples; i += 4) {
                       int16_t mic1 = mic_buf[i];
-                      int16_t ref  = mic_buf[i+1];
                       int16_t mic2 = mic_buf[i+2];
-                      
                       int32_t v1 = (mic1 < 0) ? -mic1 : mic1;
                       int32_t v2 = (mic2 < 0) ? -mic2 : mic2;
                       if (v1 > peak) peak = v1;
                       if (v2 > peak) peak = v2;
                   }
-                  
-                  Serial.printf("Peak: %5d | Mic1: %6d | Ref: %6d | Mic2: %6d\n", 
-                                peak, mic_buf[0], mic_buf[1], mic_buf[2]);
+                  Serial.printf("Peak: %5d | Mic1: %6d | Mic2: %6d\n", 
+                                peak, mic_buf[0], mic_buf[2]);
               }
               delay(100);
           }
@@ -308,7 +307,7 @@ jobs:
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] Mic TDM (Xiaozhi-Style) .ino generat")
+          print("[OK] Mic TDM (Full Init) .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -325,14 +324,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/mic-tdm-xiaozhi-0x0.bin \
+            -o package_bin/mic-tdm-full-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/mic-tdm-xiaozhi-0x0.bin
+          ls -lh package_bin/mic-tdm-full-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mic-tdm-xiaozhi-firmware
-          path: package_bin/mic-tdm-xiaozhi-0x0.bin
+          name: mic-tdm-full-firmware
+          path: package_bin/mic-tdm-full-0x0.bin
           if-no-files-found: error
