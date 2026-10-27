@@ -1,11 +1,11 @@
-name: Build Gemini OS - v18 Gemini Live (Final Specs)
+name: Build Gemini OS - v19 Gemini Live (Correct Setup)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v18 Gemini Live
+    name: Build v19 Gemini Live
     runs-on: ubuntu-latest
 
     steps:
@@ -193,7 +193,6 @@ jobs:
           volatile int g_rx_kb = 0;
           volatile int g_tx_kb = 0;
           volatile int g_peak  = 0;
-          volatile int g_setup_ok = 0;
 
           lv_obj_t *lbl_state = NULL;
           lv_obj_t *lbl_rx    = NULL;
@@ -249,6 +248,7 @@ jobs:
                       doc["setup"]["model"] = "models/gemini-2.0-flash-exp";
                       doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
                       doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Kore";
+                      // STRUCTURA CORECTA PENTRU systemInstruction
                       doc["setup"]["systemInstruction"]["parts"][0]["text"] = "Raspunde intotdeauna exclusiv in limba romana, intr-un mod concis si natural.";
                       String out;
                       serializeJson(doc, out);
@@ -264,7 +264,6 @@ jobs:
                       if (strstr((char*)payload, "setupComplete") != NULL) {
                           Serial.println("[WS] >>> SETUP COMPLETE! Suntem LIVE! <<<");
                           g_state = 3;
-                          g_setup_ok = 1;
                       } else {
                           Serial.printf("[WS] TEXT: %.*s\n", (int)(len > 100 ? 100 : len), payload);
                       }
@@ -361,7 +360,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v18-gemini-live-official-specs");
+              Serial.println("\n[BOOT] v19-gemini-live-correct-setup");
 
               I2C_INIT_CALL
               delay(50);
@@ -428,7 +427,6 @@ jobs:
                       String b64_str = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
                       if (b64_str.length() > 0) {
                           JsonDocument doc;
-                          // FIX: Folosim array-ul mediaChunks conform specificatiilor
                           doc["realtimeInput"]["mediaChunks"][0]["mimeType"] = "audio/pcm;rate=16000";
                           doc["realtimeInput"]["mediaChunks"][0]["data"] = b64_str;
                           String out;
@@ -464,14 +462,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v18-live-0x0.bin \
+            -o package_bin/gemini-v19-live-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v18-live-0x0.bin
+          ls -lh package_bin/gemini-v19-live-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v18-live
-          path: package_bin/gemini-v18-live-0x0.bin
+          name: gemini-v19-live
+          path: package_bin/gemini-v19-live-0x0.bin
           if-no-files-found: error
