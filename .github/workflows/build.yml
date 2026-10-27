@@ -1,11 +1,11 @@
-name: Build Gemini OS - Mic TDM (Full Init)
+name: Build Gemini OS - Baseline Integration
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Mic TDM Final
+    name: Build Baseline (Display + Touch + Buttons + WiFi)
     runs-on: ubuntu-latest
 
     steps:
@@ -49,6 +49,7 @@ jobs:
           #define LV_COLOR_DEPTH 16
           #define LV_USE_STDLIB_MALLOC LV_STDLIB_BUILTIN
           #define LV_MEM_SIZE_KILOBYTES 128
+          #define LV_FONT_MONTSERRAT_12 1
           #define LV_FONT_MONTSERRAT_14 1
           #define LV_FONT_MONTSERRAT_16 1
           #define LV_FONT_MONTSERRAT_18 1
@@ -56,6 +57,10 @@ jobs:
           #define LV_FONT_DEFAULT &lv_font_montserrat_20
           #define LV_USE_LABEL 1
           #define LV_USE_BAR 1
+          #define LV_USE_DEMO_WIDGETS 0
+          #define LV_USE_DEMO_MUSIC 0
+          #define LV_USE_DEMO_BENCHMARK 0
+          #define LV_USE_DEMO_STRESS 0
           #endif
           EOF
           sed -i 's/^[ \t]*//' ~/Arduino/libraries/lv_conf.h
@@ -63,7 +68,7 @@ jobs:
           cp ~/Arduino/libraries/lv_conf.h Arduino/examples/10_LVGL_V9_Test/lv_conf.h 2>/dev/null || true
           rm -rf ~/Arduino/libraries/lvgl/src/demos ~/Arduino/libraries/lvgl/demos 2>/dev/null || true
 
-      - name: Generate Mic Test Sketch
+      - name: Patch Drivers & Generate Baseline Sketch
         shell: bash
         run: |
           SKETCH_DIR="Arduino/examples/10_LVGL_V9_Test"
@@ -80,6 +85,7 @@ jobs:
 
           sketch_dir = "Arduino/examples/10_LVGL_V9_Test"
 
+          # Patch lvgl_port.c
           port_path = f"{sketch_dir}/lvgl_port.c"
           with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
               code = f.read()
@@ -87,6 +93,7 @@ jobs:
           code = code.replace("LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565)", "2")
           code = code.replace("lv_color_format_get_size(LV_COLOR_FORMAT_RGB565)", "2")
           code = code.replace("lv_demo_widgets();", "// lv_demo_widgets();")
+
           code = re.sub(
               r'ESP_ERROR_CHECK\s*\(\s*i2c_master_get_bus_handle\s*\(\s*0\s*,\s*&tca9554_i2c_bus\s*\)\s*\)\s*;',
               'if (i2c_master_get_bus_handle(0, &tca9554_i2c_bus) != ESP_OK) { puts("[EXIO] bus 0 not ready"); tca9554_i2c_bus = NULL; } else { puts("[EXIO] bus 0 acquired!"); }',
@@ -97,10 +104,11 @@ jobs:
               code)
           code = re.sub(r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_set_dir\s*\(\s*io_expander\s*,([^)]+)\)\s*\)\s*;', r'if (io_expander != NULL) { esp_io_expander_set_dir(io_expander, \g<1>); }', code)
           code = re.sub(r'ESP_ERROR_CHECK\s*\(\s*esp_io_expander_set_level\s*\(\s*io_expander\s*,([^)]+)\)\s*\)\s*;', r'if (io_expander != NULL) { esp_io_expander_set_level(io_expander, \g<1>); }', code)
-          
+
           with open(port_path, "w", encoding="utf-8") as f:
               f.write(code)
 
+          # Inject lock/unlock
           h_path = f"{sketch_dir}/lvgl_port.h"
           with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
               h_content = f.read()
@@ -142,6 +150,7 @@ jobs:
               with open(port_path, "w", encoding="utf-8") as f:
                   f.write(c_content)
 
+          # Detect I2C init function
           i2c_init_func = "bsp_i2c_init"
           for h_path in glob.glob(f"{sketch_dir}/*.h"):
               with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -153,153 +162,236 @@ jobs:
                       i2c_init_func = f_name
                       break
 
+          # Generate baseline .ino
           ino = textwrap.dedent(r'''
           #include <Arduino.h>
-          #include <driver/i2s_tdm.h>
-          #include <driver/i2c_master.h>
+          #include <WiFi.h>
 
           extern "C" {
           #include "i2c_bsp.h"
           #include "lvgl_port.h"
           }
+          #include <lvgl.h>
 
-          #define I2S_MCLK  7
-          #define I2S_WS    46
-          #define I2S_BCLK  15
-          #define I2S_DIN   6
-          #define I2S_DOUT  45
+          // ---------- PINI ----------
+          #define LCD_BL    42
+          #define BOOT_BTN  0
+          #define PWR_BTN   16
 
-          #define SAMPLE_RATE 24000
+          // ---------- WiFi ----------
+          const char* ssid     = "TP-Link_2.4G_9318_Guest";
+          const char* password = "revelion";
 
-          i2s_chan_handle_t rx_handle = NULL;
-          i2c_master_bus_handle_t i2c_bus = NULL;
+          // ---------- UI HANDLES ----------
+          lv_obj_t *lbl_title       = NULL;
+          lv_obj_t *lbl_touch_xy    = NULL;
+          lv_obj_t *lbl_touch_state = NULL;
+          lv_obj_t *lbl_boot        = NULL;
+          lv_obj_t *lbl_pwr         = NULL;
+          lv_obj_t *lbl_wifi        = NULL;
+          lv_obj_t *lbl_heartbeat   = NULL;
+          lv_obj_t *touch_dot       = NULL;
 
-          bool i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val) {
-              if (!i2c_bus) return false;
-              i2c_master_dev_handle_t dev = NULL;
-              i2c_device_config_t cfg = {};
-              cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
-              cfg.device_address = addr;
-              cfg.scl_speed_hz = 100000;
-              if (i2c_master_bus_add_device(i2c_bus, &cfg, &dev) != ESP_OK) return false;
-              uint8_t buf[2] = { reg, val };
-              esp_err_t ret = i2c_master_transmit(dev, buf, 2, 100);
-              i2c_master_bus_rm_device(dev);
-              return ret == ESP_OK;
-          }
+          // ---------- TOUCH EVENT ----------
+          static void touch_event_cb(lv_event_t *e) {
+              lv_event_code_t code = lv_event_get_code(e);
+              lv_indev_t *indev = lv_indev_get_act();
+              if (!indev || !lbl_touch_xy || !lbl_touch_state) return;
 
-          bool i2s_init_tdm() {
-              i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-              if (i2s_new_channel(&chan_cfg, NULL, &rx_handle) != ESP_OK) return false;
+              lv_point_t p;
+              lv_indev_get_point(indev, &p);
 
-              i2s_tdm_config_t tdm_cfg = {
-                  .clk_cfg = I2S_TDM_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
-                  .slot_cfg = I2S_TDM_PHILIPS_SLOT_DEFAULT_CONFIG(
-                      I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO,
-                      (i2s_tdm_slot_mask_t)(I2S_TDM_SLOT0 | I2S_TDM_SLOT1 | I2S_TDM_SLOT2 | I2S_TDM_SLOT3)
-                  ),
-                  .gpio_cfg = {
-                      .mclk = (gpio_num_t)I2S_MCLK,
-                      .bclk = (gpio_num_t)I2S_BCLK,
-                      .ws   = (gpio_num_t)I2S_WS,
-                      .dout = (gpio_num_t)I2S_DOUT,
-                      .din  = (gpio_num_t)I2S_DIN,
-                      .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false }
-                  }
-              };
-              tdm_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+              char buf[40];
+              lv_snprintf(buf, sizeof(buf), "X:%d  Y:%d", p.x, p.y);
+              lv_label_set_text(lbl_touch_xy, buf);
 
-              if (i2s_channel_init_tdm_mode(rx_handle, &tdm_cfg) != ESP_OK) return false;
-              if (i2s_channel_enable(rx_handle) != ESP_OK) return false;
-              return true;
-          }
-
-          void codec_init() {
-              // Secvență de reset robustă prin TCA9554
-              if (i2c_bus) {
-                  i2c_write_reg(0x20, 0x03, 0x00); delay(20); // Setează toți pinii ca output
-                  i2c_write_reg(0x20, 0x01, 0x00); delay(150); // Trage pinul 5 (reset) LOW
-                  i2c_write_reg(0x20, 0x01, 0xFF); delay(300); // Eliberează reset-ul (HIGH)
+              if (touch_dot) {
+                  lv_obj_set_pos(touch_dot, p.x - 15, p.y - 15);
               }
 
-              // ES8311 (DAC) - pentru MCLK
-              i2c_write_reg(0x18, 0x00, 0x1F); delay(20);
-              i2c_write_reg(0x18, 0x00, 0x00);
+              if (code == LV_EVENT_PRESSED) {
+                  lv_label_set_text(lbl_touch_state, "APASAT!");
+                  lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0xFF0000), 0);
+                  if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0xFF0000), 0);
+                  Serial.printf("[TOUCH] PRESSED x=%d y=%d\n", p.x, p.y);
+              } else if (code == LV_EVENT_RELEASED) {
+                  lv_label_set_text(lbl_touch_state, "Eliberat");
+                  lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);
+                  if (touch_dot) lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);
+                  Serial.println("[TOUCH] RELEASED");
+              } else if (code == LV_EVENT_PRESSING) {
+                  lv_label_set_text(lbl_touch_state, "Apasat...");
+              }
+          }
 
-              // ES7210 (ADC) - Configurare TDM
-              i2c_write_reg(0x40, 0x00, 0xFF); delay(20);
-              i2c_write_reg(0x40, 0x00, 0x41);
-              i2c_write_reg(0x40, 0x01, 0x1F);
-              i2c_write_reg(0x40, 0x02, 0x00);
-              
-              // Sloturi TDM și format
-              i2c_write_reg(0x40, 0x09, 0x30);
-              i2c_write_reg(0x40, 0x0A, 0x30);
-              i2c_write_reg(0x40, 0x11, 0x60);
-              i2c_write_reg(0x40, 0x12, 0x02); // Activează TDM - CRUCIAL
-              
-              // Activare MICBIAS (alimentare microfoane)
-              i2c_write_reg(0x40, 0x41, 0x70); // MICBIAS12
-              i2c_write_reg(0x40, 0x42, 0x70); // MICBIAS34
-              
-              // Gains
-              i2c_write_reg(0x40, 0x13, 0xFF);
-              i2c_write_reg(0x40, 0x14, 0xFF);
-              i2c_write_reg(0x40, 0x15, 0xFF);
-              i2c_write_reg(0x40, 0x16, 0xFF);
-              
-              Serial.println("[ES7210] TDM + MICBIAS configured");
+          // ---------- UI ----------
+          void build_ui() {
+              pinMode(LCD_BL, OUTPUT);
+              digitalWrite(LCD_BL, LOW);
+
+              lvgl_port_lock(1000);
+              lv_obj_t *scr = lv_screen_active();
+              if (!scr) scr = lv_scr_act();
+              if (!scr) { lvgl_port_unlock(); return; }
+
+              lv_obj_clean(scr);
+              lv_obj_set_style_bg_color(scr, lv_color_hex(0x0F172A), 0);
+              lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+              // Titlu
+              lbl_title = lv_label_create(scr);
+              lv_label_set_text(lbl_title, "Gemini OS");
+              lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x38BDF8), 0);
+              lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_20, 0);
+              lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, 20);
+
+              // Subtitlu
+              lv_obj_t *sub = lv_label_create(scr);
+              lv_label_set_text(sub, "by Bogdan - Baseline");
+              lv_obj_set_style_text_color(sub, lv_color_hex(0x94A3B8), 0);
+              lv_obj_set_style_text_font(sub, &lv_font_montserrat_12, 0);
+              lv_obj_align(sub, LV_ALIGN_TOP_MID, 0, 50);
+
+              // Touch XY
+              lbl_touch_xy = lv_label_create(scr);
+              lv_label_set_text(lbl_touch_xy, "X:--  Y:--");
+              lv_obj_set_style_text_color(lbl_touch_xy, lv_color_hex(0xFFFFFF), 0);
+              lv_obj_set_style_text_font(lbl_touch_xy, &lv_font_montserrat_18, 0);
+              lv_obj_align(lbl_touch_xy, LV_ALIGN_CENTER, 0, -80);
+
+              // Touch state
+              lbl_touch_state = lv_label_create(scr);
+              lv_label_set_text(lbl_touch_state, "Eliberat");
+              lv_obj_set_style_text_color(lbl_touch_state, lv_color_hex(0x00AA00), 0);
+              lv_obj_set_style_text_font(lbl_touch_state, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_touch_state, LV_ALIGN_CENTER, 0, -55);
+
+              // BOOT
+              lbl_boot = lv_label_create(scr);
+              lv_label_set_text(lbl_boot, "BOOT: liber");
+              lv_obj_set_style_text_color(lbl_boot, lv_color_hex(0xFFFFFF), 0);
+              lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_boot, LV_ALIGN_CENTER, 0, -20);
+
+              // PWR
+              lbl_pwr = lv_label_create(scr);
+              lv_label_set_text(lbl_pwr, "PWR: liber");
+              lv_obj_set_style_text_color(lbl_pwr, lv_color_hex(0xFFFFFF), 0);
+              lv_obj_set_style_text_font(lbl_pwr, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_pwr, LV_ALIGN_CENTER, 0, 5);
+
+              // WiFi
+              lbl_wifi = lv_label_create(scr);
+              lv_label_set_text(lbl_wifi, "WiFi: conectare...");
+              lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0x0284C7), 0);
+              lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 45);
+
+              // Heartbeat counter
+              lbl_heartbeat = lv_label_create(scr);
+              lv_label_set_text(lbl_heartbeat, "HB: 0");
+              lv_obj_set_style_text_color(lbl_heartbeat, lv_color_hex(0x64748B), 0);
+              lv_obj_set_style_text_font(lbl_heartbeat, &lv_font_montserrat_12, 0);
+              lv_obj_align(lbl_heartbeat, LV_ALIGN_BOTTOM_MID, 0, -20);
+
+              // Touch dot
+              touch_dot = lv_obj_create(scr);
+              lv_obj_set_size(touch_dot, 30, 30);
+              lv_obj_set_style_radius(touch_dot, LV_RADIUS_CIRCLE, 0);
+              lv_obj_set_style_bg_color(touch_dot, lv_color_hex(0x00AA00), 0);
+              lv_obj_set_style_bg_opa(touch_dot, LV_OPA_80, 0);
+              lv_obj_set_style_border_width(touch_dot, 0, 0);
+              lv_obj_set_pos(touch_dot, 10, 10);
+
+              // Touch events
+              lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_PRESSED,  NULL);
+              lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_PRESSING, NULL);
+              lv_obj_add_event_cb(scr, touch_event_cb, LV_EVENT_RELEASED, NULL);
+
+              lvgl_port_unlock();
+              Serial.println("[UI] Built");
+          }
+
+          void update_ui(const char* wifi_txt, int hb) {
+              if (!lvgl_port_lock(100)) return;
+              if (lbl_boot)
+                  lv_label_set_text(lbl_boot, digitalRead(BOOT_BTN) == LOW ? "BOOT: APASAT" : "BOOT: liber");
+              if (lbl_pwr)
+                  lv_label_set_text(lbl_pwr, digitalRead(PWR_BTN) == LOW ? "PWR: APASAT" : "PWR: liber");
+              if (lbl_wifi && wifi_txt)
+                  lv_label_set_text(lbl_wifi, wifi_txt);
+              if (lbl_heartbeat) {
+                  char b[32];
+                  lv_snprintf(b, sizeof(b), "HB: %d", hb);
+                  lv_label_set_text(lbl_heartbeat, b);
+              }
+              lvgl_port_unlock();
           }
 
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n=== Microfon TDM (Full Init) ===");
+              Serial.println("\n=== Gemini OS Baseline ===");
+              Serial.println("[INIT] Display + Touch + Buttons + WiFi");
 
+              // Butoane
+              pinMode(BOOT_BTN, INPUT_PULLUP);
+              pinMode(PWR_BTN, INPUT_PULLUP);
+
+              // I2C + LVGL
               I2C_INIT_CALL
               delay(50);
-
               lvgl_port_init();
-              delay(100);
+              delay(300);
+              build_ui();
 
-              if (i2c_master_get_bus_handle(0, &i2c_bus) != ESP_OK) {
-                  Serial.println("I2C fail");
-                  return;
-              }
+              // Verifica indev
+              lv_indev_t *indev = lv_indev_get_next(NULL);
+              int count = 0;
+              while (indev) { count++; indev = lv_indev_get_next(indev); }
+              Serial.printf("[INDEV] %d input device(s)\n", count);
 
-              if (!i2s_init_tdm()) {
-                  Serial.println("I2S TDM init fail");
-                  return;
-              }
-              Serial.println("[I2S] TDM started");
-              delay(100);
+              // WiFi
+              Serial.println("[WiFi] Connecting...");
+              WiFi.mode(WIFI_STA);
+              WiFi.setSleep(false);
+              WiFi.begin(ssid, password);
 
-              codec_init();
-              delay(100);
-
-              Serial.println("Microfon OK. Vorbeste acum!");
+              Serial.println("[READY] Atinge ecranul si apasa BOOT/PWR!");
           }
 
           void loop() {
-              static int16_t mic_buf[1024];
-              size_t bytes_read = 0;
-              esp_err_t err = i2s_channel_read(rx_handle, mic_buf, sizeof(mic_buf), &bytes_read, 1000);
-              
-              if (err == ESP_OK && bytes_read > 0) {
-                  int samples = bytes_read / sizeof(int16_t);
-                  int32_t peak = 0;
-                  for (int i = 0; i < samples; i += 4) {
-                      int16_t mic1 = mic_buf[i];
-                      int16_t mic2 = mic_buf[i+2];
-                      int32_t v1 = (mic1 < 0) ? -mic1 : mic1;
-                      int32_t v2 = (mic2 < 0) ? -mic2 : mic2;
-                      if (v1 > peak) peak = v1;
-                      if (v2 > peak) peak = v2;
+              static unsigned long last_ui = 0;
+              static unsigned long last_beat = 0;
+              static int hb = 0;
+
+              // Update UI butoane + WiFi la fiecare 200ms
+              if (millis() - last_ui > 200) {
+                  last_ui = millis();
+                  char wbuf[64];
+                  if (WiFi.status() == WL_CONNECTED) {
+                      snprintf(wbuf, sizeof(wbuf), "WiFi: OK  %s", WiFi.localIP().toString().c_str());
+                  } else {
+                      snprintf(wbuf, sizeof(wbuf), "WiFi: connecting...");
                   }
-                  Serial.printf("Peak: %5d | Mic1: %6d | Mic2: %6d\n", 
-                                peak, mic_buf[0], mic_buf[2]);
+                  update_ui(wbuf, hb);
               }
-              delay(100);
+
+              // Heartbeat la fiecare 5s
+              if (millis() - last_beat > 5000) {
+                  last_beat = millis();
+                  hb++;
+                  if (WiFi.status() == WL_CONNECTED) {
+                      Serial.printf("[HB %d] WiFi OK IP=%s BOOT=%d PWR=%d\n",
+                          hb, WiFi.localIP().toString().c_str(),
+                          digitalRead(BOOT_BTN), digitalRead(PWR_BTN));
+                  } else {
+                      Serial.printf("[HB %d] WiFi connecting... BOOT=%d PWR=%d\n",
+                          hb, digitalRead(BOOT_BTN), digitalRead(PWR_BTN));
+                  }
+              }
+
+              delay(20);
           }
           ''').lstrip()
 
@@ -307,7 +399,7 @@ jobs:
 
           with open(f"{sketch_dir}/10_LVGL_V9_Test.ino", "w", encoding="utf-8") as f:
               f.write(ino)
-          print("[OK] Mic TDM (Full Init) .ino generat")
+          print("[OK] Baseline .ino generat")
           PYEOF
 
       - name: Compile Firmware
@@ -324,14 +416,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/mic-tdm-full-0x0.bin \
+            -o package_bin/gemini-baseline-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/mic-tdm-full-0x0.bin
+          ls -lh package_bin/gemini-baseline-0x0.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mic-tdm-full-firmware
-          path: package_bin/mic-tdm-full-0x0.bin
+          name: gemini-baseline-firmware
+          path: package_bin/gemini-baseline-0x0.bin
           if-no-files-found: error
