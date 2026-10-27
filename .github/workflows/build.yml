@@ -1,11 +1,11 @@
-name: Build Gemini OS - v22 Gemini Live (Correct Model & Setup)
+name: Build Gemini OS - v23 Gemini Live (Correct Protocol)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v22 Gemini Live
+    name: Build v23 Gemini Live
     runs-on: ubuntu-latest
 
     steps:
@@ -245,9 +245,9 @@ jobs:
                       Serial.println("[WS] CONNECTED");
                       g_state = 2;
                       JsonDocument doc;
-                      doc["setup"]["model"] = "models/gemini-2.5-flash-native-audio-preview-12-2025";
-                      doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
-                      doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Kore";
+                      doc["setup"]["model"] = "models/gemini-2.5-flash-native-audio-preview-09-2025";
+                      doc["setup"]["responseModalities"][0] = "AUDIO";
+                      doc["setup"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Kore";
                       doc["setup"]["systemInstruction"]["parts"][0]["text"] = "Raspunde intotdeauna exclusiv in limba romana, intr-un mod concis si natural.";
                       String out;
                       serializeJson(doc, out);
@@ -359,7 +359,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v22-gemini-live-native-audio");
+              Serial.println("\n[BOOT] v23-gemini-live-correct-protocol");
 
               I2C_INIT_CALL
               delay(50);
@@ -426,8 +426,8 @@ jobs:
                       String b64_str = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
                       if (b64_str.length() > 0) {
                           JsonDocument doc;
-                          doc["realtimeInput"]["mediaChunks"][0]["mimeType"] = "audio/pcm;rate=16000";
-                          doc["realtimeInput"]["mediaChunks"][0]["data"] = b64_str;
+                          doc["realtimeInput"]["audio"]["mimeType"] = "audio/pcm;rate=16000";
+                          doc["realtimeInput"]["audio"]["data"] = b64_str;
                           String out;
                           serializeJson(doc, out);
                           ws.sendTXT(out);
@@ -461,14 +461,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v22-live-0x0.bin \
+            -o package_bin/gemini-v23-live-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v22-live-0x0.bin
+          ls -lh package_bin/gemini-v23-live-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v22-live
-          path: package_bin/gemini-v22-live-0x0.bin
+          name: gemini-v23-live
+          path: package_bin/gemini-v23-live-0x0.bin
           if-no-files-found: error
