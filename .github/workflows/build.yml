@@ -1,4 +1,4 @@
-name: Build Gemini OS - v32 Gemini Live PTT
+name: Build Gemini OS - v32 Gemini Live (Push to Talk)
 
 on:
   workflow_dispatch:
@@ -198,7 +198,6 @@ jobs:
           volatile int g_tx_kb = 0;
           volatile int g_peak  = 0;
           
-          // Unified recording flag
           bool is_recording = false;
           bool is_playing = false;
           bool ws_ready = false;
@@ -222,7 +221,6 @@ jobs:
               esp_io_expander_new_i2c_tca9554(bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander);
               esp_io_expander_set_dir(io_expander, IO_EXPANDER_PIN_NUM_7, IO_EXPANDER_OUTPUT);
               esp_io_expander_set_level(io_expander, IO_EXPANDER_PIN_NUM_7, 1);
-              Serial.println("[TCA] Codec reset released");
           }
 
           void audio_init_local() {
@@ -236,7 +234,6 @@ jobs:
               ESP_ERROR_CHECK(init_codec(&cfg));
               playback = get_playback_handle();
               record   = get_record_handle();
-              Serial.println("[AUDIO] Codec initialized");
           }
 
           void audio_open_local() {
@@ -248,7 +245,6 @@ jobs:
               fs.bits_per_sample = 16;
               esp_codec_dev_open(playback, &fs);
               esp_codec_dev_open(record, &fs);
-              Serial.println("[AUDIO] Opened @24kHz stereo");
           }
 
           void parse_server_audio(const char* payload, size_t len) {
@@ -461,7 +457,6 @@ jobs:
 
               lvgl_port_unlock();
               lv_timer_create(ui_timer_cb, 100, NULL);
-              Serial.println("[UI] Built");
           }
 
           void setup() {
@@ -506,7 +501,6 @@ jobs:
               ws.beginSSL("generativelanguage.googleapis.com", 443, path.c_str());
               ws.onEvent(wsEvent);
               ws.setReconnectInterval(10000);
-              Serial.println("[WS] Connecting...");
           }
 
           void loop() {
@@ -518,7 +512,6 @@ jobs:
                   if (btn_pressed && !is_playing) {
                       if (!is_recording) {
                           is_recording = true;
-                          Serial.println("[PTT] Recording started via BOOT");
                           if(lbl_btn && lvgl_port_lock(100)){
                               lv_label_set_text(lbl_btn, "Ascult... (Vorbeste acum)");
                               if (btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0xEF4444), 0);
@@ -558,7 +551,6 @@ jobs:
                       }
                   } else if (!btn_pressed && is_recording) { 
                       is_recording = false;
-                      Serial.println("[PTT] Recording stopped, waiting for response...");
                       if(lbl_btn && lvgl_port_lock(100)){
                          lv_label_set_text(lbl_btn, "Tine apasat pt a vorbi pe ecran sau BOOT");
                          if (btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0x3B82F6), 0);
@@ -592,7 +584,6 @@ jobs:
 
           with open("sketch/sketch.ino", "w", encoding="utf-8") as f:
               f.write(code.lstrip())
-          print("[OK] sketch.ino written")
           PYEOF
 
       - name: Compile
