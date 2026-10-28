@@ -155,7 +155,7 @@ jobs:
           echo "#define SECRET_WIFI_SSID \"${{ secrets.WIFI_SSID || 'TP-Link_2.4G_9318_Guest' }}\"" >> sketch/secrets.h
           echo "#define SECRET_WIFI_PASS \"${{ secrets.WIFI_PASSWORD || 'revelion' }}\"" >> sketch/secrets.h
 
-      - name: Write sketch.ino (Push-to-Talk)
+      - name: Write sketch.ino (Push-to-Talk Fixed)
         shell: bash
         run: |
           I2C_FUNC=$(cat sketch/i2c_func.txt)
@@ -198,9 +198,11 @@ jobs:
           volatile int g_tx_kb = 0;
           volatile int g_peak  = 0;
           
+          // Unified flags
           bool is_recording = false;
           bool is_playing = false;
           bool ws_ready = false;
+          volatile bool ui_btn_pressed = false;
 
           lv_obj_t *lbl_state = NULL;
           lv_obj_t *lbl_rx    = NULL;
@@ -351,21 +353,10 @@ jobs:
               if (g_state != 3) return;
 
               if (code == LV_EVENT_PRESSED) {
-                  is_recording = true;
-                  if (lbl_btn) lv_label_set_text(lbl_btn, "Ascult... (Vorbeste acum)");
-                  if (btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0xEF4444), 0);
+                  ui_btn_pressed = true;
               } 
               else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-                  is_recording = false;
-                  if (lbl_btn) lv_label_set_text(lbl_btn, "Tine apasat pt a vorbi pe ecran sau BOOT");
-                  if (btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0x3B82F6), 0);
-                  
-                  JsonDocument doc;
-                  JsonObject clientContent = doc["clientContent"].to<JsonObject>();
-                  clientContent["turnComplete"] = true;
-                  String out;
-                  serializeJson(doc, out);
-                  ws.sendTXT(out);
+                  ui_btn_pressed = false;
               }
           }
 
@@ -462,7 +453,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v32-gemini-live-push-to-talk");
+              Serial.println("\n[BOOT] v32-gemini-live-push-to-talk-fixed");
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
               I2C_INIT_CALL
@@ -507,11 +498,13 @@ jobs:
               ws.loop();
 
               if (ws_ready) {
-                  bool btn_pressed = (digitalRead(BOOT_BTN) == LOW);
+                  bool hw_btn_pressed = (digitalRead(BOOT_BTN) == LOW);
+                  bool want_record = (hw_btn_pressed || ui_btn_pressed);
 
-                  if (btn_pressed && !is_playing) {
+                  if (want_record && !is_playing) {
                       if (!is_recording) {
                           is_recording = true;
+                          Serial.println("[PTT] Recording started");
                           if(lbl_btn && lvgl_port_lock(100)){
                               lv_label_set_text(lbl_btn, "Ascult... (Vorbeste acum)");
                               if (btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0xEF4444), 0);
@@ -549,8 +542,9 @@ jobs:
                               g_tx_kb += (out_count * 2) / 1024;
                           }
                       }
-                  } else if (!btn_pressed && is_recording) { 
+                  } else if (!want_record && is_recording) { 
                       is_recording = false;
+                      Serial.println("[PTT] Recording stopped, sending turnComplete...");
                       if(lbl_btn && lvgl_port_lock(100)){
                          lv_label_set_text(lbl_btn, "Tine apasat pt a vorbi pe ecran sau BOOT");
                          if (btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0x3B82F6), 0);
