@@ -1,11 +1,11 @@
-name: Build Gemini OS - v33 Gemini Live (PTT + Fix CLI)
+name: Build Gemini OS - v32 Gemini Live (Push to Talk)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v33 Gemini Live PTT
+    name: Build v32 Gemini Live PTT
     runs-on: ubuntu-latest
 
     steps:
@@ -25,11 +25,10 @@ jobs:
           pip install "esptool<5"
           sudo apt-get update && sudo apt-get install -y zip
 
-      - name: Install Arduino CLI
-        uses: arduino/setup-arduino-cli@v2
-
-      - name: Install ESP32 Core
+      - name: Setup Arduino CLI & ESP32 Core
         run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          sudo mv bin/arduino-cli /usr/local/bin/
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
@@ -153,6 +152,8 @@ jobs:
         run: |
           echo "#pragma once" > sketch/secrets.h
           echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
+          echo "#define SECRET_WIFI_SSID \"${{ secrets.WIFI_SSID || 'TP-Link_2.4G_9318_Guest' }}\"" >> sketch/secrets.h
+          echo "#define SECRET_WIFI_PASS \"${{ secrets.WIFI_PASSWORD || 'revelion' }}\"" >> sketch/secrets.h
 
       - name: Write sketch.ino (Push-to-Talk)
         shell: bash
@@ -169,6 +170,7 @@ jobs:
           #include <WebSocketsClient.h>
           #include <ArduinoJson.h>
           #include <base64.h>
+          #include "mbedtls/base64.h"
 
           #include "secrets.h"
 
@@ -181,8 +183,8 @@ jobs:
           }
 
           #define BOOT_BTN 0
-          const char* WIFI_SSID = "TP-Link_2.4G_9318_Guest";
-          const char* WIFI_PASS = "revelion";
+          const char* WIFI_SSID = SECRET_WIFI_SSID;
+          const char* WIFI_PASS = SECRET_WIFI_PASS;
           const char* GEMINI_API_KEY = SECRET_GEMINI_API_KEY;
 
           esp_codec_dev_handle_t playback = NULL;
@@ -190,6 +192,7 @@ jobs:
           esp_io_expander_handle_t io_expander = NULL;
           WebSocketsClient ws;
 
+          // State: 0=Init, 1=WiFi/WS, 2=Waiting Setup, 3=READY, 4=RECORDING, 5=PLAYING
           volatile int g_state = 0;
           volatile int g_rx_kb = 0;
           volatile int g_tx_kb = 0;
@@ -202,11 +205,14 @@ jobs:
           lv_obj_t *lbl_rx    = NULL;
           lv_obj_t *lbl_tx    = NULL;
           lv_obj_t *lbl_peak  = NULL;
+          lv_obj_t *btn_ptt = NULL;
+          lv_obj_t *lbl_btn = NULL;
 
           static int16_t buf_in_stereo[1024];
           static int16_t buf_mono_24k[512];
           static int16_t buf_mono_16k[341];
           static int16_t buf_out_stereo[256];
+          static uint8_t buf_rx_raw[16384];
 
           void tca9554_init_local() {
               i2c_master_bus_handle_t bus;
@@ -233,7 +239,7 @@ jobs:
 
           void audio_open_local() {
               esp_codec_dev_set_out_vol(playback, 100.0);
-              esp_codec_dev_set_in_gain(record, 35.0);
+              esp_codec_dev_set_in_gain(record, 40.0);
               esp_codec_dev_sample_info_t fs = {};
               fs.sample_rate = 24000;
               fs.channel = 2;
@@ -270,24 +276,25 @@ jobs:
                   const char* data = inlineData["data"];
                   if (!data) continue;
 
-                  String b64_str(data);
-                  String decoded = base64::decode(b64_str);
-                  int out_len = decoded.length();
-                  
-                  if (out_len > 0) {
-                      int16_t* pcm = (int16_t*)decoded.c_str();
-                      int samples = out_len / sizeof(int16_t);
-                      for (int off = 0; off < samples; off += 128) {
-                          int n = samples - off;
-                          if (n > 128) n = 128;
-                          int16_t* src = pcm + off;
-                          for (int i = 0; i < n; i++) {
-                              buf_out_stereo[i*2]   = src[i];
-                              buf_out_stereo[i*2+1] = src[i];
+                  size_t b64_len = strlen(data);
+                  size_t olen = 0;
+                  if (mbedtls_base64_decode(buf_rx_raw, sizeof(buf_rx_raw), &olen, (const unsigned char*)data, b64_len) == 0 && olen > 0) {
+                      int out_len = olen;
+                      if (out_len > 0) {
+                          int16_t* pcm = (int16_t*)buf_rx_raw;
+                          int samples = out_len / sizeof(int16_t);
+                          for (int off = 0; off < samples; off += 128) {
+                              int n = samples - off;
+                              if (n > 128) n = 128;
+                              int16_t* src = pcm + off;
+                              for (int i = 0; i < n; i++) {
+                                  buf_out_stereo[i*2]   = src[i];
+                                  buf_out_stereo[i*2+1] = src[i];
+                              }
+                              esp_codec_dev_write(playback, buf_out_stereo, n * 4);
                           }
-                          esp_codec_dev_write(playback, buf_out_stereo, n * 4);
+                          g_rx_kb += out_len / 1024;
                       }
-                      g_rx_kb += out_len / 1024;
                   }
               }
           }
@@ -300,8 +307,12 @@ jobs:
                       JsonDocument doc;
                       doc["setup"]["model"] = "models/gemini-2.0-flash-exp";
                       doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
-                      doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Puck";
-                      doc["setup"]["systemInstruction"] = "Raspunde in limba romana.";
+                      doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Aoede";
+                      
+                      JsonObject sysInst = doc["setup"]["systemInstruction"].to<JsonObject>();
+                      sysInst["role"] = "user";
+                      JsonObject p = sysInst["parts"].to<JsonArray>().add<JsonObject>();
+                      p["text"] = "Răspunde scurt și concis în limba română.";
                       
                       String out;
                       serializeJson(doc, out);
@@ -334,6 +345,29 @@ jobs:
                       break;
                   }
                   default: break;
+              }
+          }
+
+          static void btn_event_cb(lv_event_t * e) {
+              lv_event_code_t code = lv_event_get_code(e);
+              if (g_state != 3) return;
+
+              if (code == LV_EVENT_PRESSED) {
+                  g_is_recording = true;
+                  if (lbl_btn) lv_label_set_text(lbl_btn, "Ascult... (Vorbeste acum)");
+                  if (btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0xEF4444), 0);
+              } 
+              else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+                  g_is_recording = false;
+                  if (lbl_btn) lv_label_set_text(lbl_btn, "Tine apasat pt a vorbi pe ecran sau BOOT");
+                  if (btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0x3B82F6), 0);
+                  
+                  JsonDocument doc;
+                  JsonObject clientContent = doc["clientContent"].to<JsonObject>();
+                  clientContent["turnComplete"] = true;
+                  String out;
+                  serializeJson(doc, out);
+                  ws.sendTXT(out);
               }
           }
 
@@ -386,37 +420,42 @@ jobs:
               lv_label_set_text(title, "Gemini PTT");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
-              lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
-
-              lv_obj_t *hint = lv_label_create(scr);
-              lv_label_set_text(hint, "Hold BOOT to talk");
-              lv_obj_set_style_text_color(hint, lv_color_hex(0x94A3B8), 0);
-              lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
-              lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 65);
+              lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
 
               lbl_state = lv_label_create(scr);
               lv_label_set_text(lbl_state, "Init");
               lv_obj_set_style_text_color(lbl_state, lv_color_hex(0xFFFFFF), 0);
               lv_obj_set_style_text_font(lbl_state, &lv_font_montserrat_28, 0);
-              lv_obj_align(lbl_state, LV_ALIGN_CENTER, 0, -60);
+              lv_obj_align(lbl_state, LV_ALIGN_CENTER, 0, -40);
+
+              btn_ptt = lv_btn_create(scr);
+              lv_obj_set_size(btn_ptt, 400, 60);
+              lv_obj_align(btn_ptt, LV_ALIGN_CENTER, 0, 20);
+              lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0x3B82F6), 0);
+              lv_obj_add_event_cb(btn_ptt, btn_event_cb, LV_EVENT_ALL, NULL);
+
+              lbl_btn = lv_label_create(btn_ptt);
+              lv_label_set_text(lbl_btn, "Tine apasat pt a vorbi pe ecran sau BOOT");
+              lv_obj_set_style_text_font(lbl_btn, &lv_font_montserrat_16, 0);
+              lv_obj_center(lbl_btn);
 
               lbl_peak = lv_label_create(scr);
               lv_label_set_text(lbl_peak, "Peak: 0");
               lv_obj_set_style_text_color(lbl_peak, lv_color_hex(0x94A3B8), 0);
-              lv_obj_set_style_text_font(lbl_peak, &lv_font_montserrat_16, 0);
-              lv_obj_align(lbl_peak, LV_ALIGN_CENTER, 0, 0);
+              lv_obj_set_style_text_font(lbl_peak, &lv_font_montserrat_12, 0);
+              lv_obj_align(lbl_peak, LV_ALIGN_BOTTOM_LEFT, 10, -10);
 
               lbl_rx = lv_label_create(scr);
               lv_label_set_text(lbl_rx, "RX: 0 KB");
               lv_obj_set_style_text_color(lbl_rx, lv_color_hex(0x22C55E), 0);
-              lv_obj_set_style_text_font(lbl_rx, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_rx, LV_ALIGN_CENTER, 0, 50);
+              lv_obj_set_style_text_font(lbl_rx, &lv_font_montserrat_12, 0);
+              lv_obj_align(lbl_rx, LV_ALIGN_BOTTOM_MID, 0, -10);
 
               lbl_tx = lv_label_create(scr);
               lv_label_set_text(lbl_tx, "TX: 0 KB");
               lv_obj_set_style_text_color(lbl_tx, lv_color_hex(0x38BDF8), 0);
-              lv_obj_set_style_text_font(lbl_tx, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_tx, LV_ALIGN_CENTER, 0, 80);
+              lv_obj_set_style_text_font(lbl_tx, &lv_font_montserrat_12, 0);
+              lv_obj_align(lbl_tx, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
 
               lvgl_port_unlock();
               lv_timer_create(ui_timer_cb, 100, NULL);
@@ -426,7 +465,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v33-gemini-live-push-to-talk");
+              Serial.println("\n[BOOT] v32-gemini-live-push-to-talk");
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
               I2C_INIT_CALL
@@ -477,7 +516,12 @@ jobs:
                   if (btn_pressed && !is_playing) {
                       if (!is_recording) {
                           is_recording = true;
-                          Serial.println("[PTT] Recording started");
+                          Serial.println("[PTT] Recording started via BOOT");
+                          if(lbl_btn && lvgl_port_lock(100)){
+                              lv_label_set_text(lbl_btn, "Ascult... (Vorbeste acum)");
+                              if (btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0xEF4444), 0);
+                              lvgl_port_unlock();
+                          }
                       }
 
                       int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
@@ -510,20 +554,24 @@ jobs:
                               g_tx_kb += (out_count * 2) / 1024;
                           }
                       }
-                  } else if (!btn_pressed && is_recording) {
+                  } else if (!btn_pressed && is_recording && !g_is_recording) { // Stop record if neither HW nor SW button is held
                       is_recording = false;
                       Serial.println("[PTT] Recording stopped, waiting for response...");
+                      if(lbl_btn && lvgl_port_lock(100)){
+                         lv_label_set_text(lbl_btn, "Tine apasat pt a vorbi pe ecran sau BOOT");
+                         if (btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0x3B82F6), 0);
+                         lvgl_port_unlock();
+                      }
                       
                       JsonDocument doc;
-                      doc["clientContent"]["turns"][0]["role"] = "user";
-                      doc["clientContent"]["turns"][0]["parts"][0]["text"] = " ";
-                      doc["clientContent"]["turnComplete"] = true;
+                      JsonObject clientContent = doc["clientContent"].to<JsonObject>();
+                      clientContent["turnComplete"] = true;
                       String out;
                       serializeJson(doc, out);
                       ws.sendTXT(out);
                   }
 
-                  if (!is_recording) {
+                  if (!is_recording && !g_is_recording) {
                       static unsigned long last_audio_rx = 0;
                       if (g_rx_kb > 0 && last_audio_rx != g_rx_kb) {
                           last_audio_rx = g_rx_kb;
@@ -559,14 +607,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v33-ptt-0x0.bin \
+            -o package_bin/gemini-v32-ptt-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v33-ptt-0x0.bin
+          ls -lh package_bin/gemini-v32-ptt-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v33-ptt
-          path: package_bin/gemini-v33-ptt-0x0.bin
+          name: gemini-v32-ptt
+          path: package_bin/gemini-v32-ptt-0x0.bin
           if-no-files-found: error
