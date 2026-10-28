@@ -1,11 +1,11 @@
-name: Build Gemini OS - v31 Gemini Live (REST/WS Fix)
+name: Build Gemini OS - v32 Gemini Live (WS Minimal Setup)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v31 Gemini Live
+    name: Build v32 Gemini Live
     runs-on: ubuntu-latest
 
     steps:
@@ -153,7 +153,7 @@ jobs:
           echo "#pragma once" > sketch/secrets.h
           echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
 
-      - name: Write sketch.ino (FIXED JSON SETUP)
+      - name: Write sketch.ino (Minimal JSON Setup)
         shell: bash
         run: |
           cat << 'EOF' > sketch/sketch.ino
@@ -240,30 +240,21 @@ jobs:
                       Serial.println("[WS] CONNECTED");
                       g_state = 2;
                       
-                      // Delay scurt pentru a permite serverului să proceseze conexiunea SSL
+                      // Delay scurt pentru stabilitate SSL
                       delay(500);
 
                       JsonDocument doc;
                       JsonObject setupObj = doc["setup"].to<JsonObject>();
-                      setupObj["model"] = "models/gemini-2.0-flash-exp";
                       
+                      // Configuratie minima absoluta: doar model si responseModalities
+                      setupObj["model"] = "models/gemini-2.0-flash-exp";
                       JsonArray respMod = setupObj["generationConfig"]["responseModalities"].to<JsonArray>();
                       respMod.add("AUDIO");
-                      
-                      // Simplificăm configurarea vocală pentru a evita erori de sintaxă respinse de server
-                      setupObj["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Puck";
-
-                      // Adăugăm role: user la systemInstruction, altfel schema este invalidă
-                      JsonObject sysInst = setupObj["systemInstruction"].to<JsonObject>();
-                      sysInst["role"] = "user";
-                      JsonArray parts = sysInst["parts"].to<JsonArray>();
-                      JsonObject p = parts.add<JsonObject>();
-                      p["text"] = "Raspunde mereu foarte scurt in limba romana, fara diacritice, doar cateva cuvinte.";
 
                       String out;
                       serializeJson(doc, out);
                       ws.sendTXT(out);
-                      Serial.printf("[WS] Setup sent: %s\n", out.c_str());
+                      Serial.printf("[WS] Minimal Setup sent: %s\n", out.c_str());
                       break;
                   }
                   case WStype_DISCONNECTED:
@@ -352,7 +343,7 @@ jobs:
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Gemini Live");
+              lv_label_set_text(title, "Gemini Live Minimal WS");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
               lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
@@ -389,7 +380,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v31-gemini-live-rest-ws-fix");
+              Serial.println("\n[BOOT] v32-gemini-live-ws-minimal-setup");
 
               I2C_INIT_CALL;
               delay(50);
@@ -433,7 +424,7 @@ jobs:
           void loop() {
               ws.loop();
 
-              // Transmitem audio NUMAI daca am primit confirmarea de LIVE!
+              // Transmitem audio NUMAI dupa setupComplete
               if (g_state == 3) {
                   int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
                   if (r == ESP_OK) {
@@ -471,13 +462,13 @@ jobs:
                   }
               }
 
-              delay(5); // Redus polling-ul usor pentru a menaja CPU-ul.
+              delay(5);
           }
           EOF
 
           I2C_FUNC=$(cat sketch/i2c_func.txt)
           sed -i "s/I2C_INIT_CALL;/${I2C_FUNC}();/" sketch/sketch.ino
-          echo "[OK] sketch.ino configurat cu $I2C_FUNC"
+          echo "[OK] sketch.ino configurat cu minimal setup"
 
       - name: Compile
         run: |
@@ -493,14 +484,13 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v31-live-0x0.bin \
+            -o package_bin/gemini-v32-live-minimal-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v31-live-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v31-live
-          path: package_bin/gemini-v31-live-0x0.bin
+          name: gemini-v32-live-minimal
+          path: package_bin/gemini-v32-live-minimal-0x0.bin
           if-no-files-found: error
