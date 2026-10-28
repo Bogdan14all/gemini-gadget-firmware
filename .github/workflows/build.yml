@@ -1,4 +1,4 @@
-name: Build Gemini OS - v32 Gemini Live (Push to Talk)
+name: Build Gemini OS - v32 Gemini Live PTT
 
 on:
   workflow_dispatch:
@@ -192,11 +192,13 @@ jobs:
           esp_io_expander_handle_t io_expander = NULL;
           WebSocketsClient ws;
 
-          // State: 0=Init, 1=WiFi/WS, 2=Waiting Setup, 3=READY, 4=RECORDING, 5=PLAYING
+          // State: 0=Init, 1=WiFi/WS, 2=Waiting Setup, 3=READY
           volatile int g_state = 0;
           volatile int g_rx_kb = 0;
           volatile int g_tx_kb = 0;
           volatile int g_peak  = 0;
+          
+          // Unified recording flag
           bool is_recording = false;
           bool is_playing = false;
           bool ws_ready = false;
@@ -205,8 +207,8 @@ jobs:
           lv_obj_t *lbl_rx    = NULL;
           lv_obj_t *lbl_tx    = NULL;
           lv_obj_t *lbl_peak  = NULL;
-          lv_obj_t *btn_ptt = NULL;
-          lv_obj_t *lbl_btn = NULL;
+          lv_obj_t *btn_ptt   = NULL;
+          lv_obj_t *lbl_btn   = NULL;
 
           static int16_t buf_in_stereo[1024];
           static int16_t buf_mono_24k[512];
@@ -353,12 +355,12 @@ jobs:
               if (g_state != 3) return;
 
               if (code == LV_EVENT_PRESSED) {
-                  g_is_recording = true;
+                  is_recording = true;
                   if (lbl_btn) lv_label_set_text(lbl_btn, "Ascult... (Vorbeste acum)");
                   if (btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0xEF4444), 0);
               } 
               else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-                  g_is_recording = false;
+                  is_recording = false;
                   if (lbl_btn) lv_label_set_text(lbl_btn, "Tine apasat pt a vorbi pe ecran sau BOOT");
                   if (btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0x3B82F6), 0);
                   
@@ -554,7 +556,7 @@ jobs:
                               g_tx_kb += (out_count * 2) / 1024;
                           }
                       }
-                  } else if (!btn_pressed && is_recording && !g_is_recording) { // Stop record if neither HW nor SW button is held
+                  } else if (!btn_pressed && is_recording) { 
                       is_recording = false;
                       Serial.println("[PTT] Recording stopped, waiting for response...");
                       if(lbl_btn && lvgl_port_lock(100)){
@@ -571,7 +573,7 @@ jobs:
                       ws.sendTXT(out);
                   }
 
-                  if (!is_recording && !g_is_recording) {
+                  if (!is_recording) {
                       static unsigned long last_audio_rx = 0;
                       if (g_rx_kb > 0 && last_audio_rx != g_rx_kb) {
                           last_audio_rx = g_rx_kb;
