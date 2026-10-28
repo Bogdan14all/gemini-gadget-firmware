@@ -1,11 +1,11 @@
-name: Build Gemini OS - v33 Gemini Live (WS Valid Setup)
+name: Build Gemini OS - v34 Gemini Live (Minimal WS Setup)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v33 Gemini Live
+    name: Build v34 Gemini Live
     runs-on: ubuntu-latest
 
     steps:
@@ -239,14 +239,8 @@ jobs:
 
                       JsonDocument doc;
                       JsonObject setupObj = doc["setup"].to<JsonObject>();
-                      
                       setupObj["model"] = "models/gemini-2.0-flash-exp";
-                      JsonArray respMod = setupObj["generationConfig"]["responseModalities"].to<JsonArray>();
-                      respMod.add("AUDIO");
                       
-                      // Include mandatory speechConfig
-                      setupObj["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Aoede";
-
                       String out;
                       serializeJson(doc, out);
                       ws.sendTXT(out);
@@ -262,35 +256,6 @@ jobs:
                           Serial.println("[WS] >>> SETUP COMPLETE! Suntem LIVE! <<<");
                           g_state = 3;
                           break;
-                      }
-
-                      if (strstr((char*)payload, "\"inlineData\"") != NULL) {
-                          JsonDocument rxDoc;
-                          DeserializationError err = deserializeJson(rxDoc, payload, len);
-                          if (!err) {
-                              JsonArray parts = rxDoc["serverContent"]["modelTurn"]["parts"].as<JsonArray>();
-                              for (JsonObject pt : parts) {
-                                  const char* b64_data = pt["inlineData"]["data"];
-                                  if (b64_data) {
-                                      size_t b64_len = strlen(b64_data);
-                                      size_t olen = 0;
-                                      if (mbedtls_base64_decode(buf_rx_raw, sizeof(buf_rx_raw), &olen, (const unsigned char*)b64_data, b64_len) == 0 && olen > 0) {
-                                          int mono_count = olen / 2;
-                                          int16_t *src = (int16_t*)buf_rx_raw;
-                                          for (int off = 0; off < mono_count; off += 128) {
-                                              int n = mono_count - off;
-                                              if (n > 128) n = 128;
-                                              for (int i = 0; i < n; i++) {
-                                                  buf_out_stereo[i * 2]     = src[off + i];
-                                                  buf_out_stereo[i * 2 + 1] = src[off + i];
-                                              }
-                                              esp_codec_dev_write(playback, buf_out_stereo, n * 4);
-                                          }
-                                          g_rx_kb += olen / 1024;
-                                      }
-                                  }
-                              }
-                          }
                       }
                       break;
                   }
@@ -324,7 +289,7 @@ jobs:
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Gemini Live valid WS");
+              lv_label_set_text(title, "Gemini Live");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
               lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
@@ -360,7 +325,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v33-gemini-live-ws-valid-setup");
+              Serial.println("\n[BOOT] v34-gemini-live-minimal-ws-setup");
 
               I2C_INIT_CALL;
               delay(50);
@@ -390,43 +355,6 @@ jobs:
 
           void loop() {
               ws.loop();
-
-              if (g_state == 3) {
-                  int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
-                  if (r == ESP_OK) {
-                      int frames = (sizeof(buf_in_stereo)/sizeof(int16_t)) / 2;
-                      int32_t peak = 0;
-                      for (int i = 0; i < frames; i++) {
-                          int16_t s = buf_in_stereo[i*2];
-                          int32_t a = s < 0 ? -s : s;
-                          if (a > peak) peak = a;
-                          buf_mono_24k[i] = s;
-                      }
-                      g_peak = (int)peak;
-
-                      int out_count = frames * 2 / 3;
-                      for (int i = 0; i < out_count; i++) {
-                          int src = (i * 3) / 2;
-                          if (src >= frames) src = frames - 1;
-                          buf_mono_16k[i] = buf_mono_24k[src];
-                      }
-
-                      String b64_str = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
-                      if (b64_str.length() > 0) {
-                          JsonDocument doc;
-                          JsonObject realtimeInput = doc["realtimeInput"].to<JsonObject>();
-                          JsonArray mediaChunks = realtimeInput["mediaChunks"].to<JsonArray>();
-                          JsonObject chunk = mediaChunks.add<JsonObject>();
-                          chunk["mimeType"] = "audio/pcm;rate=16000";
-                          chunk["data"] = b64_str;
-
-                          String out;
-                          serializeJson(doc, out);
-                          ws.sendTXT(out);
-                          g_tx_kb += (out_count * 2) / 1024;
-                      }
-                  }
-              }
               delay(5);
           }
           EOF
@@ -448,13 +376,13 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v33-live-valid-0x0.bin \
+            -o package_bin/gemini-v34-live-minimal-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v33-live-valid
-          path: package_bin/gemini-v33-live-valid-0x0.bin
+          name: gemini-v34-live-minimal
+          path: package_bin/gemini-v34-live-minimal-0x0.bin
           if-no-files-found: error
