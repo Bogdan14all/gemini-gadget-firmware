@@ -1,11 +1,11 @@
-name: Build Gemini OS - v34 Gemini Live (Minimal WS Setup)
+name: Build Gemini OS - v35 Gemini Live (Half-Duplex PTT)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v34 Gemini Live
+    name: Build v35 Gemini Live
     runs-on: ubuntu-latest
 
     steps:
@@ -153,7 +153,7 @@ jobs:
           echo "#pragma once" > sketch/secrets.h
           echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
 
-      - name: Write sketch.ino
+      - name: Write sketch.ino (Half-Duplex PTT logic)
         shell: bash
         run: |
           cat << 'EOF' > sketch/sketch.ino
@@ -184,14 +184,11 @@ jobs:
           WebSocketsClient ws;
 
           volatile int g_state = 0; // 0=init, 1=wifi, 2=wait_setup, 3=live
-          volatile int g_rx_kb = 0;
-          volatile int g_tx_kb = 0;
-          volatile int g_peak  = 0;
+          volatile bool g_is_recording = false; // Controlat de butonul PTT
 
           lv_obj_t *lbl_state = NULL;
-          lv_obj_t *lbl_rx    = NULL;
-          lv_obj_t *lbl_tx    = NULL;
-          lv_obj_t *lbl_peak  = NULL;
+          lv_obj_t *btn_ptt = NULL;
+          lv_obj_t *lbl_btn = NULL;
 
           static int16_t buf_in_stereo[1024];
           static int16_t buf_mono_24k[512];
@@ -222,7 +219,7 @@ jobs:
 
           void audio_open_local() {
               esp_codec_dev_set_out_vol(playback, 100.0);
-              esp_codec_dev_set_in_gain(record, 35.0);
+              esp_codec_dev_set_in_gain(record, 40.0);
               esp_codec_dev_sample_info_t fs = {};
               fs.sample_rate = 24000;
               fs.channel = 2;
@@ -239,8 +236,21 @@ jobs:
 
                       JsonDocument doc;
                       JsonObject setupObj = doc["setup"].to<JsonObject>();
-                      setupObj["model"] = "models/gemini-2.0-flash-exp";
                       
+                      setupObj["model"] = "models/gemini-2.0-flash-exp";
+                      JsonArray respMod = setupObj["generationConfig"]["responseModalities"].to<JsonArray>();
+                      respMod.add("AUDIO");
+                      
+                      // Adăugăm required voice config
+                      setupObj["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Aoede";
+
+                      // Adăugăm required role for user
+                      JsonObject sysInst = setupObj["systemInstruction"].to<JsonObject>();
+                      sysInst["role"] = "user";
+                      JsonArray parts = sysInst["parts"].to<JsonArray>();
+                      JsonObject p = parts.add<JsonObject>();
+                      p["text"] = "Raspunde mereu foarte scurt in limba romana, fara diacritice.";
+
                       String out;
                       serializeJson(doc, out);
                       ws.sendTXT(out);
@@ -249,6 +259,7 @@ jobs:
                   }
                   case WStype_DISCONNECTED:
                       g_state = 1;
+                      Serial.println("[WS] Disconnected!");
                       break;
 
                   case WStype_TEXT: {
@@ -257,9 +268,56 @@ jobs:
                           g_state = 3;
                           break;
                       }
+
+                      if (strstr((char*)payload, "\"inlineData\"") != NULL) {
+                          JsonDocument rxDoc;
+                          DeserializationError err = deserializeJson(rxDoc, payload, len);
+                          if (!err) {
+                              JsonArray parts = rxDoc["serverContent"]["modelTurn"]["parts"].as<JsonArray>();
+                              for (JsonObject pt : parts) {
+                                  const char* b64_data = pt["inlineData"]["data"];
+                                  if (b64_data) {
+                                      size_t b64_len = strlen(b64_data);
+                                      size_t olen = 0;
+                                      if (mbedtls_base64_decode(buf_rx_raw, sizeof(buf_rx_raw), &olen, (const unsigned char*)b64_data, b64_len) == 0 && olen > 0) {
+                                          int mono_count = olen / 2;
+                                          int16_t *src = (int16_t*)buf_rx_raw;
+                                          for (int off = 0; off < mono_count; off += 128) {
+                                              int n = mono_count - off;
+                                              if (n > 128) n = 128;
+                                              for (int i = 0; i < n; i++) {
+                                                  buf_out_stereo[i * 2]     = src[off + i];
+                                                  buf_out_stereo[i * 2 + 1] = src[off + i];
+                                              }
+                                              esp_codec_dev_write(playback, buf_out_stereo, n * 4);
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
                       break;
                   }
                   default: break;
+              }
+          }
+
+          // Callback pentru butonul LVGL (Push-to-Talk)
+          static void btn_ptt_event_cb(lv_event_t * e) {
+              lv_event_code_t code = lv_event_get_code(e);
+              if (g_state != 3) return; // Permit recording doar daca e live
+
+              if (code == LV_EVENT_PRESSED) {
+                  g_is_recording = true;
+                  if (lbl_btn) lv_label_set_text(lbl_btn, "Ascult...");
+                  if (btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0xEF4444), 0); // Rosu cand inregistreaza
+              } 
+              else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+                  g_is_recording = false;
+                  if (lbl_btn) lv_label_set_text(lbl_btn, "Tine Apasat pt a Vorbi");
+                  if (btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0x3B82F6), 0); // Albastru cand e gata
+                  
+                  // Trimitem eventual un mesaj empty chunk ca semnal ca s-a terminat fraza daca api-ul o cere (opțional).
               }
           }
 
@@ -267,18 +325,15 @@ jobs:
               if (lbl_state) {
                   const char* s = "?";
                   switch (g_state) {
-                      case 0: s = "Init"; break;
-                      case 1: s = "WiFi/WS..."; break;
-                      case 2: s = "Waiting Setup"; break;
-                      case 3: s = "LIVE!"; break;
+                      case 0: s = "Se initializeaza..."; break;
+                      case 1: s = "Conectare Wi-Fi/WS..."; break;
+                      case 2: s = "Configurare Live..."; break;
+                      case 3: s = "Gemini Live WS [GATA]"; break;
                   }
                   lv_label_set_text(lbl_state, s);
                   lv_obj_set_style_text_color(lbl_state,
-                      g_state == 3 ? lv_color_hex(0x22C55E) : lv_color_hex(0xFFFFFF), 0);
+                      g_state == 3 ? lv_color_hex(0x22C55E) : lv_color_hex(0x94A3B8), 0);
               }
-              if (lbl_rx) { char b[32]; snprintf(b, sizeof(b), "RX: %d KB", g_rx_kb); lv_label_set_text(lbl_rx, b); }
-              if (lbl_tx) { char b[32]; snprintf(b, sizeof(b), "TX: %d KB", g_tx_kb); lv_label_set_text(lbl_tx, b); }
-              if (lbl_peak){ char b[32]; snprintf(b, sizeof(b), "Peak: %d", g_peak); lv_label_set_text(lbl_peak, b); }
           }
 
           void build_ui() {
@@ -288,35 +343,24 @@ jobs:
               lv_obj_set_style_bg_color(scr, lv_color_hex(0x0F172A), 0);
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-              lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Gemini Live");
-              lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
-              lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
-              lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
-
               lbl_state = lv_label_create(scr);
-              lv_label_set_text(lbl_state, "Init");
+              lv_label_set_text(lbl_state, "Pornire...");
               lv_obj_set_style_text_color(lbl_state, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_state, &lv_font_montserrat_28, 0);
-              lv_obj_align(lbl_state, LV_ALIGN_CENTER, 0, -60);
+              lv_obj_set_style_text_font(lbl_state, &lv_font_montserrat_16, 0);
+              lv_obj_align(lbl_state, LV_ALIGN_TOP_MID, 0, 10);
 
-              lbl_peak = lv_label_create(scr);
-              lv_label_set_text(lbl_peak, "Peak: 0");
-              lv_obj_set_style_text_color(lbl_peak, lv_color_hex(0x94A3B8), 0);
-              lv_obj_set_style_text_font(lbl_peak, &lv_font_montserrat_16, 0);
-              lv_obj_align(lbl_peak, LV_ALIGN_CENTER, 0, 0);
+              // Buton mare central pentru Push To Talk (in spatiul 640x172)
+              btn_ptt = lv_btn_create(scr);
+              lv_obj_set_size(btn_ptt, 400, 80);
+              lv_obj_align(btn_ptt, LV_ALIGN_CENTER, 0, 20);
+              lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0x3B82F6), 0);
+              lv_obj_set_style_radius(btn_ptt, 10, 0);
+              lv_obj_add_event_cb(btn_ptt, btn_ptt_event_cb, LV_EVENT_ALL, NULL);
 
-              lbl_rx = lv_label_create(scr);
-              lv_label_set_text(lbl_rx, "RX: 0 KB");
-              lv_obj_set_style_text_color(lbl_rx, lv_color_hex(0x22C55E), 0);
-              lv_obj_set_style_text_font(lbl_rx, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_rx, LV_ALIGN_CENTER, 0, 50);
-
-              lbl_tx = lv_label_create(scr);
-              lv_label_set_text(lbl_tx, "TX: 0 KB");
-              lv_obj_set_style_text_color(lbl_tx, lv_color_hex(0x38BDF8), 0);
-              lv_obj_set_style_text_font(lbl_tx, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_tx, LV_ALIGN_CENTER, 0, 80);
+              lbl_btn = lv_label_create(btn_ptt);
+              lv_label_set_text(lbl_btn, "Tine Apasat pt a Vorbi");
+              lv_obj_set_style_text_font(lbl_btn, &lv_font_montserrat_20, 0);
+              lv_obj_center(lbl_btn);
 
               lvgl_port_unlock();
               lv_timer_create(ui_timer_cb, 500, NULL);
@@ -325,7 +369,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v34-gemini-live-minimal-ws-setup");
+              Serial.println("\n[BOOT] v35-gemini-live-half-duplex-ptt");
 
               I2C_INIT_CALL;
               delay(50);
@@ -355,6 +399,41 @@ jobs:
 
           void loop() {
               ws.loop();
+
+              // Transmitere audio doar pe durata apasarii butonului, pentru a preveni ecoul.
+              if (g_state == 3 && g_is_recording) {
+                  int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
+                  if (r == ESP_OK) {
+                      int frames = (sizeof(buf_in_stereo)/sizeof(int16_t)) / 2;
+                      
+                      // Downsample de la 24kHz stereo in codec, la 16k mono pentru api
+                      for (int i = 0; i < frames; i++) {
+                          buf_mono_24k[i] = buf_in_stereo[i*2];
+                      }
+                      
+                      int out_count = frames * 2 / 3;
+                      for (int i = 0; i < out_count; i++) {
+                          int src = (i * 3) / 2;
+                          if (src >= frames) src = frames - 1;
+                          buf_mono_16k[i] = buf_mono_24k[src];
+                      }
+
+                      String b64_str = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
+                      if (b64_str.length() > 0) {
+                          JsonDocument doc;
+                          JsonObject realtimeInput = doc["realtimeInput"].to<JsonObject>();
+                          JsonArray mediaChunks = realtimeInput["mediaChunks"].to<JsonArray>();
+                          JsonObject chunk = mediaChunks.add<JsonObject>();
+                          chunk["mimeType"] = "audio/pcm;rate=16000";
+                          chunk["data"] = b64_str;
+
+                          String out;
+                          serializeJson(doc, out);
+                          ws.sendTXT(out);
+                      }
+                  }
+              }
+
               delay(5);
           }
           EOF
@@ -376,13 +455,13 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v34-live-minimal-0x0.bin \
+            -o package_bin/gemini-v35-live-ptt-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v34-live-minimal
-          path: package_bin/gemini-v34-live-minimal-0x0.bin
+          name: gemini-v35-live-ptt
+          path: package_bin/gemini-v35-live-ptt-0x0.bin
           if-no-files-found: error
