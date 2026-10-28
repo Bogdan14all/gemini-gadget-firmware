@@ -1,4 +1,4 @@
-name: Build Gemini OS - v32 Gemini Live (Push to Talk)
+name: Build Gemini OS - v32 Gemini Live PTT
 
 on:
   workflow_dispatch:
@@ -147,7 +147,7 @@ jobs:
               f.write(i2c_init_func)
           PYEOF
 
-      - name: Create secrets.h from GitHub Secrets
+      - name: Create secrets.h
         shell: bash
         run: |
           echo "#pragma once" > sketch/secrets.h
@@ -155,7 +155,7 @@ jobs:
           echo "#define SECRET_WIFI_SSID \"${{ secrets.WIFI_SSID || 'TP-Link_2.4G_9318_Guest' }}\"" >> sketch/secrets.h
           echo "#define SECRET_WIFI_PASS \"${{ secrets.WIFI_PASSWORD || 'revelion' }}\"" >> sketch/secrets.h
 
-      - name: Write sketch.ino (Push-to-Talk Fixed)
+      - name: Write sketch.ino
         shell: bash
         run: |
           I2C_FUNC=$(cat sketch/i2c_func.txt)
@@ -171,7 +171,6 @@ jobs:
           #include <ArduinoJson.h>
           #include <base64.h>
           #include "mbedtls/base64.h"
-
           #include "secrets.h"
 
           extern "C" {
@@ -192,13 +191,11 @@ jobs:
           esp_io_expander_handle_t io_expander = NULL;
           WebSocketsClient ws;
 
-          // State: 0=Init, 1=WiFi/WS, 2=Waiting Setup, 3=READY
           volatile int g_state = 0;
           volatile int g_rx_kb = 0;
           volatile int g_tx_kb = 0;
           volatile int g_peak  = 0;
           
-          // Unified flags
           bool is_recording = false;
           bool is_playing = false;
           bool ws_ready = false;
@@ -304,19 +301,24 @@ jobs:
                   case WStype_CONNECTED: {
                       Serial.println("[WS] CONNECTED");
                       g_state = 2;
-                      JsonDocument doc;
-                      doc["setup"]["model"] = "models/gemini-2.0-flash-exp";
-                      doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
-                      doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Aoede";
                       
-                      JsonObject sysInst = doc["setup"]["systemInstruction"].to<JsonObject>();
-                      sysInst["role"] = "user";
+                      JsonDocument doc;
+                      JsonObject setupObj = doc["setup"].to<JsonObject>();
+                      setupObj["model"] = "models/gemini-2.0-flash-exp";
+                      
+                      JsonArray respMod = setupObj["generationConfig"]["responseModalities"].to<JsonArray>();
+                      respMod.add("AUDIO");
+                      
+                      setupObj["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Aoede";
+                      
+                      JsonObject sysInst = setupObj["systemInstruction"].to<JsonObject>();
                       JsonObject p = sysInst["parts"].to<JsonArray>().add<JsonObject>();
                       p["text"] = "Răspunde scurt și concis în limba română.";
                       
                       String out;
                       serializeJson(doc, out);
                       ws.sendTXT(out);
+                      Serial.printf("[WS] Setup sent: %s\n", out.c_str());
                       break;
                   }
                   case WStype_DISCONNECTED:
@@ -384,18 +386,9 @@ jobs:
                       lv_obj_set_style_text_color(lbl_state, c, 0);
                   }
               }
-              if (lbl_rx) {
-                  char b[32]; snprintf(b, sizeof(b), "RX: %d KB", g_rx_kb);
-                  lv_label_set_text(lbl_rx, b);
-              }
-              if (lbl_tx) {
-                  char b[32]; snprintf(b, sizeof(b), "TX: %d KB", g_tx_kb);
-                  lv_label_set_text(lbl_tx, b);
-              }
-              if (lbl_peak) {
-                  char b[32]; snprintf(b, sizeof(b), "Peak: %d", g_peak);
-                  lv_label_set_text(lbl_peak, b);
-              }
+              if (lbl_rx) { char b[32]; snprintf(b, sizeof(b), "RX: %d KB", g_rx_kb); lv_label_set_text(lbl_rx, b); }
+              if (lbl_tx) { char b[32]; snprintf(b, sizeof(b), "TX: %d KB", g_tx_kb); lv_label_set_text(lbl_tx, b); }
+              if (lbl_peak) { char b[32]; snprintf(b, sizeof(b), "Peak: %d", g_peak); lv_label_set_text(lbl_peak, b); }
           }
 
           void build_ui() {
@@ -476,19 +469,16 @@ jobs:
               Serial.println("[WiFi] Connecting...");
 
               int tries = 0;
-              while (WiFi.status() != WL_CONNECTED && tries < 30) {
-                  delay(500);
-                  Serial.print(".");
-                  tries++;
-              }
-              Serial.println();
+              while (WiFi.status() != WL_CONNECTED && tries < 30) { delay(500); tries++; }
+              
               if (WiFi.status() != WL_CONNECTED) {
                   Serial.println("[WiFi] FAILED");
                   return;
               }
               Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
 
-              String path = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + String(GEMINI_API_KEY);
+              // URL corectat v1alpha pentru WebSocket Live API
+              String path = "/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=" + String(GEMINI_API_KEY);
               ws.beginSSL("generativelanguage.googleapis.com", 443, path.c_str());
               ws.onEvent(wsEvent);
               ws.setReconnectInterval(10000);
@@ -597,7 +587,6 @@ jobs:
             -o package_bin/gemini-v32-ptt-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v32-ptt-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
