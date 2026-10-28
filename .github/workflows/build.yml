@@ -1,11 +1,11 @@
-name: Build Gemini OS - v32 Gemini Live (Push to Talk)
+name: Build Gemini OS - v33 Gemini Live (PTT + Fix CLI)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v32 Gemini Live PTT
+    name: Build v33 Gemini Live PTT
     runs-on: ubuntu-latest
 
     steps:
@@ -25,10 +25,11 @@ jobs:
           pip install "esptool<5"
           sudo apt-get update && sudo apt-get install -y zip
 
-      - name: Setup Arduino CLI & ESP32 Core
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 Core
         run: |
-          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
-          sudo mv bin/arduino-cli /usr/local/bin/
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
@@ -189,7 +190,6 @@ jobs:
           esp_io_expander_handle_t io_expander = NULL;
           WebSocketsClient ws;
 
-          // State: 0=Init, 1=WiFi/WS, 2=Waiting Setup, 3=READY, 4=RECORDING, 5=PLAYING
           volatile int g_state = 0;
           volatile int g_rx_kb = 0;
           volatile int g_tx_kb = 0;
@@ -298,7 +298,6 @@ jobs:
                       Serial.println("[WS] CONNECTED");
                       g_state = 2;
                       JsonDocument doc;
-                      // Model 2.0 cu structura camelCase
                       doc["setup"]["model"] = "models/gemini-2.0-flash-exp";
                       doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
                       doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Puck";
@@ -319,7 +318,6 @@ jobs:
                       break;
                   }
                   case WStype_BIN: {
-                      // Fallback pentru date binare directe
                       is_playing = true;
                       int mono_count = len / 2;
                       for (int off = 0; off < mono_count; off += 128) {
@@ -346,16 +344,16 @@ jobs:
                   
                   if (!ws_ready) {
                       s = (g_state == 1) ? "WiFi/WS..." : "Waiting Setup";
-                      c = lv_color_hex(0xEAB308); // Yellow
+                      c = lv_color_hex(0xEAB308);
                   } else if (is_recording) {
                       s = "RECORDING";
-                      c = lv_color_hex(0xEF4444); // Red
+                      c = lv_color_hex(0xEF4444);
                   } else if (is_playing) {
                       s = "PLAYING";
-                      c = lv_color_hex(0x22C55E); // Green
+                      c = lv_color_hex(0x22C55E);
                   } else {
                       s = "READY";
-                      c = lv_color_hex(0x38BDF8); // Blue
+                      c = lv_color_hex(0x38BDF8);
                   }
 
                   if (strcmp(lv_label_get_text(lbl_state), s) != 0) {
@@ -428,7 +426,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v32-gemini-live-push-to-talk");
+              Serial.println("\n[BOOT] v33-gemini-live-push-to-talk");
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
               I2C_INIT_CALL
@@ -473,11 +471,9 @@ jobs:
           void loop() {
               ws.loop();
 
-              // Dacă serverul a confirmat setup-ul (ws_ready = true)
               if (ws_ready) {
                   bool btn_pressed = (digitalRead(BOOT_BTN) == LOW);
 
-                  // Dacă butonul este apăsat și nu redăm
                   if (btn_pressed && !is_playing) {
                       if (!is_recording) {
                           is_recording = true;
@@ -496,7 +492,6 @@ jobs:
                           }
                           g_peak = (int)peak;
 
-                          // Downsample 24k -> 16k
                           int out_count = frames * 2 / 3;
                           for (int i = 0; i < out_count; i++) {
                               int src = (i * 3) / 2;
@@ -516,11 +511,9 @@ jobs:
                           }
                       }
                   } else if (!btn_pressed && is_recording) {
-                      // Butonul a fost eliberat
                       is_recording = false;
                       Serial.println("[PTT] Recording stopped, waiting for response...");
                       
-                      // Trimitem un mesaj gol cu turnComplete = true pentru a forța Gemini să răspundă
                       JsonDocument doc;
                       doc["clientContent"]["turns"][0]["role"] = "user";
                       doc["clientContent"]["turns"][0]["parts"][0]["text"] = " ";
@@ -530,7 +523,6 @@ jobs:
                       ws.sendTXT(out);
                   }
 
-                  // Reset is_playing dupa o perioada de liniste
                   if (!is_recording) {
                       static unsigned long last_audio_rx = 0;
                       if (g_rx_kb > 0 && last_audio_rx != g_rx_kb) {
@@ -567,14 +559,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v32-ptt-0x0.bin \
+            -o package_bin/gemini-v33-ptt-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v32-ptt-0x0.bin
+          ls -lh package_bin/gemini-v33-ptt-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v32-ptt
-          path: package_bin/gemini-v32-ptt-0x0.bin
+          name: gemini-v33-ptt
+          path: package_bin/gemini-v33-ptt-0x0.bin
           if-no-files-found: error
