@@ -1,11 +1,11 @@
-name: Build Gemini OS - v37 Gemini Live (Model Valid)
+name: Build Gemini OS - v37 Gemini Live (Native Audio)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v37 Gemini Live PTT
+    name: Build v37 Gemini Live
     runs-on: ubuntu-latest
 
     steps:
@@ -35,7 +35,7 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
-      - name: Install libraries (LVGL 8.3.11 + WebSockets + ArduinoJson)
+      - name: Install libraries
         shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
@@ -154,15 +154,13 @@ jobs:
           echo "#pragma once" > sketch/secrets.h
           echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
 
-      - name: Write sketch.ino (Model 2.5 + PTT)
+      - name: Write sketch.ino (Native Audio 2.5 + PTT)
         shell: bash
         run: |
           I2C_FUNC=$(cat sketch/i2c_func.txt)
           python3 - << PYEOF
           import textwrap
-
           i2c_init = "$I2C_FUNC"
-
           code = textwrap.dedent(r'''
           #include <Arduino.h>
           #include <WiFi.h>
@@ -170,7 +168,6 @@ jobs:
           #include <ArduinoJson.h>
           #include <base64.h>
           #include <mbedtls/base64.h>
-
           #include "secrets.h"
 
           extern "C" {
@@ -191,7 +188,7 @@ jobs:
           esp_io_expander_handle_t io_expander = NULL;
           WebSocketsClient ws;
 
-          volatile int g_state = 0;
+          volatile int g_state = 0; // 0=init, 1=wifi, 2=wait_setup, 3=live
           volatile int g_rx_kb = 0;
           volatile int g_tx_kb = 0;
           volatile int g_peak  = 0;
@@ -208,6 +205,7 @@ jobs:
           static int16_t buf_mono_24k[512];
           static int16_t buf_mono_16k[341];
           static int16_t buf_out_stereo[256];
+          static uint8_t buf_rx_raw[16384];
 
           void tca9554_init_local() {
               i2c_master_bus_handle_t bus;
@@ -215,7 +213,6 @@ jobs:
               esp_io_expander_new_i2c_tca9554(bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander);
               esp_io_expander_set_dir(io_expander, IO_EXPANDER_PIN_NUM_7, IO_EXPANDER_OUTPUT);
               esp_io_expander_set_level(io_expander, IO_EXPANDER_PIN_NUM_7, 1);
-              Serial.println("[TCA] Codec reset released");
           }
 
           void audio_init_local() {
@@ -229,7 +226,6 @@ jobs:
               ESP_ERROR_CHECK(init_codec(&cfg));
               playback = get_playback_handle();
               record   = get_record_handle();
-              Serial.println("[AUDIO] Codec initialized");
           }
 
           void audio_open_local() {
@@ -241,59 +237,51 @@ jobs:
               fs.bits_per_sample = 16;
               esp_codec_dev_open(playback, &fs);
               esp_codec_dev_open(record, &fs);
-              Serial.println("[AUDIO] Opened @24kHz stereo");
           }
 
-          void parse_server_audio(const char* payload, size_t len) {
+          void parse_server_message(const char* payload, size_t len) {
               JsonDocument doc;
               DeserializationError err = deserializeJson(doc, payload, len);
               if (err) return;
 
               if (doc["setupComplete"].is<JsonObject>()) {
-                  Serial.println("[WS] >>> SETUP COMPLETE! Ready for PTT <<<");
+                  Serial.println("[WS] >>> SETUP COMPLETE! Suntem LIVE! <<<");
                   ws_ready = true;
-                  if (g_state == 2) g_state = 3;
+                  g_state = 3;
                   return;
               }
 
               JsonObject serverContent = doc["serverContent"];
-              if (serverContent.isNull()) return;
-              JsonObject modelTurn = serverContent["modelTurn"];
-              if (modelTurn.isNull()) return;
-              JsonArray parts = modelTurn["parts"];
-              if (parts.isNull()) return;
-
-              is_playing = true;
-
-              for (JsonObject part : parts) {
-                  JsonObject inlineData = part["inlineData"];
-                  if (inlineData.isNull()) continue;
-                  const char* data = inlineData["data"];
-                  if (!data) continue;
-
-                  size_t b64_len = strlen(data);
-                  size_t out_len = 0;
-                  size_t max_out = (b64_len * 3) / 4 + 4;
-                  uint8_t* decoded_buf = (uint8_t*)malloc(max_out);
-                  if (!decoded_buf) continue;
-
-                  int ret = mbedtls_base64_decode(decoded_buf, max_out, &out_len, (const unsigned char*)data, b64_len);
-                  if (ret == 0 && out_len > 0) {
-                      int16_t* pcm = (int16_t*)decoded_buf;
-                      int samples = out_len / sizeof(int16_t);
-                      for (int off = 0; off < samples; off += 128) {
-                          int n = samples - off;
-                          if (n > 128) n = 128;
-                          int16_t* src = pcm + off;
-                          for (int i = 0; i < n; i++) {
-                              buf_out_stereo[i*2]   = src[i];
-                              buf_out_stereo[i*2+1] = src[i];
+              if (!serverContent.isNull()) {
+                  JsonObject modelTurn = serverContent["modelTurn"];
+                  JsonArray parts = modelTurn["parts"];
+                  if (!parts.isNull()) {
+                      is_playing = true;
+                      for (JsonObject part : parts) {
+                          JsonObject inlineData = part["inlineData"];
+                          if (!inlineData.isNull()) {
+                              const char* b64_data = inlineData["data"];
+                              if (b64_data) {
+                                  size_t b64_len = strlen(b64_data);
+                                  size_t olen = 0;
+                                  if (mbedtls_base64_decode(buf_rx_raw, sizeof(buf_rx_raw), &olen, (const unsigned char*)b64_data, b64_len) == 0 && olen > 0) {
+                                      int mono_count = olen / 2;
+                                      int16_t *src = (int16_t*)buf_rx_raw;
+                                      for (int off = 0; off < mono_count; off += 128) {
+                                          int n = mono_count - off;
+                                          if (n > 128) n = 128;
+                                          for (int i = 0; i < n; i++) {
+                                              buf_out_stereo[i * 2]     = src[off + i];
+                                              buf_out_stereo[i * 2 + 1] = src[off + i];
+                                          }
+                                          esp_codec_dev_write(playback, buf_out_stereo, n * 4);
+                                      }
+                                      g_rx_kb += olen / 1024;
+                                  }
+                              }
                           }
-                          esp_codec_dev_write(playback, buf_out_stereo, n * 4);
                       }
-                      g_rx_kb += out_len / 1024;
                   }
-                  free(decoded_buf);
               }
           }
 
@@ -302,14 +290,23 @@ jobs:
                   case WStype_CONNECTED: {
                       Serial.println("[WS] CONNECTED");
                       g_state = 2;
+                      delay(500); // Stabilizare buffer SSL înainte de payload-ul mare
+
                       JsonDocument doc;
-                      // Model corect și actual pentru Google AI Studio
-                      doc["setup"]["model"] = "models/gemini-2.5-flash-native-audio-preview-12-2025";
-                      doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
-                      doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Puck";
-                      // systemInstruction ca obiect cu parts (format robust)
-                      doc["setup"]["systemInstruction"]["parts"][0]["text"] = "Raspunde scurt si concis in limba romana.";
+                      JsonObject setupObj = doc["setup"].to<JsonObject>();
                       
+                      // 1. Modelul corect pentru Native Audio API
+                      setupObj["model"] = "models/gemini-2.5-flash-native-audio-preview-12-2025";
+                      
+                      // 2. Structura corectă a generării
+                      JsonObject genCfg = setupObj["generationConfig"].to<JsonObject>();
+                      genCfg["responseModalities"][0] = "AUDIO";
+                      genCfg["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Aoede";
+                      
+                      // 3. Sistem Instruction curățat (fără cheia role)
+                      JsonObject sysInst = setupObj["systemInstruction"].to<JsonObject>();
+                      sysInst["parts"][0]["text"] = "Raspunde mereu foarte scurt in limba romana, fara diacritice.";
+
                       String out;
                       serializeJson(doc, out);
                       ws.sendTXT(out);
@@ -321,26 +318,16 @@ jobs:
                       ws_ready = false;
                       g_state = 1;
                       break;
+
                   case WStype_TEXT: {
-                      parse_server_audio((const char*)payload, len);
+                      parse_server_message((const char*)payload, len);
                       break;
                   }
-                  case WStype_BIN: {
-                      is_playing = true;
-                      int mono_count = len / 2;
-                      for (int off = 0; off < mono_count; off += 128) {
-                          int n = mono_count - off;
-                          if (n > 128) n = 128;
-                          int16_t *src = (int16_t*)payload + off;
-                          for (int i = 0; i < n; i++) {
-                              buf_out_stereo[i*2]   = src[i];
-                              buf_out_stereo[i*2+1] = src[i];
-                          }
-                          esp_codec_dev_write(playback, buf_out_stereo, n * 4);
-                      }
-                      g_rx_kb += len / 1024;
+                  
+                  case WStype_ERROR:
+                      Serial.printf("[WS] ERROR: %.*s\n", (int)len, payload);
                       break;
-                  }
+
                   default: break;
               }
           }
@@ -369,18 +356,9 @@ jobs:
                       lv_obj_set_style_text_color(lbl_state, c, 0);
                   }
               }
-              if (lbl_rx) {
-                  char b[32]; snprintf(b, sizeof(b), "RX: %d KB", g_rx_kb);
-                  lv_label_set_text(lbl_rx, b);
-              }
-              if (lbl_tx) {
-                  char b[32]; snprintf(b, sizeof(b), "TX: %d KB", g_tx_kb);
-                  lv_label_set_text(lbl_tx, b);
-              }
-              if (lbl_peak) {
-                  char b[32]; snprintf(b, sizeof(b), "Peak: %d", g_peak);
-                  lv_label_set_text(lbl_peak, b);
-              }
+              if (lbl_rx) { char b[32]; snprintf(b, sizeof(b), "RX: %d KB", g_rx_kb); lv_label_set_text(lbl_rx, b); }
+              if (lbl_tx) { char b[32]; snprintf(b, sizeof(b), "TX: %d KB", g_tx_kb); lv_label_set_text(lbl_tx, b); }
+              if (lbl_peak){ char b[32]; snprintf(b, sizeof(b), "Peak: %d", g_peak); lv_label_set_text(lbl_peak, b); }
           }
 
           void build_ui() {
@@ -391,16 +369,10 @@ jobs:
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Gemini PTT");
+              lv_label_set_text(title, "Gemini Live 2.5 Native");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
               lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
-
-              lv_obj_t *hint = lv_label_create(scr);
-              lv_label_set_text(hint, "Hold BOOT to talk");
-              lv_obj_set_style_text_color(hint, lv_color_hex(0x94A3B8), 0);
-              lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
-              lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 65);
 
               lbl_state = lv_label_create(scr);
               lv_label_set_text(lbl_state, "Init");
@@ -428,22 +400,19 @@ jobs:
 
               lvgl_port_unlock();
               lv_timer_create(ui_timer_cb, 100, NULL);
-              Serial.println("[UI] Built");
           }
 
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v37-gemini-live-model-valid");
+              Serial.println("\n[BOOT] v37-gemini-live-2.5-native");
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
-              I2C_INIT_CALL
+              I2C_INIT_CALL;
               delay(50);
-
               lvgl_port_init();
               delay(300);
               build_ui();
-
               tca9554_init_local();
               delay(100);
               audio_init_local();
@@ -454,26 +423,16 @@ jobs:
               g_state = 1;
               WiFi.mode(WIFI_STA);
               WiFi.begin(WIFI_SSID, WIFI_PASS);
-              Serial.println("[WiFi] Connecting...");
 
               int tries = 0;
-              while (WiFi.status() != WL_CONNECTED && tries < 30) {
-                  delay(500);
-                  Serial.print(".");
-                  tries++;
-              }
-              Serial.println();
-              if (WiFi.status() != WL_CONNECTED) {
-                  Serial.println("[WiFi] FAILED");
-                  return;
-              }
+              while (WiFi.status() != WL_CONNECTED && tries < 30) { delay(500); tries++; }
+              if (WiFi.status() != WL_CONNECTED) return;
               Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
 
               String path = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + String(GEMINI_API_KEY);
               ws.beginSSL("generativelanguage.googleapis.com", 443, path.c_str());
               ws.onEvent(wsEvent);
               ws.setReconnectInterval(10000);
-              Serial.println("[WS] Connecting...");
           }
 
           void loop() {
@@ -510,9 +469,11 @@ jobs:
                           String b64_str = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
                           if (b64_str.length() > 0) {
                               JsonDocument doc;
-                              // Folosim noul format audio (recomandat pentru 2.5)
-                              doc["realtimeInput"]["audio"]["mimeType"] = "audio/pcm;rate=16000";
-                              doc["realtimeInput"]["audio"]["data"] = b64_str;
+                              // Formatul exact de payload pentru modelul 2.5: realtimeInput.audio
+                              JsonObject audioObj = doc["realtimeInput"]["audio"].to<JsonObject>();
+                              audioObj["mimeType"] = "audio/pcm;rate=16000";
+                              audioObj["data"] = b64_str;
+
                               String out;
                               serializeJson(doc, out);
                               ws.sendTXT(out);
@@ -521,11 +482,9 @@ jobs:
                       }
                   } else if (!btn_pressed && is_recording) {
                       is_recording = false;
-                      Serial.println("[PTT] Recording stopped, waiting for response...");
+                      Serial.println("[PTT] Recording stopped, triggering turnComplete");
                       
                       JsonDocument doc;
-                      doc["clientContent"]["turns"][0]["role"] = "user";
-                      doc["clientContent"]["turns"][0]["parts"][0]["text"] = " ";
                       doc["clientContent"]["turnComplete"] = true;
                       String out;
                       serializeJson(doc, out);
@@ -546,12 +505,9 @@ jobs:
               delay(10);
           }
           ''')
-
-          code = code.replace("I2C_INIT_CALL", f"{i2c_init}();")
-
+          code = code.replace("I2C_INIT_CALL", f"{i2c_init}()")
           with open("sketch/sketch.ino", "w", encoding="utf-8") as f:
               f.write(code.lstrip())
-          print("[OK] sketch.ino written")
           PYEOF
 
       - name: Compile
@@ -568,14 +524,13 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v37-ptt-0x0.bin \
+            -o package_bin/gemini-v37-live-native-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v37-ptt-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v37-ptt
-          path: package_bin/gemini-v37-ptt-0x0.bin
+          name: gemini-v37-live-native
+          path: package_bin/gemini-v37-live-native-0x0.bin
           if-no-files-found: error
