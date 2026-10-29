@@ -1,11 +1,11 @@
-name: Build Gemini OS - v41 REST Audio Test (PSRAM Fix)
+name: Build Gemini OS - v42 Auto Text-to-Audio Test
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v41 REST Audio Test
+    name: Build v42 Auto Audio Test
     runs-on: ubuntu-latest
 
     steps:
@@ -153,7 +153,7 @@ jobs:
           echo "#pragma once" > sketch/secrets.h
           echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
 
-      - name: Write sketch.ino (REST Audio Test - PSRAM Fix)
+      - name: Write sketch.ino (Auto Text-to-Audio)
         shell: bash
         run: |
           I2C_FUNC=$(cat sketch/i2c_func.txt)
@@ -181,7 +181,6 @@ jobs:
           #include "src/tca9554/esp_io_expander_tca9554.h"
           }
 
-          #define BOOT_BTN 0
           const char* WIFI_SSID = "TP-Link_2.4G_9318_Guest";
           const char* WIFI_PASS = "revelion";
           const char* GEMINI_API_KEY = SECRET_GEMINI_API_KEY;
@@ -190,23 +189,12 @@ jobs:
           esp_codec_dev_handle_t record = NULL;
           esp_io_expander_handle_t io_expander = NULL;
 
-          volatile int g_state = 0;
+          volatile int g_state = 0; // 0=Init, 1=WiFi, 2=Ready, 3=Uploading, 4=Playing, 5=Done
           volatile int g_rx_kb = 0;
-          volatile int g_tx_kb = 0;
-          volatile int g_peak  = 0;
 
           lv_obj_t *lbl_state = NULL;
           lv_obj_t *lbl_rx    = NULL;
-          lv_obj_t *lbl_tx    = NULL;
-          lv_obj_t *lbl_peak  = NULL;
 
-          #define RECORD_SECONDS 3
-          #define SAMPLE_RATE 16000
-          #define RECORD_SAMPLES (RECORD_SECONDS * SAMPLE_RATE)
-
-          // Pointer pentru bufferul audio (va fi alocat in PSRAM)
-          int16_t* rec_buffer = NULL;
-          static int16_t buf_in_stereo[1024];
           static int16_t buf_out_stereo[256];
 
           void tca9554_init_local() {
@@ -234,59 +222,29 @@ jobs:
 
           void audio_open_local() {
               esp_codec_dev_set_out_vol(playback, 100.0);
-              esp_codec_dev_set_in_gain(record, 35.0);
               esp_codec_dev_sample_info_t fs = {};
               fs.sample_rate = 24000;
               fs.channel = 2;
               fs.bits_per_sample = 16;
               esp_codec_dev_open(playback, &fs);
-              esp_codec_dev_open(record, &fs);
-              Serial.println("[AUDIO] Opened @24kHz stereo");
+              // Nu deschidem record aici, nu avem nevoie de microfon
+              Serial.println("[AUDIO] Playback opened @24kHz stereo");
           }
 
-          void record_audio() {
-              int samples_recorded = 0;
-              while (samples_recorded < RECORD_SAMPLES) {
-                  int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
-                  if (r == ESP_OK) {
-                      int frames = (sizeof(buf_in_stereo)/sizeof(int16_t)) / 2;
-                      for (int i = 0; i < frames && samples_recorded < RECORD_SAMPLES; i++) {
-                          // Downsample 24k -> 16k
-                          if (i % 3 != 2) {
-                              int16_t s = buf_in_stereo[i*2];
-                              rec_buffer[samples_recorded++] = s;
-                          }
-                      }
-                      int32_t peak = 0;
-                      for (int i = 0; i < frames; i++) {
-                          int32_t a = abs(buf_in_stereo[i*2]);
-                          if (a > peak) peak = a;
-                      }
-                      g_peak = (int)peak;
-                  }
-                  delay(1);
-              }
-              g_tx_kb = (RECORD_SAMPLES * 2) / 1024;
-              Serial.printf("[REC] Recorded %d samples (%d KB)\n", samples_recorded, g_tx_kb);
-          }
-
-          void send_rest_request() {
-              g_state = 4;
-              Serial.println("[HTTP] Sending REST request...");
+          void send_test_request() {
+              g_state = 3;
+              Serial.println("[HTTP] Sending TEXT request to Gemini...");
 
               JsonDocument doc;
-              doc["contents"][0]["parts"][0]["text"] = "Ascultă acest audio și răspunde scurt în română.";
-              
-              // Encodare Base64 a bufferului din PSRAM
-              String base64_audio = base64::encode((uint8_t*)rec_buffer, RECORD_SAMPLES * 2);
-              doc["contents"][0]["parts"][1]["inlineData"]["mimeType"] = "audio/pcm;rate=16000";
-              doc["contents"][0]["parts"][1]["inlineData"]["data"] = base64_audio;
+              // Trimitem doar text, cerem raspuns audio
+              doc["contents"][0]["parts"][0]["text"] = "Salut! Spune-mi o gluma scurta in romana.";
               doc["generationConfig"]["responseModalities"][0] = "AUDIO";
 
               String json_payload;
               serializeJson(doc, json_payload);
 
               HTTPClient http;
+              // Folosim modelul stabil
               String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + String(GEMINI_API_KEY);
               
               http.begin(url);
@@ -313,7 +271,7 @@ jobs:
                               int ret = mbedtls_base64_decode(decoded_buf, max_out, &out_len, (const unsigned char*)audio_data, b64_len);
                               if (ret == 0 && out_len > 0) {
                                   g_rx_kb = out_len / 1024;
-                                  g_state = 5;
+                                  g_state = 4;
                                   Serial.printf("[PLAY] Playing %d bytes of audio...\n", out_len);
                                   
                                   int16_t* pcm = (int16_t*)decoded_buf;
@@ -328,11 +286,12 @@ jobs:
                                       }
                                       esp_codec_dev_write(playback, buf_out_stereo, n * 4);
                                   }
+                                  Serial.println("[PLAY] Done.");
                               }
                               free(decoded_buf);
                           }
                       } else {
-                          Serial.println("[JSON] No audio data!");
+                          Serial.println("[JSON] No audio data in response!");
                           Serial.println(response.substring(0, 500));
                       }
                   }
@@ -340,7 +299,7 @@ jobs:
                   Serial.printf("[HTTP] Failed: %s\n", http.errorToString(httpResponseCode).c_str());
               }
               http.end();
-              g_state = 2;
+              g_state = 5; // Stare finala
           }
 
           void ui_timer_cb(lv_timer_t *t) {
@@ -350,10 +309,10 @@ jobs:
                   switch (g_state) {
                       case 0: s = "Init"; c = lv_color_hex(0xFFFFFF); break;
                       case 1: s = "WiFi..."; c = lv_color_hex(0xEAB308); break;
-                      case 2: s = "READY"; c = lv_color_hex(0x38BDF8); break;
-                      case 3: s = "RECORDING"; c = lv_color_hex(0xEF4444); break;
-                      case 4: s = "UPLOADING"; c = lv_color_hex(0xF97316); break;
-                      case 5: s = "PLAYING"; c = lv_color_hex(0x22C55E); break;
+                      case 2: s = "Sending Request"; c = lv_color_hex(0x38BDF8); break;
+                      case 3: s = "Waiting Server"; c = lv_color_hex(0xF97316); break;
+                      case 4: s = "PLAYING"; c = lv_color_hex(0x22C55E); break;
+                      case 5: s = "DONE"; c = lv_color_hex(0xFFFFFF); break;
                   }
                   if (strcmp(lv_label_get_text(lbl_state), s) != 0) {
                       lv_label_set_text(lbl_state, s);
@@ -363,14 +322,6 @@ jobs:
               if (lbl_rx) {
                   char b[32]; snprintf(b, sizeof(b), "RX: %d KB", g_rx_kb);
                   lv_label_set_text(lbl_rx, b);
-              }
-              if (lbl_tx) {
-                  char b[32]; snprintf(b, sizeof(b), "TX: %d KB", g_tx_kb);
-                  lv_label_set_text(lbl_tx, b);
-              }
-              if (lbl_peak) {
-                  char b[32]; snprintf(b, sizeof(b), "Peak: %d", g_peak);
-                  lv_label_set_text(lbl_peak, b);
               }
           }
 
@@ -382,13 +333,13 @@ jobs:
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Gemini REST Test");
+              lv_label_set_text(title, "Auto Audio Test");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
               lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
 
               lv_obj_t *hint = lv_label_create(scr);
-              lv_label_set_text(hint, "Hold BOOT to record 3s");
+              lv_label_set_text(hint, "Asteapta automat...");
               lv_obj_set_style_text_color(hint, lv_color_hex(0x94A3B8), 0);
               lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
               lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 65);
@@ -399,23 +350,11 @@ jobs:
               lv_obj_set_style_text_font(lbl_state, &lv_font_montserrat_28, 0);
               lv_obj_align(lbl_state, LV_ALIGN_CENTER, 0, -60);
 
-              lbl_peak = lv_label_create(scr);
-              lv_label_set_text(lbl_peak, "Peak: 0");
-              lv_obj_set_style_text_color(lbl_peak, lv_color_hex(0x94A3B8), 0);
-              lv_obj_set_style_text_font(lbl_peak, &lv_font_montserrat_16, 0);
-              lv_obj_align(lbl_peak, LV_ALIGN_CENTER, 0, 0);
-
               lbl_rx = lv_label_create(scr);
               lv_label_set_text(lbl_rx, "RX: 0 KB");
               lv_obj_set_style_text_color(lbl_rx, lv_color_hex(0x22C55E), 0);
               lv_obj_set_style_text_font(lbl_rx, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_rx, LV_ALIGN_CENTER, 0, 50);
-
-              lbl_tx = lv_label_create(scr);
-              lv_label_set_text(lbl_tx, "TX: 0 KB");
-              lv_obj_set_style_text_color(lbl_tx, lv_color_hex(0x38BDF8), 0);
-              lv_obj_set_style_text_font(lbl_tx, &lv_font_montserrat_14, 0);
-              lv_obj_align(lbl_tx, LV_ALIGN_CENTER, 0, 80);
+              lv_obj_align(lbl_rx, LV_ALIGN_CENTER, 0, 0);
 
               lvgl_port_unlock();
               lv_timer_create(ui_timer_cb, 100, NULL);
@@ -425,15 +364,8 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v41-REST-audio-test-psram");
+              Serial.println("\n[BOOT] v42-Auto-Text-to-Audio");
 
-              // Alocam bufferul audio in PSRAM
-              rec_buffer = (int16_t*)heap_caps_malloc(RECORD_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-              if (!rec_buffer) {
-                  Serial.println("[FATAL] PSRAM alloc failed!");
-              }
-
-              pinMode(BOOT_BTN, INPUT_PULLUP);
               I2C_INIT_CALL
               delay(50);
 
@@ -465,21 +397,14 @@ jobs:
                   return;
               }
               Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
-              g_state = 2;
+              
+              // Trimitem cererea automat
+              send_test_request();
           }
 
           void loop() {
-              if (g_state == 2 && rec_buffer != NULL) {
-                  bool btn_pressed = (digitalRead(BOOT_BTN) == LOW);
-                  if (btn_pressed) {
-                      g_state = 3;
-                      Serial.println("[PTT] Recording started...");
-                      record_audio();
-                      Serial.println("[PTT] Recording finished. Sending...");
-                      send_rest_request();
-                  }
-              }
-              delay(10);
+              // Totul s-a intamplat in setup(). Nu mai facem nimic in loop.
+              delay(1000);
           }
           ''')
 
@@ -504,14 +429,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v41-rest-0x0.bin \
+            -o package_bin/gemini-v42-auto-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v41-rest-0x0.bin
+          ls -lh package_bin/gemini-v42-auto-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v41-rest
-          path: package_bin/gemini-v41-rest-0x0.bin
+          name: gemini-v42-auto
+          path: package_bin/gemini-v42-auto-0x0.bin
           if-no-files-found: error
