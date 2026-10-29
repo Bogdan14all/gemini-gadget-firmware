@@ -1,11 +1,11 @@
-name: Build Gemini OS - v54 Cloud Proxy Final
+name: Build Gemini OS - v55 Cloud Proxy Debug
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v54 Cloud Proxy
+    name: Build v55 Cloud Proxy Debug
     runs-on: ubuntu-latest
 
     steps:
@@ -172,7 +172,7 @@ jobs:
           const char* WIFI_PASS = "revelion";
           
           // Link-ul tau de la Render
-          const char* CLOUD_URL = "https://gemini-esp32-proxy-lm42.onrender.com/chat";
+          const char* CLOUD_URL = "https://gemini-esp32-proxy-1m42.onrender.com/chat";
 
           lv_obj_t *lbl_status = NULL;
           lv_obj_t *lbl_sent = NULL;
@@ -189,11 +189,11 @@ jobs:
               lvgl_port_unlock();
 
               WiFiClientSecure client;
-              client.setInsecure(); // Acceptăm certificatul SSL al Render
+              client.setInsecure(); 
 
               HTTPClient http;
               http.begin(client, CLOUD_URL);
-              http.setTimeout(60000); // 60 secunde (pentru că serverul poate dormi)
+              http.setTimeout(60000); 
               http.addHeader("Content-Type", "application/json");
 
               JsonDocument doc;
@@ -206,16 +206,27 @@ jobs:
               lvgl_port_lock(100);
               if (httpResponseCode > 0) {
                   String response = http.getString();
+                  Serial.println("[HTTP RAW] " + response); // DEBUG
+
                   JsonDocument respDoc;
-                  deserializeJson(respDoc, response);
-                  const char* text = respDoc["text"];
+                  DeserializationError err = deserializeJson(respDoc, response);
                   
-                  lv_label_set_text(lbl_status, "Succes!");
-                  if (text) lv_label_set_text(lbl_received, text);
-                  else lv_label_set_text(lbl_received, "Eroare parsare.");
+                  if (err) {
+                      lv_label_set_text(lbl_status, "Parse Error");
+                      lv_label_set_text(lbl_received, err.c_str()); // Afișează eroarea exactă
+                  } else {
+                      const char* text = respDoc["text"];
+                      if (text) {
+                          lv_label_set_text(lbl_status, "Succes!");
+                          lv_label_set_text(lbl_received, text);
+                      } else {
+                          lv_label_set_text(lbl_status, "Fara text");
+                          lv_label_set_text(lbl_received, "Raspuns invalid.");
+                      }
+                  }
               } else {
                   lv_label_set_text(lbl_status, "Eroare Cloud");
-                  String err = "Cod: " + String(httpResponseCode) + "\nMai incearca.";
+                  String err = "Cod: " + String(httpResponseCode);
                   lv_label_set_text(lbl_received, err.c_str());
               }
               lvgl_port_unlock();
@@ -276,7 +287,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v54-Cloud-Proxy");
+              Serial.println("\n[BOOT] v55-Cloud-Proxy-Debug");
 
               I2C_INIT_CALL
               delay(50);
@@ -328,14 +339,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v54-cloud-0x0.bin \
+            -o package_bin/gemini-v55-cloud-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v54-cloud-0x0.bin
+          ls -lh package_bin/gemini-v55-cloud-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v54-cloud
-          path: package_bin/gemini-v54-cloud-0x0.bin
+          name: gemini-v55-cloud
+          path: package_bin/gemini-v55-cloud-0x0.bin
           if-no-files-found: error
