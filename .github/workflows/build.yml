@@ -1,11 +1,11 @@
-name: Build Gemini OS - v42 Auto Text-to-Audio Test
+name: Build Gemini OS - v43 REST TTS Audio Test
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v42 Auto Audio Test
+    name: Build v43 REST TTS Audio Test
     runs-on: ubuntu-latest
 
     steps:
@@ -153,7 +153,7 @@ jobs:
           echo "#pragma once" > sketch/secrets.h
           echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
 
-      - name: Write sketch.ino (Auto Text-to-Audio)
+      - name: Write sketch.ino (REST TTS Audio Test)
         shell: bash
         run: |
           I2C_FUNC=$(cat sketch/i2c_func.txt)
@@ -189,7 +189,7 @@ jobs:
           esp_codec_dev_handle_t record = NULL;
           esp_io_expander_handle_t io_expander = NULL;
 
-          volatile int g_state = 0; // 0=Init, 1=WiFi, 2=Ready, 3=Uploading, 4=Playing, 5=Done
+          volatile int g_state = 0;
           volatile int g_rx_kb = 0;
 
           lv_obj_t *lbl_state = NULL;
@@ -227,25 +227,26 @@ jobs:
               fs.channel = 2;
               fs.bits_per_sample = 16;
               esp_codec_dev_open(playback, &fs);
-              // Nu deschidem record aici, nu avem nevoie de microfon
               Serial.println("[AUDIO] Playback opened @24kHz stereo");
           }
 
-          void send_test_request() {
+          void send_tts_request() {
               g_state = 3;
-              Serial.println("[HTTP] Sending TEXT request to Gemini...");
+              Serial.println("[HTTP] Sending TTS request to Gemini 3.8 Flash TTS...");
 
               JsonDocument doc;
-              // Trimitem doar text, cerem raspuns audio
               doc["contents"][0]["parts"][0]["text"] = "Salut! Spune-mi o gluma scurta in romana.";
+              
+              // Configurare pentru TTS
               doc["generationConfig"]["responseModalities"][0] = "AUDIO";
+              doc["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Puck";
 
               String json_payload;
               serializeJson(doc, json_payload);
 
               HTTPClient http;
-              // Folosim modelul stabil
-              String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + String(GEMINI_API_KEY);
+              // Model TTS dedicat
+              String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent?key=" + String(GEMINI_API_KEY);
               
               http.begin(url);
               http.addHeader("Content-Type", "application/json");
@@ -299,7 +300,7 @@ jobs:
                   Serial.printf("[HTTP] Failed: %s\n", http.errorToString(httpResponseCode).c_str());
               }
               http.end();
-              g_state = 5; // Stare finala
+              g_state = 5;
           }
 
           void ui_timer_cb(lv_timer_t *t) {
@@ -309,7 +310,6 @@ jobs:
                   switch (g_state) {
                       case 0: s = "Init"; c = lv_color_hex(0xFFFFFF); break;
                       case 1: s = "WiFi..."; c = lv_color_hex(0xEAB308); break;
-                      case 2: s = "Sending Request"; c = lv_color_hex(0x38BDF8); break;
                       case 3: s = "Waiting Server"; c = lv_color_hex(0xF97316); break;
                       case 4: s = "PLAYING"; c = lv_color_hex(0x22C55E); break;
                       case 5: s = "DONE"; c = lv_color_hex(0xFFFFFF); break;
@@ -333,16 +333,10 @@ jobs:
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Auto Audio Test");
+              lv_label_set_text(title, "Gemini TTS Test");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
               lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
-
-              lv_obj_t *hint = lv_label_create(scr);
-              lv_label_set_text(hint, "Asteapta automat...");
-              lv_obj_set_style_text_color(hint, lv_color_hex(0x94A3B8), 0);
-              lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
-              lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 65);
 
               lbl_state = lv_label_create(scr);
               lv_label_set_text(lbl_state, "Init");
@@ -364,7 +358,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v42-Auto-Text-to-Audio");
+              Serial.println("\n[BOOT] v43-REST-TTS-Test");
 
               I2C_INIT_CALL
               delay(50);
@@ -398,12 +392,10 @@ jobs:
               }
               Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
               
-              // Trimitem cererea automat
-              send_test_request();
+              send_tts_request();
           }
 
           void loop() {
-              // Totul s-a intamplat in setup(). Nu mai facem nimic in loop.
               delay(1000);
           }
           ''')
@@ -429,14 +421,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v42-auto-0x0.bin \
+            -o package_bin/gemini-v43-tts-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v42-auto-0x0.bin
+          ls -lh package_bin/gemini-v43-tts-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v42-auto
-          path: package_bin/gemini-v42-auto-0x0.bin
+          name: gemini-v43-tts
+          path: package_bin/gemini-v43-tts-0x0.bin
           if-no-files-found: error
