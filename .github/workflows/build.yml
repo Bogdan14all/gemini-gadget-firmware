@@ -235,18 +235,19 @@ jobs:
               Serial.println("[HTTP] Sending TTS request to Gemini 3.8 Flash TTS...");
 
               JsonDocument doc;
-              doc["contents"][0]["parts"][0]["text"] = "Salut! Spune-mi o gluma scurta in romana.";
-              
-              // Configurare pentru TTS
-              doc["generationConfig"]["responseModalities"][0] = "AUDIO";
-              doc["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Puck";
+              doc["model"] = "gemini-3.8-flash-tts";
+              doc["input"][0]["type"] = "user_input";
+              doc["input"][0]["content"][0]["type"] = "text";
+              doc["input"][0]["content"][0]["text"] = "Salut! Spune-mi o gluma scurta in romana.";
+              doc["response_format"]["type"] = "audio";
+              doc["generation_config"]["speech_config"][0]["voice"] = "Kore";
 
               String json_payload;
               serializeJson(doc, json_payload);
 
               HTTPClient http;
-              // Model TTS dedicat
-              String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent?key=" + String(GEMINI_API_KEY);
+              // Noul endpoint pentru TTS
+              String url = "https://generativelanguage.googleapis.com/v1beta/interactions?key=" + String(GEMINI_API_KEY);
               
               http.begin(url);
               http.addHeader("Content-Type", "application/json");
@@ -262,7 +263,23 @@ jobs:
                   if (err) {
                       Serial.printf("[JSON] Parse error: %s\n", err.c_str());
                   } else {
-                      const char* audio_data = respDoc["candidates"][0]["content"]["parts"][0]["inlineData"]["data"];
+                      // Parsăm noul format de răspuns (steps -> model_output -> content -> audio)
+                      const char* audio_data = nullptr;
+                      JsonArray steps = respDoc["steps"];
+                      if (!steps.isNull()) {
+                          for (JsonObject step : steps) {
+                              if (step["type"] == "model_output") {
+                                  JsonArray content = step["content"];
+                                  for (JsonObject item : content) {
+                                      if (item["type"] == "audio") {
+                                          audio_data = item["data"];
+                                          break;
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
                       if (audio_data) {
                           size_t b64_len = strlen(audio_data);
                           size_t out_len = 0;
@@ -275,8 +292,13 @@ jobs:
                                   g_state = 4;
                                   Serial.printf("[PLAY] Playing %d bytes of audio...\n", out_len);
                                   
-                                  int16_t* pcm = (int16_t*)decoded_buf;
-                                  int samples = out_len / sizeof(int16_t);
+                                  // Răspunsul este WAV (cu header RIFF). Sărim peste header (44 bytes)
+                                  // și redăm doar datele PCM.
+                                  int header_size = 44;
+                                  if (out_len < header_size) header_size = 0;
+                                  int16_t* pcm = (int16_t*)(decoded_buf + header_size);
+                                  int samples = (out_len - header_size) / sizeof(int16_t);
+                                  
                                   for (int off = 0; off < samples; off += 128) {
                                       int n = samples - off;
                                       if (n > 128) n = 128;
