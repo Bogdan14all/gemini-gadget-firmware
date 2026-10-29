@@ -1,11 +1,11 @@
-name: Build Gemini OS - v52 Cloud Proxy
+name: Build Gemini OS - v54 Cloud Proxy Final
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v52 Cloud Proxy
+    name: Build v54 Cloud Proxy
     runs-on: ubuntu-latest
 
     steps:
@@ -171,8 +171,8 @@ jobs:
           const char* WIFI_SSID = "TP-Link_2.4G_9318_Guest";
           const char* WIFI_PASS = "revelion";
           
-          // ⚠️ ÎNLOCUIEȘTE CU URL-UL TĂU DE LA RENDER
-          const char* CLOUD_URL = "https://gemini-proxy-xxxx.onrender.com/chat";
+          // Link-ul tau de la Render
+          const char* CLOUD_URL = "https://gemini-esp32-proxy-lm42.onrender.com/chat";
 
           lv_obj_t *lbl_status = NULL;
           lv_obj_t *lbl_sent = NULL;
@@ -189,11 +189,11 @@ jobs:
               lvgl_port_unlock();
 
               WiFiClientSecure client;
-              client.setInsecure(); // Acceptăm certificatul SSL pentru test
+              client.setInsecure(); // Acceptăm certificatul SSL al Render
 
               HTTPClient http;
               http.begin(client, CLOUD_URL);
-              http.setTimeout(30000); // 30 secunde, Render poate fi lent la "trezire"
+              http.setTimeout(60000); // 60 secunde (pentru că serverul poate dormi)
               http.addHeader("Content-Type", "application/json");
 
               JsonDocument doc;
@@ -212,10 +212,10 @@ jobs:
                   
                   lv_label_set_text(lbl_status, "Succes!");
                   if (text) lv_label_set_text(lbl_received, text);
-                  else lv_label_set_text(lbl_received, "Eroare la parsare.");
+                  else lv_label_set_text(lbl_received, "Eroare parsare.");
               } else {
                   lv_label_set_text(lbl_status, "Eroare Cloud");
-                  String err = "Cod: " + String(httpResponseCode);
+                  String err = "Cod: " + String(httpResponseCode) + "\nMai incearca.";
                   lv_label_set_text(lbl_received, err.c_str());
               }
               lvgl_port_unlock();
@@ -276,7 +276,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v52-Cloud-Proxy");
+              Serial.println("\n[BOOT] v54-Cloud-Proxy");
 
               I2C_INIT_CALL
               delay(50);
@@ -328,14 +328,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v52-cloud-0x0.bin \
+            -o package_bin/gemini-v54-cloud-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v52-cloud-0x0.bin
+          ls -lh package_bin/gemini-v54-cloud-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v52-cloud
-          path: package_bin/gemini-v52-cloud-0x0.bin
+          name: gemini-v54-cloud
+          path: package_bin/gemini-v54-cloud-0x0.bin
           if-no-files-found: error
