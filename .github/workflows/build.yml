@@ -1,11 +1,11 @@
-name: Build Gemini OS - v67 Text-In Text-Out AI Test
+name: Build Gemini OS - v50 Proxy Test
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v67
+    name: Build v50 Proxy Test
     runs-on: ubuntu-latest
 
     steps:
@@ -25,19 +25,23 @@ jobs:
           pip install "esptool<5"
           sudo apt-get update && sudo apt-get install -y zip
 
-      - name: Setup Arduino CLI & ESP32 Core
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 Core
         run: |
-          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
-          sudo mv bin/arduino-cli /usr/local/bin/
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
-      - name: Install LVGL 8.3.11 & ArduinoJson 7
+      - name: Install libraries (LVGL 8.3.11 + ArduinoJson)
         shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
+          if [ -d "Arduino_Libraries" ]; then
+            cp -r Arduino_Libraries/* ~/Arduino/libraries/ 2>/dev/null || true
+          fi
           arduino-cli lib install "lvgl"@8.3.11
           arduino-cli lib install "ArduinoJson"@7.0.4
 
@@ -56,37 +60,276 @@ jobs:
           #define LV_FONT_MONTSERRAT_20 1
           #define LV_FONT_MONTSERRAT_28 1
           #define LV_FONT_DEFAULT &lv_font_montserrat_20
-          #define LV_USE_TEXTAREA 1
-          #define LV_USE_BTN 1
-          #define LV_USE_LABEL 1
           #define LV_USE_DEMO_WIDGETS 0
+          #define LV_USE_DEMO_MUSIC 0
+          #define LV_USE_DEMO_BENCHMARK 0
+          #define LV_USE_DEMO_STRESS 0
+          #define LV_USE_LOG 0
           #endif
           EOF
+          sed -i 's/^[ \t]*//' ~/Arduino/libraries/lv_conf.h
 
-      - name: Inject Sketch
+      - name: Copy 08_Audio_Test as base & Patch
         shell: bash
         run: |
-          SKETCH_PATH="Examples/Arduino/08_Audio_Test/08_Audio_Test.ino"
-          echo "I2luY2x1ZGUgPEFyZHVpbm8uaD4KI2luY2x1ZGUgPFdpRmkuaD4KI2luY2x1ZGUgPFdpRmlDbGllbnRTZWN1cmUuaD4KI2luY2x1ZGUgPEhUVFBDbGllbnQuaD4KI2luY2x1ZGUgPEFyZHVpbm9Kc29uLmg+CmV4dGVybiAiQyIgewojaW5jbHVkZSAiaTJjX2JzcC5oIgojaW5jbHVkZSAibHZnbF9wb3J0LmgiCn0KI2luY2x1ZGUgPGx2Z2wuaD4KCiNkZWZpbmUgTENEX0JMICAgIDQyCiNkZWZpbmUgQk9PVF9CVE4gIDAKI2RlZmluZSBQV1JfQlROICAgMTYKCmNvbnN0IGNoYXIqIHdpZmlfc3NpZCA9ICJZT1VSX1dJRklfU1NJRCI7CmNvbnN0IGNoYXIqIHdpZmlfcGFzcyA9ICJZT1VSX1dJRklfUEFTUyI7CmNvbnN0IGNoYXIqIGdlbWluaV9rZXkgPSAiWU9VUl9HRU1JTklfS0VZIjsKbHZfb2JqX3QgKmxibF90aXRsZSAgID0gTlVMTDsKbHZfb2JqX3QgKmxibF93aWZpICAgID0gTlVMTDsKbHZfb2JqX3QgKmxibF9zdGF0dXMgID0gTlVMTDsKbHZfb2JqX3QgKnRhX3NlbnQgICAgID0gTlVMTDsKbHZfb2JqX3QgKnRhX3JlY3YgICAgID0gTlVMTDsKbHZfb2JqX3QgKmJ0bl9zZW5kICAgID0gTlVMTDsKY2hhciBidWZfc2VudFsyNTZdICAgPSAiRVU6IFNhbHV0ISI7CmNoYXIgYnVmX3JlY3ZbMTAyNF0gID0gIkdFTUlOSTogQXN0ZXB0IGNlcmVyZS4uLiI7CmNoYXIgYnVmX3N0YXR1c1s2NF0gID0gIlN0YXR1czogSW5hY3RpdiI7CmNoYXIgYnVmX3dpZmlbNjRdICAgID0gIldpRmk6IERlY29uZWN0YXQiOwp2b2xhdGlsZSBib29sIHNlbmRpbmcgPSBmYWxzZTsKdm9pZCBkb19yZXF1ZXN0KGNvbnN0IGNoYXIqIHByb21wdCk7CnN0YXRpYyB2b2lkIGJ0bl9jYihsdl9ldmVudF90ICplKSB7CiAgICBpZiAobHZfZXZlbnRfZ2V0X2NvZGUoZSkgPT0gTFZfRVZFTlRfQ0xJQ0tFRCAmJiAhc2VuZGluZykgewogICAgICAgIGRvX3JlcXVlc3QoIlNhbHV0IEdlbWluaSEgU3B1bmUgdW4gYmFuYyBzY3VydCBkZXNwcmUgcHJvZ3JhbWF0b3JpLiIpOwogICAgfQp9CnN0YXRpYyB2b2lkIHVpX2NiKHZvaWQgKmFyZykgewogICAgaWYgKGxibF93aWZpKSAgIGx2X2xhYmVsX3NldF90ZXh0KGxibF93aWZpLCBidWZfd2lmaSk7CiAgICBpZiAobGJsX3N0YXR1cykgbHZfbGFiZWxfc2V0X3RleHQobGJsX3N0YXR1cywgYnVmX3N0YXR1cyk7CiAgICBpZiAodGFfc2VudCkgICAgbHZfdGV4dGFyZWFfc2V0X3RleHQodGFfc2VudCwgYnVmX3NlbnQpOwogICAgaWYgKHRhX3JlY3YpICAgIGx2X3RleHRhcmVhX3NldF90ZXh0KHRhX3JlY3YsIGJ1Zl9yZWN2KTsKfQp2b2lkIGJ1aWxkX3VpKCkgewogICAgcGluTW9kZShMQ0RfQkwsIE9VVFBVVCk7CiAgICBkaWdpdGFsV3JpdGUoTENEX0JMLCBMT1cpOwogICAgaWYgKCFsdmdsX3BvcnRfbG9jaygxMDAwKSkgcmV0dXJuOwogICAgbHZfb2JqX3QgKnNjcstagebHZfc2NyX2FjdCgpOwogICAgbHZfb2JqX2NsZWFuKHNjcik7CiAgICBsdl9vYmpfc2V0X3N0eWxlX2JnX2NvbG9yKHNjciwgbHZfY29sb3JfaGV4KDB4MEYxNzJBKSwgMCk7CiAgICBsYmxfdGl0bGUgPSBsdl9sYWJlbF9jcmVhdGUoc2NyKTsKICAgIGx2X2xhYmVsX3NldF90ZXh0KGxibF90aXRsZSwgIkdlbWluaSBPUyB2NjYgVGV4dCBBSSIpOwogICAgbHZfb2JqX3NldF9zdHlsZV90ZXh0X2NvbG9yKGxibF90aXRsZSwgbHZfY29sb3JfaGV4KDB4MzgKREY4KSwgMCk7CiAgICBsdl9vYmpfYWxpZ24obGJsX3RpdGxlLCBMVl9BTElHTl9UT1BfTUlELCAwLCAxMCk7CiAgICBsYmxfd2lmaSA9IGx2X2xhYmVsX2NyZWF0ZShzY3IpOwogICAgbHZfbGFiZWxfc2V0X3RleHQobGJsX3dpZmksICJXaUZpOiBDb25lY3RhcmUuLi4iKTsKICAgIGx2X29ial9zZXRfc3R5bGVfdGV4dF9jb2xvcihsYmxfd2lmaSwgbHZfY29sb3JfaGV4KDB4OTRBM0I4KSwgMCk7CiAgICBsdl9vYmpfYWxpZ24obGJsX3dpZmksIExWX0FMSUdOX1RPUF9NSUQsIDAsIDM1KTsKICAgIGx2X2xhYmVsX2NyZWF0ZShzY3IpOwogICAgbHZfbGFiZWxfc2V0X3RleHQobGJsX3N0YXR1cywgIlN0YXR1czogUHJlZ2F0aXQiKTsKICAgIGx2X29ial9zZXRfc3R5bGVfdGV4dF9jb2xvcihsYmxfc3RhdHVzLCBsdl9jb2xvcl9oZXgoMHg1QUNDMTUpLCAwKTsKICAgIGx2X29ial9hbGlnbihsYmxfc3RhdHVzLCBMVl9BTElHTl9UT1BfTUlELCAwLCA1NSk7CiAgICB0YV9zZW50ID0gbHZfdGV4dGFyZWFfY3JlYXRlKHNjcik7CiAgICBsdl9vYmpfc2V0X3NpemUodGFfc2VudCwgMTU2LCAxMjApOwogICAgbHZfb2JqX2FsaWduKHRhX3NlbnQsIExWX0FMSUdOX1RPUF9NSUQsIDAsIDg1KTsKICAgIGx2X3RleHRhcmVhX3NldF90ZXh0KHRhX3NlbnQsIGJ1Zl9zZW50KTsKICAgIGx2X29ial9zZXRfc3R5bGVfYmdfY29sb3IodGFfc2VudCwgbHZfY29sb3JfaGV4KDB4MUUyOTNCKSwgMCk7CiAgICBsdl9vYmpfc2V0X3N0eWxlX3RleHRfY29sb3IodGFfc2VudCwgbHZfY29sb3JfaGV4KDB4MzgKREY4KSwgMCk7CiAgICB0YV9yZWN2ID0gbHZfdGV4dGFyZWFfY3JlYXRlKHNjcik7CiAgICBsdl9vYmpfc2V0X3NpemUodGFfcmVjdiwgMTU2LCAzMjApOwogICAgbHZfb2JqX2FsaWduKHRhX3JlY3YsIExWX0FMSUdOX1RPUF9NSUQsIDAsIDIxNSk7CiAgICBsdl90ZXh0YXJlYV9zZXRfdGV4dCh0YV9yZWN2LCBidWZfcmVjdik7CiAgICBsdl9vYmpfc2V0X3N0eWxlX2JnX2NvbG9yKHRhX3JlY3YsIGx2X2NvbG9yX2hleCgweDFFMjkzQiksIDApOwogICAgbHZfb2JqX3NldF9zdHlsZV90ZXh0X2NvbG9yKHRhX3JlY3YsIGx2X2NvbG9yX2hleCgweDRBREU4MCksIDApOwogICAgYnRuX3NlbmQgPSBsdl9idG5fY3JlYXRlKHNjcik7CiAgICBsdl9vYmpfc2V0X3NpemUoYnRuX3NlbmQsIDE1NiwgNTApOwogICAgbHZfb2JqX2FsaWduKGJ0bl9zZW5kLCBMVl9BTElHTl9CT1RUT01fTUlELCAwLCAtMTUpOwogICAgbHZfb2JqX3NldF9zdHlsZV9iZ19jb2xvcihidG5fc2VuZCwgbHZfY29sb3JfaGV4KDB4MjU2M0VCKSwgMCk7CiAgICBsdl9vYmpfYWRkX2V2ZW50X2NiKGJ0bl9zZW5kLCBidG5fY2IsIExWX0VWRU5UX0NMSUNLRUQsIE5VTEwpOwogICAgbHZfb2JqX3QgKmxibF9iID0gbHZfbGFiZWxfY3JlYXRlKGJ0bl9zZW5kKTsKICAgIGx2X2xhYmVsX3NldF90ZXh0KGxibF9iLCAiVFJJTUlURSBURVNUIik7CiAgICBsdl9vYmpfY2VudGVyKGxibF9iKTsKICAgIGx2Z2xfcG9ydF91bmxvY2soKTsKfQp2b2lkIHRhc2tfZ2VtaW5pKHZvaWQgKnApIHsKICAgIGNoYXIqIHByb21wdCA9IChjaGFyKik7CiAgICBzZW5kaW5nID0gdHJ1ZTsKICAgIFdpRmlDbGllbnRTZWN1cmUgY2xpZW50OwogICAgY2xpZW50LnNldEluc2VjdXJlKCk7CiAgICBIVFRBQ2xpZW50IGh0dHA7CiAgICBTdHJpbmcgaCA9ICJnZW5lcmF0aXZlbGFuZ3VhZ2UuIiArIFN0cmluZygiZ29vZ2xlYXBpcy5jb20iKTsKICAgIFN0cmluZyB1ID0gIi92MWJldGEvbW9kZWxzL2dlbWluaS0yLjAiICsgU3RyaW5nKCItZmxhc2g6Z2VuZXJhdGVDb250ZW50P2tleT0iKSArIFN0cmluZyhnZW1pbmkrS2V5KTsKICAgIFN0cmluZyB1cmwgPSAiaHR0cHM6Ly8iICsgaCArIHU7CiAgICBpZiAoaHR0cC5iZWdpbihjbGllbnQsIHVybCkpIHsKICAgICAgICBodHRwLmFkZEhlYWRlcigiQ29udGVudC1UeXBlIiwgImFwcGxpY2F0aW9uL2pzb24iKTsKICAgICAgICBKc29uRG9jdW1lbnQgZG9jOwogICAgICAgIGRvY1siY29udGVudHMiXVswXVsicGFydHMiXVswXVsidGV4dCJdID0gcHJvbXB0OwogICAgICAgIFN0cmluZyBib2R5OwogICAgICAgIHNlcmlhbGl6ZUpzb24oZG9jLCBib2R5KTsKICAgICAgICBpbnQgY29kZSA9IGh0dHAuUE9TVChib2R5KTsKICAgICAgICBpZiAoY29kZSA9PSAyMDApIHsKICAgICAgICAgICAgU3RyaW5nIHJlc3AgPSBodHRwLmdldFN0cmluZygpOwogICAgICAgICAgICBKc29uRG9jdW1lbnQgcmRvYzsKICAgICAgICAgICAgZGVzZXJpYWxpemVKc29uKHJkb2MsIHJlc3ApOwogICAgICAgICAgICBjb25zdCBjaGFyKiB0ID0gcmRvY1siY2FuZGlkYXRlcyJdWzBdWyJjb250ZW50Il1bInBhcnRzIl1bMF1bInRleHQiXTsKICAgICAgICAgICAgaWYgKHQpIHsKICAgICAgICAgICAgICAgIHNucHJpbnRmKGJ1Zl9yZWN2LCBzaXplb2YoYnVmX3JlY3YpLCAiR0VNSU5JOlxuJXMiLCB0KTsKICAgICAgICAgICAgICAgIHNucHJpbnRmKGJ1Zl9zdGF0dXMsIHNpemVvZihidWZfc3RhdHVzKSwgIlN0YXR1czogUkFTUFVOUyBPSyIpOwogICAgICAgICAgICB9IGVsc2UgewogICAgICAgICAgICAgICAgc25wcmludGYoYnVmX3JlY3YsIHNpemVvZihidWZfcmVjdiksICJFcm9hcmUgcGFyc2FyZSB0ZXh0Iik7CiAgICAgICAgICAgICAgICBzbnByaW50ZihidWZfc3RhdHVzLCBzaXplb2YoYnVmX3N0YXR1cyksICJTdGF0dXM6IEVyciBQYXJzZSIpOwogICAgICAgICAgICB9CiAgICAgICAgfSBlbHNlIHsKICAgICAgICAgICAgc25wcmludGYoYnVmX3JlY3YsIHNpemVvZihidWZfcmVjdiksICJFcm9hcmUgSFRUUDogJWQiLCBjb2RlKTsKICAgICAgICAgICAgc25wcmludGYoYnVmX3N0YXR1cywgc2l6ZW9mKGJ1Zl9zdGF0dXMpLCAiU3RhdHVzOiBIVFRQICVkIiwgY29kZSk7CiAgICAgICAgfQogICAgICAgIGh0dHAuZW5kKCk7CiAgICB9CiAgICBzZW5kaW5nID0gZmFsc2U7CiAgICBmcmVlKHByb21wdCk7CiAgICBpZiAobHZnbF9wb3J0X2xvY2soMTAwKSkgewogICAgICAgIGx2X2FzeW5jX2NhbGwodWlfY2IsIE5VTEwpOwogICAgICAgIGx2Z2xfcG9ydF91bmxvY2soKTsKICAgIH0KICAgIHZUYXNrRGVsZXRlKE5VTEwpOwp9CnZvaWQgZG9fcmVxdWVzdChjb25zdCBjaGFyKiBwcm9tcHQpIHsKICAgIHNucHJpbnRmKGJ1Zl9zZW50LCBzaXplb2YoYnVmX3N2bnQpLCAiRVU6XG4lcyIsIHByb21wdCk7CiAgICBzbnByaW50ZihidWZfc3RhdHVzLCBzaXplb2YoYnVmX3N0YXR1cyksICJTdGF0dXM6IFRyaW1pdC4uLiIpOwogICAgaWYgKGx2Z2xfcG9ydF9sb2NrKDEwMCkpIHsKICAgICAgICBsdl9hc3luY19jYWxsKHVpX2NiLCBOVUxMKTsKICAgICAgICBsdmdsX3BvcnRfdW5sb2NrKCk7CiAgICB9CiAgICB4VGFza0NyZWF0ZSh0YXNrX2dlbWluaSwgImdlbWluaV90IiwgODE5Miwgc3RyZHVwKHByb21wdCksIDUsIE5VTEwpOwp9CnZvaWQgc2V0dXAoKSB7CiAgICBTZXJpYWwuYmVnaW4oMTE1MjAwKTsKICAgIHBpbk1vZGUoQk9PVF9CVE4sIElOUFVUX1BVExVQKTsKICAgIGJzcF9pMmNfaW5pdCgpOwogICAgbHZnbF9wb3J0X2luaXQoKTsKICAgIGJ1aWxkX3VpKCk7CiAgICBXaUZpLm1vZGUoV0lGSV9TVEEpOwogICAgV2lGaS5iZWdpbih3aWZpX3NzaWQsIHdpZmlfcGFzcyk7Cn0Kdm9pZCBsb29wKCkgewogICAgaWYgKFdpRmkuc3RhdHVzKCkgPT0gV0xfQ09OTkVDVEVEKSB7CiAgICAgICAgc25wcmludGYoYnVmX3dpZmksIHNpemVvZihidWZfd2lmaSksICJXaUZpOiAlcyIsIFdpRmkubG9jYWxJUCgpLnRvU3RyaW5nKCkuY19zdHIoKSk7CiAgICAgICAgaWYgKGx2Z2xfcG9ydF9sb2NrKDEwMCkpIHsKICAgICAgICAgICAgbHZfYXN5bmNfY2FsbCh1aV9jYiwgTlVMTCk7CiAgICAgICAgICAgIGx2Z2xfcG9ydF91bmxvY2soKTsKICAgICAgICB9CiAgICB9CiAgICB2VGFza0RlbGF5KHBkTVNfVE9fVElDS1MoNTAwKSk7Cn0=" | base64 -d > ""
+          rm -rf sketch
+          cp -r Examples/Arduino/08_Audio_Test sketch
+          cd sketch
+          
+          find . -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.ino" \) \
+            -exec sed -i 's|#include "demos/lv_demos.h"|// #include "demos/lv_demos.h"|g' {} + 2>/dev/null || true
+          find . -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.ino" \) \
+            -exec sed -i 's|lv_demo_widgets();|// lv_demo_widgets();|g' {} + 2>/dev/null || true
+          rm -f 08_Audio_Test.ino
 
-      - name: Compile Sketch
+          python3 - << 'PYEOF'
+          import re, os, glob
+
+          sketch_dir = "."
+          port_path = f"{sketch_dir}/lvgl_port.c"
+          h_path = f"{sketch_dir}/lvgl_port.h"
+
+          with open(h_path, "r", encoding="utf-8", errors="ignore") as f:
+              h_content = f.read()
+          with open(port_path, "r", encoding="utf-8", errors="ignore") as f:
+              c_content = f.read()
+
+          if "lvgl_port_lock" not in h_content:
+              if "example_lvgl_lock" in c_content:
+                  c_content += """
+          bool lvgl_port_lock(uint32_t timeout_ms) { return example_lvgl_lock(timeout_ms); }
+          void lvgl_port_unlock(void) { example_lvgl_unlock(); }
+          """
+              else:
+                  mux_var = "lvgl_port_mux"
+                  c_content = re.sub(
+                      r'(#include[^\n]+\n)(?![^\n]*#include)',
+                      r'\1\nstatic SemaphoreHandle_t ' + mux_var + ' = NULL;\n',
+                      c_content, count=1, flags=re.DOTALL)
+                  c_content = re.sub(
+                      r'(esp_err_t\s+lvgl_port_init\s*\([^)]*\)\s*\{)',
+                      r'\1\n    ' + mux_var + ' = xSemaphoreCreateMutex();',
+                      c_content, count=1)
+                  c_content += f"""
+          bool lvgl_port_lock(uint32_t timeout_ms) {{
+              if ({mux_var} == NULL) return false;
+              return xSemaphoreTake({mux_var}, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+          }}
+          void lvgl_port_unlock(void) {{
+              if ({mux_var} != NULL) xSemaphoreGive({mux_var});
+          }}
+          """
+              h_content += """
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          bool lvgl_port_lock(uint32_t timeout_ms);
+          void lvgl_port_unlock(void);
+          #ifdef __cplusplus
+          }
+          #endif
+          """
+              with open(h_path, "w", encoding="utf-8") as f:
+                  f.write(h_content)
+              with open(port_path, "w", encoding="utf-8") as f:
+                  f.write(c_content)
+
+          i2c_init_func = "bsp_i2c_init"
+          for hh in glob.glob(f"{sketch_dir}/*.h"):
+              with open(hh, "r", encoding="utf-8", errors="ignore") as f:
+                  h = f.read()
+              for f_name, f_args in re.findall(r'(?:esp_err_t|void|int|bool)\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*;', h):
+                  if "i2c" in f_name.lower() and "init" in f_name.lower() and f_args.strip() in ("", "void"):
+                      i2c_init_func = f_name
+                      break
+
+          with open("i2c_func.txt", "w") as f:
+              f.write(i2c_init_func)
+          PYEOF
+
+      - name: Write sketch.ino
+        shell: bash
         run: |
-          SKETCH_PATH="Examples/Arduino/08_Audio_Test/08_Audio_Test.ino"
-          FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
-          arduino-cli compile --fqbn "" --output-dir build_output ""
+          I2C_FUNC=$(cat sketch/i2c_func.txt)
+          python3 - << PYEOF
+          import textwrap
 
-      - name: Merge into Single .bin
+          i2c_init = "$I2C_FUNC"
+
+          code = textwrap.dedent(r'''
+          #include <Arduino.h>
+          #include <WiFi.h>
+          #include <HTTPClient.h>
+          #include <ArduinoJson.h>
+
+          extern "C" {
+          #include "lvgl_port.h"
+          #include "i2c_bsp.h"
+          }
+
+          const char* WIFI_SSID = "TP-Link_2.4G_9318_Guest";
+          const char* WIFI_PASS = "revelion";
+          // SCHIMBA AICI CU IP-UL PC-ULUI TAU
+          const char* PROXY_URL = "http://192.168.1.50:5000/chat"; 
+
+          lv_obj_t *lbl_status = NULL;
+          lv_obj_t *lbl_sent = NULL;
+          lv_obj_t *lbl_received = NULL;
+
+          void send_request() {
+              lvgl_port_lock(100);
+              lv_label_set_text(lbl_status, "Se trimite la PC...");
+              lvgl_port_unlock();
+
+              String prompt = "Salut! Spune-mi o gluma scurta.";
+              lvgl_port_lock(100);
+              lv_label_set_text(lbl_sent, prompt.c_str());
+              lvgl_port_unlock();
+
+              HTTPClient http;
+              http.begin(PROXY_URL);
+              http.addHeader("Content-Type", "application/json");
+
+              JsonDocument doc;
+              doc["text"] = prompt;
+              String json_payload;
+              serializeJson(doc, json_payload);
+
+              int httpResponseCode = http.POST(json_payload);
+
+              lvgl_port_lock(100);
+              if (httpResponseCode > 0) {
+                  String response = http.getString();
+                  JsonDocument respDoc;
+                  deserializeJson(respDoc, response);
+                  const char* text = respDoc["text"];
+                  
+                  lv_label_set_text(lbl_status, "Succes!");
+                  if (text) lv_label_set_text(lbl_received, text);
+                  else lv_label_set_text(lbl_received, "Eroare la parsare.");
+              } else {
+                  lv_label_set_text(lbl_status, "PC-ul nu raspunde");
+                  String err = "Cod: " + String(httpResponseCode);
+                  lv_label_set_text(lbl_received, err.c_str());
+              }
+              lvgl_port_unlock();
+              http.end();
+          }
+
+          void build_ui() {
+              lvgl_port_lock(1000);
+              lv_obj_t *scr = lv_scr_act();
+              lv_obj_clean(scr);
+              lv_obj_set_style_bg_color(scr, lv_color_hex(0x0F172A), 0);
+              lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+              lv_obj_t *title = lv_label_create(scr);
+              lv_label_set_text(title, "Proxy Chat");
+              lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
+              lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+              lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
+
+              lbl_status = lv_label_create(scr);
+              lv_label_set_text(lbl_status, "Initializing...");
+              lv_obj_set_style_text_color(lbl_status, lv_color_hex(0x94A3B8), 0);
+              lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_14, 0);
+              lv_obj_align(lbl_status, LV_ALIGN_TOP_MID, 0, 60);
+
+              lv_obj_t *lbl_sent_title = lv_label_create(scr);
+              lv_label_set_text(lbl_sent_title, "Trimis:");
+              lv_obj_set_style_text_color(lbl_sent_title, lv_color_hex(0x22C55E), 0);
+              lv_obj_set_style_text_font(lbl_sent_title, &lv_font_montserrat_16, 0);
+              lv_obj_align(lbl_sent_title, LV_ALIGN_TOP_LEFT, 10, 100);
+
+              lbl_sent = lv_label_create(scr);
+              lv_label_set_text(lbl_sent, "...");
+              lv_obj_set_style_text_color(lbl_sent, lv_color_hex(0xFFFFFF), 0);
+              lv_obj_set_style_text_font(lbl_sent, &lv_font_montserrat_14, 0);
+              lv_obj_set_width(lbl_sent, 150);
+              lv_label_set_long_mode(lbl_sent, LV_LABEL_LONG_WRAP);
+              lv_obj_align(lbl_sent, LV_ALIGN_TOP_LEFT, 10, 130);
+
+              lv_obj_t *lbl_recv_title = lv_label_create(scr);
+              lv_label_set_text(lbl_recv_title, "Primit:");
+              lv_obj_set_style_text_color(lbl_recv_title, lv_color_hex(0x38BDF8), 0);
+              lv_obj_set_style_text_font(lbl_recv_title, &lv_font_montserrat_16, 0);
+              lv_obj_align(lbl_recv_title, LV_ALIGN_TOP_LEFT, 10, 250);
+
+              lbl_received = lv_label_create(scr);
+              lv_label_set_text(lbl_received, "Asteptam...");
+              lv_obj_set_style_text_color(lbl_received, lv_color_hex(0xFFFFFF), 0);
+              lv_obj_set_style_text_font(lbl_received, &lv_font_montserrat_14, 0);
+              lv_obj_set_width(lbl_received, 150);
+              lv_label_set_long_mode(lbl_received, LV_LABEL_LONG_WRAP);
+              lv_obj_align(lbl_received, LV_ALIGN_TOP_LEFT, 10, 280);
+
+              lvgl_port_unlock();
+              Serial.println("[UI] Built");
+          }
+
+          void setup() {
+              Serial.begin(115200);
+              delay(500);
+              Serial.println("\n[BOOT] v50-Proxy-Test");
+
+              I2C_INIT_CALL
+              delay(50);
+
+              lvgl_port_init();
+              delay(300);
+              build_ui();
+
+              WiFi.mode(WIFI_STA);
+              WiFi.begin(WIFI_SSID, WIFI_PASS);
+              Serial.println("[WiFi] Connecting...");
+
+              int tries = 0;
+              while (WiFi.status() != WL_CONNECTED && tries < 30) {
+                  delay(500);
+                  Serial.print(".");
+                  tries++;
+              }
+              Serial.println();
+              if (WiFi.status() == WL_CONNECTED) {
+                  Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
+                  send_request();
+              }
+          }
+
+          void loop() {
+              delay(1000);
+          }
+          ''')
+
+          code = code.replace("I2C_INIT_CALL", f"{i2c_init}();")
+
+          with open("sketch/sketch.ino", "w", encoding="utf-8") as f:
+              f.write(code.lstrip())
+          print("[OK] sketch.ino written")
+          PYEOF
+
+      - name: Compile
+        run: |
+          SKETCH_PATH="sketch/sketch.ino"
+          FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
+          arduino-cli compile --fqbn "$FQBN" --output-dir build_output "$SKETCH_PATH"
+
+      - name: Merge
         shell: bash
         run: |
           mkdir -p package_bin
-          BOOTLOADER=
-          PARTITIONS=
-          APP_BIN=
-          python -m esptool --chip esp32s3 merge_bin             -o package_bin/gemini-v67-text-ai-0x0.bin             --flash_mode keep --flash_size 16MB --flash_freq 80m             0x0 "" 0x8000 "" 0x10000 ""
-          ls -lh package_bin/gemini-v67-text-ai-0x0.bin
+          BOOTLOADER=$(ls build_output/*.bootloader.bin | head -n 1)
+          PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
+          APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
+          python -m esptool --chip esp32s3 merge_bin \
+            -o package_bin/gemini-v50-proxy-0x0.bin \
+            --flash_mode keep --flash_size 16MB --flash_freq 80m \
+            0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
+          ls -lh package_bin/gemini-v50-proxy-0x0.bin
 
-      - name: Upload Artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v67-text-ai
-          path: package_bin/gemini-v67-text-ai-0x0.bin
+          name: gemini-v50-proxy
+          path: package_bin/gemini-v50-proxy-0x0.bin
+          if-no-files-found: error
