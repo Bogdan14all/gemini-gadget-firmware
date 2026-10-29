@@ -1,11 +1,11 @@
-name: Build Gemini OS - v38 Gemini Live (Stable Model)
+name: Build Gemini OS - v37 Gemini Live (Model Valid)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v38 Gemini Live PTT
+    name: Build v37 Gemini Live PTT
     runs-on: ubuntu-latest
 
     steps:
@@ -154,7 +154,7 @@ jobs:
           echo "#pragma once" > sketch/secrets.h
           echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
 
-      - name: Write sketch.ino (Stable Model + String SI)
+      - name: Write sketch.ino (Model 2.5 + PTT)
         shell: bash
         run: |
           I2C_FUNC=$(cat sketch/i2c_func.txt)
@@ -303,12 +303,12 @@ jobs:
                       Serial.println("[WS] CONNECTED");
                       g_state = 2;
                       JsonDocument doc;
-                      // Model mai stabil (09-2025)
-                      doc["setup"]["model"] = "models/gemini-2.5-flash-native-audio-preview-09-2025";
+                      // Model corect și actual pentru Google AI Studio
+                      doc["setup"]["model"] = "models/gemini-2.5-flash-native-audio-preview-12-2025";
                       doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
                       doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Puck";
-                      // systemInstruction ca string simplu
-                      doc["setup"]["systemInstruction"] = "Raspunde scurt si concis in limba romana.";
+                      // systemInstruction ca obiect cu parts (format robust)
+                      doc["setup"]["systemInstruction"]["parts"][0]["text"] = "Raspunde scurt si concis in limba romana.";
                       
                       String out;
                       serializeJson(doc, out);
@@ -434,7 +434,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v38-gemini-live-stable-model");
+              Serial.println("\n[BOOT] v37-gemini-live-model-valid");
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
               I2C_INIT_CALL
@@ -510,6 +510,7 @@ jobs:
                           String b64_str = base64::encode((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
                           if (b64_str.length() > 0) {
                               JsonDocument doc;
+                              // Folosim noul format audio (recomandat pentru 2.5)
                               doc["realtimeInput"]["audio"]["mimeType"] = "audio/pcm;rate=16000";
                               doc["realtimeInput"]["audio"]["data"] = b64_str;
                               String out;
@@ -567,14 +568,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v38-ptt-0x0.bin \
+            -o package_bin/gemini-v37-ptt-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v38-ptt-0x0.bin
+          ls -lh package_bin/gemini-v37-ptt-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v38-ptt
-          path: package_bin/gemini-v38-ptt-0x0.bin
+          name: gemini-v37-ptt
+          path: package_bin/gemini-v37-ptt-0x0.bin
           if-no-files-found: error
