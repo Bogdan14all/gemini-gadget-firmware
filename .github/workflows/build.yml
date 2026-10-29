@@ -1,11 +1,11 @@
-name: Build Gemini OS - v51 Proxy Test (IP 182)
+name: Build Gemini OS - v52 Cloud Proxy
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v51 Proxy Test
+    name: Build v52 Cloud Proxy
     runs-on: ubuntu-latest
 
     steps:
@@ -160,6 +160,7 @@ jobs:
           #include <Arduino.h>
           #include <WiFi.h>
           #include <HTTPClient.h>
+          #include <WiFiClientSecure.h>
           #include <ArduinoJson.h>
 
           extern "C" {
@@ -170,9 +171,8 @@ jobs:
           const char* WIFI_SSID = "TP-Link_2.4G_9318_Guest";
           const char* WIFI_PASS = "revelion";
           
-          // IP-ul PC-ului tau este acum configurat corect
-          const char* PC_IP = "192.168.1.182"; 
-          String PROXY_URL = "http://" + String(PC_IP) + ":5000/chat";
+          // ⚠️ ÎNLOCUIEȘTE CU URL-UL TĂU DE LA RENDER
+          const char* CLOUD_URL = "https://gemini-proxy-xxxx.onrender.com/chat";
 
           lv_obj_t *lbl_status = NULL;
           lv_obj_t *lbl_sent = NULL;
@@ -180,7 +180,7 @@ jobs:
 
           void send_request() {
               lvgl_port_lock(100);
-              lv_label_set_text(lbl_status, "Se trimite la PC...");
+              lv_label_set_text(lbl_status, "Se trimite la Cloud...");
               lvgl_port_unlock();
 
               String prompt = "Salut! Spune-mi o gluma scurta.";
@@ -188,9 +188,12 @@ jobs:
               lv_label_set_text(lbl_sent, prompt.c_str());
               lvgl_port_unlock();
 
+              WiFiClientSecure client;
+              client.setInsecure(); // Acceptăm certificatul SSL pentru test
+
               HTTPClient http;
-              http.begin(PROXY_URL);
-              http.setTimeout(10000); 
+              http.begin(client, CLOUD_URL);
+              http.setTimeout(30000); // 30 secunde, Render poate fi lent la "trezire"
               http.addHeader("Content-Type", "application/json");
 
               JsonDocument doc;
@@ -211,8 +214,8 @@ jobs:
                   if (text) lv_label_set_text(lbl_received, text);
                   else lv_label_set_text(lbl_received, "Eroare la parsare.");
               } else {
-                  lv_label_set_text(lbl_status, "PC-ul nu raspunde");
-                  String err = "Cod: " + String(httpResponseCode) + "\nVerifica Firewall-ul!";
+                  lv_label_set_text(lbl_status, "Eroare Cloud");
+                  String err = "Cod: " + String(httpResponseCode);
                   lv_label_set_text(lbl_received, err.c_str());
               }
               lvgl_port_unlock();
@@ -227,7 +230,7 @@ jobs:
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Proxy Chat");
+              lv_label_set_text(title, "Cloud Chat");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
               lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
@@ -273,9 +276,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v51-Proxy-Test");
-              Serial.print("[CONFIG] Target Proxy: ");
-              Serial.println(PROXY_URL);
+              Serial.println("\n[BOOT] v52-Cloud-Proxy");
 
               I2C_INIT_CALL
               delay(50);
@@ -327,14 +328,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v51-proxy-0x0.bin \
+            -o package_bin/gemini-v52-cloud-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v51-proxy-0x0.bin
+          ls -lh package_bin/gemini-v52-cloud-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v51-proxy
-          path: package_bin/gemini-v51-proxy-0x0.bin
+          name: gemini-v52-cloud
+          path: package_bin/gemini-v52-cloud-0x0.bin
           if-no-files-found: error
