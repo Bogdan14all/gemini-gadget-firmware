@@ -1,11 +1,11 @@
-name: Build Gemini OS - v40 REST Audio Test
+name: Build Gemini OS - v41 REST Audio Test (PSRAM Fix)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v40 REST Audio Test
+    name: Build v41 REST Audio Test
     runs-on: ubuntu-latest
 
     steps:
@@ -153,7 +153,7 @@ jobs:
           echo "#pragma once" > sketch/secrets.h
           echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
 
-      - name: Write sketch.ino (REST Audio Test)
+      - name: Write sketch.ino (REST Audio Test - PSRAM Fix)
         shell: bash
         run: |
           I2C_FUNC=$(cat sketch/i2c_func.txt)
@@ -169,6 +169,7 @@ jobs:
           #include <ArduinoJson.h>
           #include <base64.h>
           #include <mbedtls/base64.h>
+          #include <esp_heap_caps.h>
 
           #include "secrets.h"
 
@@ -189,22 +190,22 @@ jobs:
           esp_codec_dev_handle_t record = NULL;
           esp_io_expander_handle_t io_expander = NULL;
 
-          volatile int g_state = 0; // 0=Init, 1=WiFi, 2=READY, 3=RECORDING, 4=UPLOADING, 5=PLAYING
+          volatile int g_state = 0;
           volatile int g_rx_kb = 0;
           volatile int g_tx_kb = 0;
           volatile int g_peak  = 0;
-          bool is_recording = false;
 
           lv_obj_t *lbl_state = NULL;
           lv_obj_t *lbl_rx    = NULL;
           lv_obj_t *lbl_tx    = NULL;
           lv_obj_t *lbl_peak  = NULL;
 
-          // Buffer pentru 3 secunde de audio la 16kHz mono (3 * 16000 * 2 = 96000 bytes)
           #define RECORD_SECONDS 3
           #define SAMPLE_RATE 16000
           #define RECORD_SAMPLES (RECORD_SECONDS * SAMPLE_RATE)
-          static int16_t rec_buffer[RECORD_SAMPLES];
+
+          // Pointer pentru bufferul audio (va fi alocat in PSRAM)
+          int16_t* rec_buffer = NULL;
           static int16_t buf_in_stereo[1024];
           static int16_t buf_out_stereo[256];
 
@@ -235,7 +236,7 @@ jobs:
               esp_codec_dev_set_out_vol(playback, 100.0);
               esp_codec_dev_set_in_gain(record, 35.0);
               esp_codec_dev_sample_info_t fs = {};
-              fs.sample_rate = 24000; // Codecul rulează la 24kHz
+              fs.sample_rate = 24000;
               fs.channel = 2;
               fs.bits_per_sample = 16;
               esp_codec_dev_open(playback, &fs);
@@ -250,13 +251,12 @@ jobs:
                   if (r == ESP_OK) {
                       int frames = (sizeof(buf_in_stereo)/sizeof(int16_t)) / 2;
                       for (int i = 0; i < frames && samples_recorded < RECORD_SAMPLES; i++) {
-                          // Downsample 24k -> 16k (luăm 2 din 3 eșantioane)
+                          // Downsample 24k -> 16k
                           if (i % 3 != 2) {
                               int16_t s = buf_in_stereo[i*2];
                               rec_buffer[samples_recorded++] = s;
                           }
                       }
-                      // Calculăm peak pentru UI
                       int32_t peak = 0;
                       for (int i = 0; i < frames; i++) {
                           int32_t a = abs(buf_in_stereo[i*2]);
@@ -272,16 +272,15 @@ jobs:
 
           void send_rest_request() {
               g_state = 4;
-              Serial.println("[HTTP] Sending REST request to Gemini...");
+              Serial.println("[HTTP] Sending REST request...");
 
-              // Construim JSON-ul pentru request
               JsonDocument doc;
               doc["contents"][0]["parts"][0]["text"] = "Ascultă acest audio și răspunde scurt în română.";
               
+              // Encodare Base64 a bufferului din PSRAM
               String base64_audio = base64::encode((uint8_t*)rec_buffer, RECORD_SAMPLES * 2);
               doc["contents"][0]["parts"][1]["inlineData"]["mimeType"] = "audio/pcm;rate=16000";
               doc["contents"][0]["parts"][1]["inlineData"]["data"] = base64_audio;
-              
               doc["generationConfig"]["responseModalities"][0] = "AUDIO";
 
               String json_payload;
@@ -299,19 +298,17 @@ jobs:
                   Serial.printf("[HTTP] Response code: %d\n", httpResponseCode);
                   String response = http.getString();
                   
-                  // Parsăm răspunsul
                   JsonDocument respDoc;
                   DeserializationError err = deserializeJson(respDoc, response);
                   if (err) {
                       Serial.printf("[JSON] Parse error: %s\n", err.c_str());
                   } else {
-                      // Verificăm dacă avem audio în răspuns
                       const char* audio_data = respDoc["candidates"][0]["content"]["parts"][0]["inlineData"]["data"];
                       if (audio_data) {
                           size_t b64_len = strlen(audio_data);
                           size_t out_len = 0;
                           size_t max_out = (b64_len * 3) / 4 + 4;
-                          uint8_t* decoded_buf = (uint8_t*)malloc(max_out);
+                          uint8_t* decoded_buf = (uint8_t*)heap_caps_malloc(max_out, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                           if (decoded_buf) {
                               int ret = mbedtls_base64_decode(decoded_buf, max_out, &out_len, (const unsigned char*)audio_data, b64_len);
                               if (ret == 0 && out_len > 0) {
@@ -335,16 +332,15 @@ jobs:
                               free(decoded_buf);
                           }
                       } else {
-                          Serial.println("[JSON] No audio data in response!");
-                          // Afișăm răspunsul pentru debug
+                          Serial.println("[JSON] No audio data!");
                           Serial.println(response.substring(0, 500));
                       }
                   }
               } else {
-                  Serial.printf("[HTTP] Request failed: %s\n", http.errorToString(httpResponseCode).c_str());
+                  Serial.printf("[HTTP] Failed: %s\n", http.errorToString(httpResponseCode).c_str());
               }
               http.end();
-              g_state = 2; // Revenim la READY
+              g_state = 2;
           }
 
           void ui_timer_cb(lv_timer_t *t) {
@@ -429,7 +425,13 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v40-REST-audio-test");
+              Serial.println("\n[BOOT] v41-REST-audio-test-psram");
+
+              // Alocam bufferul audio in PSRAM
+              rec_buffer = (int16_t*)heap_caps_malloc(RECORD_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+              if (!rec_buffer) {
+                  Serial.println("[FATAL] PSRAM alloc failed!");
+              }
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
               I2C_INIT_CALL
@@ -467,7 +469,7 @@ jobs:
           }
 
           void loop() {
-              if (g_state == 2) {
+              if (g_state == 2 && rec_buffer != NULL) {
                   bool btn_pressed = (digitalRead(BOOT_BTN) == LOW);
                   if (btn_pressed) {
                       g_state = 3;
@@ -502,14 +504,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v40-rest-0x0.bin \
+            -o package_bin/gemini-v41-rest-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v40-rest-0x0.bin
+          ls -lh package_bin/gemini-v41-rest-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v40-rest
-          path: package_bin/gemini-v40-rest-0x0.bin
+          name: gemini-v41-rest
+          path: package_bin/gemini-v41-rest-0x0.bin
           if-no-files-found: error
