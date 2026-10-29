@@ -154,7 +154,7 @@ jobs:
           echo "#pragma once" > sketch/secrets.h
           echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
 
-      - name: Write sketch.ino (Push-to-Talk, mbedtls, String SI)
+      - name: Write sketch.ino (Push-to-Talk, mbedtls, Valid SI)
         shell: bash
         run: |
           I2C_FUNC=$(cat sketch/i2c_func.txt)
@@ -306,8 +306,9 @@ jobs:
                       doc["setup"]["model"] = "models/gemini-2.0-flash-exp";
                       doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
                       doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Puck";
-                      // FIX: systemInstruction ca string simplu
-                      doc["setup"]["systemInstruction"] = "Raspunde scurt si concis in limba romana.";
+                      
+                      // Fix: Structura valida OpenAPI (Obiect cu 'parts', fara 'role')
+                      doc["setup"]["systemInstruction"]["parts"][0]["text"] = "Raspunde scurt si concis in limba romana.";
                       
                       String out;
                       serializeJson(doc, out);
@@ -521,9 +522,8 @@ jobs:
                       is_recording = false;
                       Serial.println("[PTT] Recording stopped, waiting for response...");
                       
+                      // Fix: Curățare turnComplete conform specificațiilor
                       JsonDocument doc;
-                      doc["clientContent"]["turns"][0]["role"] = "user";
-                      doc["clientContent"]["turns"][0]["parts"][0]["text"] = " ";
                       doc["clientContent"]["turnComplete"] = true;
                       String out;
                       serializeJson(doc, out);
