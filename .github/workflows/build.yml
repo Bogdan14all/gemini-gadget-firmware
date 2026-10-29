@@ -1,11 +1,11 @@
-name: Build Gemini OS - v46 Text-to-Text (TLS Fix)
+name: Build Gemini OS - v47 Text-to-Text (Stable Model)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v46 Text REST Test
+    name: Build v47 Text REST Test
     runs-on: ubuntu-latest
 
     steps:
@@ -153,7 +153,7 @@ jobs:
           echo "#pragma once" > sketch/secrets.h
           echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
 
-      - name: Write sketch.ino (Text-to-Text with TLS Fix)
+      - name: Write sketch.ino (Text-to-Text Stable + Retry)
         shell: bash
         run: |
           I2C_FUNC=$(cat sketch/i2c_func.txt)
@@ -203,23 +203,37 @@ jobs:
               String json_payload;
               serializeJson(doc, json_payload);
 
-              // FIX 1: Folosim WiFiClientSecure cu setInsecure() pentru a ocoli erorile de certificat
-              WiFiClientSecure *client = new WiFiClientSecure;
-              client->setInsecure();
+              WiFiClientSecure client;
+              client.setInsecure(); // Ignoram certificatele pentru test
               
               HTTPClient http;
-              http.begin(*client, "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + String(GEMINI_API_KEY));
+              // Folosim modelul stabil gemini-1.5-flash
+              String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + String(GEMINI_API_KEY);
               
-              // FIX 2: Fortam HTTP/1.0 pentru a evita chunked encoding
+              http.begin(client, url);
               http.useHTTP10(true);
-              
-              // FIX 3: Setam timeout-uri mai mari
-              http.setTimeout(15000);
+              http.setTimeout(10000); 
               http.setConnectTimeout(5000);
-              
               http.addHeader("Content-Type", "application/json");
 
-              int httpResponseCode = http.POST(json_payload);
+              int retries = 0;
+              int httpResponseCode = -1;
+
+              // Încercăm de până la 3 ori dacă serverul e ocupat
+              while (retries < 3) {
+                  httpResponseCode = http.POST(json_payload);
+                  if (httpResponseCode == 503) {
+                      retries++;
+                      lvgl_port_lock(100);
+                      char buf[32];
+                      snprintf(buf, sizeof(buf), "Server ocupat (Retry %d)", retries);
+                      lv_label_set_text(lbl_status, buf);
+                      lvgl_port_unlock();
+                      delay(5000); // Așteptăm 5 secunde
+                  } else {
+                      break; // Dacă e OK (200) sau altă eroare, ieșim din buclă
+                  }
+              }
 
               if (httpResponseCode > 0) {
                   String response = http.getString();
@@ -229,30 +243,36 @@ jobs:
                   
                   lvgl_port_lock(100);
                   if (err) {
-                      String err_msg = "Eroare JSON: " + String(err.c_str());
-                      lv_label_set_text(lbl_status, "Eroare HTTP");
-                      lv_label_set_text(lbl_received, err_msg.c_str());
+                      lv_label_set_text(lbl_status, "Eroare JSON");
+                      lv_label_set_text(lbl_received, err.c_str());
                   } else {
                       const char* text = respDoc["candidates"][0]["content"]["parts"][0]["text"];
                       if (text) {
                           lv_label_set_text(lbl_status, "Succes!");
                           lv_label_set_text(lbl_received, text);
                       } else {
-                          String raw = "Fara text. Raspuns: " + response.substring(0, 150);
-                          lv_label_set_text(lbl_status, "Raspuns ciudat");
-                          lv_label_set_text(lbl_received, raw.c_str());
+                          // Extragem mesajul de eroare dacă există
+                          const char* errMsg = respDoc["error"]["message"];
+                          if (errMsg) {
+                              lv_label_set_text(lbl_status, "Eroare API");
+                              String shortErr = String("Eroare " + String(httpResponseCode) + ": " + String(errMsg).substring(0, 50));
+                              lv_label_set_text(lbl_received, shortErr.c_str());
+                          } else {
+                              String raw = "Raspuns: " + response.substring(0, 100);
+                              lv_label_set_text(lbl_status, "Raspuns ciudat");
+                              lv_label_set_text(lbl_received, raw.c_str());
+                          }
                       }
                   }
                   lvgl_port_unlock();
               } else {
                   lvgl_port_lock(100);
                   lv_label_set_text(lbl_status, "Eroare retea");
-                  String http_err = "Cod: " + String(httpResponseCode) + " " + http.errorToString(httpResponseCode);
+                  String http_err = "Cod: " + String(httpResponseCode);
                   lv_label_set_text(lbl_received, http_err.c_str());
                   lvgl_port_unlock();
               }
               http.end();
-              delete client; // Eliberam memoria
               g_state = 5;
           }
 
@@ -310,7 +330,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v46-Text-to-Text-TLS-Fix");
+              Serial.println("\n[BOOT] v47-Text-to-Text-Stable");
 
               I2C_INIT_CALL
               delay(50);
@@ -369,14 +389,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v46-text-0x0.bin \
+            -o package_bin/gemini-v47-text-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v46-text-0x0.bin
+          ls -lh package_bin/gemini-v47-text-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v46-text
-          path: package_bin/gemini-v46-text-0x0.bin
+          name: gemini-v47-text
+          path: package_bin/gemini-v47-text-0x0.bin
           if-no-files-found: error
