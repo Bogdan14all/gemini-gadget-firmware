@@ -1,11 +1,11 @@
-name: Build Gemini OS - v34 Gemini Live (PTT + mbedtls Base64)
+name: Build Gemini OS - v35 Gemini Live (PTT + SystemInstruction Fix)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v34 Gemini Live PTT
+    name: Build v35 Gemini Live PTT
     runs-on: ubuntu-latest
 
     steps:
@@ -154,7 +154,7 @@ jobs:
           echo "#pragma once" > sketch/secrets.h
           echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
 
-      - name: Write sketch.ino (Push-to-Talk with mbedtls)
+      - name: Write sketch.ino (Push-to-Talk, string systemInstruction)
         shell: bash
         run: |
           I2C_FUNC=$(cat sketch/i2c_func.txt)
@@ -271,16 +271,11 @@ jobs:
                   const char* data = inlineData["data"];
                   if (!data) continue;
 
-                  // Decodare Base64 cu mbedtls
                   size_t b64_len = strlen(data);
                   size_t out_len = 0;
-                  // Estimăm dimensiunea maximă a bufferului decodat
                   size_t max_out = (b64_len * 3) / 4 + 4;
                   uint8_t* decoded_buf = (uint8_t*)malloc(max_out);
-                  if (!decoded_buf) {
-                      Serial.println("[AUDIO] malloc failed");
-                      continue;
-                  }
+                  if (!decoded_buf) continue;
 
                   int ret = mbedtls_base64_decode(decoded_buf, max_out, &out_len, (const unsigned char*)data, b64_len);
                   if (ret == 0 && out_len > 0) {
@@ -297,8 +292,6 @@ jobs:
                           esp_codec_dev_write(playback, buf_out_stereo, n * 4);
                       }
                       g_rx_kb += out_len / 1024;
-                  } else {
-                      Serial.printf("[AUDIO] base64 decode failed: %d\n", ret);
                   }
                   free(decoded_buf);
               }
@@ -313,11 +306,13 @@ jobs:
                       doc["setup"]["model"] = "models/gemini-2.0-flash-exp";
                       doc["setup"]["generationConfig"]["responseModalities"][0] = "AUDIO";
                       doc["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = "Puck";
-                      doc["setup"]["systemInstruction"] = "Raspunde in limba romana.";
+                      // FIX: systemInstruction ca string simplu
+                      doc["setup"]["systemInstruction"] = "Raspunde scurt si concis in limba romana.";
                       
                       String out;
                       serializeJson(doc, out);
                       ws.sendTXT(out);
+                      Serial.printf("[WS] Setup sent: %s\n", out.c_str());
                       break;
                   }
                   case WStype_DISCONNECTED:
@@ -438,7 +433,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v34-gemini-live-push-to-talk-mbedtls");
+              Serial.println("\n[BOOT] v35-gemini-live-ptt-string-si");
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
               I2C_INIT_CALL
@@ -571,14 +566,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v34-ptt-0x0.bin \
+            -o package_bin/gemini-v35-ptt-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v34-ptt-0x0.bin
+          ls -lh package_bin/gemini-v35-ptt-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v34-ptt
-          path: package_bin/gemini-v34-ptt-0x0.bin
+          name: gemini-v35-ptt
+          path: package_bin/gemini-v35-ptt-0x0.bin
           if-no-files-found: error
