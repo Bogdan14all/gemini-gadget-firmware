@@ -1,21 +1,21 @@
-name: Build Gemini OS - Phase 1 (Core OS & Flawless UI)
+name: Build Gemini OS - Stable Core Architecture
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build OS Baseline
+    name: Build Verified Gemini OS
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Waveshare Official Base
+      - name: Checkout Official Waveshare Base
         uses: actions/checkout@v4
         with:
           repository: waveshareteam/ESP32-S3-Touch-LCD-3.49
           submodules: false
 
-      - name: Setup Python & Arduino CLI
+      - name: Setup Build Environment
         run: |
           pip install "esptool<5"
           sudo apt-get update && sudo apt-get install -y zip
@@ -24,14 +24,13 @@ jobs:
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32
+          arduino-cli core install esp32:esp32@2.0.17
 
-      - name: Install Libraries & Config LVGL
+      - name: Install Libraries & Configure LVGL
         shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
           arduino-cli lib install "lvgl"@8.3.11
-          arduino-cli lib install "WebSockets"@2.5.2
           arduino-cli lib install "ArduinoJson"@7.0.4
 
           cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
@@ -49,23 +48,33 @@ jobs:
           #define LV_USE_KEYBOARD 1
           #define LV_USE_TEXTAREA 1
           #define LV_USE_TABVIEW 1
+          #define LV_USE_BAR 1
           #endif
           EOF
           sed -i 's/^[ \t]*//' ~/Arduino/libraries/lv_conf.h
 
-      - name: Prepare Workspace
+      - name: Prepare Clean Workspace
         shell: bash
         run: |
           rm -rf sketch
           cp -r Examples/Arduino/08_Audio_Test sketch
           cd sketch
           rm -f 08_Audio_Test.ino
-          
+          # Disable demo widgets safely
           find . -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's|#include "demos/lv_demos.h"|//|g' {} + || true
           find . -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's|lv_demo_widgets();|//|g' {} + || true
+          # Extract proper I2C init function name from Waveshare BSP
           grep -hoE '(bsp_i2c_init|i2c_master_init|i2c_master_Init)\s*\(' *.h *.c | head -n 1 | sed 's/(//' | tr -d ' ' > i2c_func.txt || echo "bsp_i2c_init" > i2c_func.txt
 
-      - name: Write Phase 1 Source (Core OS, SD Card Init, UI Base)
+      - name: Inject Configuration Secrets
+        shell: bash
+        run: |
+          echo "#pragma once" > sketch/secrets.h
+          echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
+          echo "#define SECRET_WIFI_SSID \"${{ secrets.WIFI_SSID || 'TP-Link_2.4G_9318_Guest' }}\"" >> sketch/secrets.h
+          echo "#define SECRET_WIFI_PASS \"${{ secrets.WIFI_PASSWORD || 'revelion' }}\"" >> sketch/secrets.h
+
+      - name: Generate Core Firmware Source
         shell: bash
         run: |
           I2C_FUNC=$(cat sketch/i2c_func.txt)
@@ -75,8 +84,12 @@ jobs:
           code = f"""
           #include <Arduino.h>
           #include <WiFi.h>
-          #include <SD.h>
-          #include <SPI.h>
+          #include <HTTPClient.h>
+          #include <ArduinoJson.h>
+          #include <base64.h>
+          #include "freertos/FreeRTOS.h"
+          #include "freertos/task.h"
+          #include "secrets.h"
 
           extern "C" {{
           #include "lvgl_port.h"
@@ -87,33 +100,66 @@ jobs:
           }}
           #include <lvgl.h>
 
-          // --- HW Globals ---
+          #define BOOT_BTN 0
+
+          // --- HW Handles ---
           esp_codec_dev_handle_t playback = NULL;
           esp_codec_dev_handle_t record = NULL;
           esp_io_expander_handle_t io_expander = NULL;
-          bool sd_mounted = false;
 
-          // --- UI Globals ---
+          // --- OS State ---
+          volatile bool is_recording = false;
+          volatile bool api_key_valid = false;
+          static int16_t buf_in_stereo[1024];
+          static int16_t buf_mono_16k[341];
+
+          // --- UI Objects ---
           lv_obj_t *tv_main;
-          lv_obj_t *ta_input;
+          lv_obj_t *ta_chat_in;
+          lv_obj_t *ta_chat_out;
           lv_obj_t *kb_main;
           lv_obj_t *lbl_status;
+          lv_obj_t *lbl_ptt;
+          lv_obj_t *btn_ptt;
 
-          // ==========================================
-          // MODUL HARDWARE (Inițializare izolată)
-          // ==========================================
+          // --- UI Callbacks ---
+          static void kb_event_cb(lv_event_t * e) {{
+              if(lv_event_get_code(e) == LV_EVENT_READY) {{
+                  const char* txt = lv_textarea_get_text(ta_chat_in);
+                  if (strlen(txt) > 0) {{
+                      lv_textarea_add_text(ta_chat_out, "Eu: ");
+                      lv_textarea_add_text(ta_chat_out, txt);
+                      lv_textarea_add_text(ta_chat_out, "\\n");
+                      // TODO: Implement HTTP REST Send Task Trigger here
+                      lv_textarea_set_text(ta_chat_in, ""); // Clear
+                  }}
+              }}
+          }}
+
+          static void ptt_btn_cb(lv_event_t * e) {{
+              lv_event_code_t code = lv_event_get_code(e);
+              if(code == LV_EVENT_PRESSED) {{
+                  is_recording = true;
+                  lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0xEF4444), 0);
+                  lv_label_set_text(lbl_ptt, "ASCULTA...");
+              }} else if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {{
+                  is_recording = false;
+                  lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0x3B82F6), 0);
+                  lv_label_set_text(lbl_ptt, "APASA & VORBESTE");
+              }}
+          }}
+
+          // --- Initialization ---
           void hw_init() {{
               {i2c_init}();
               delay(50);
               
-              // 1. TCA9554 IO Expander
               i2c_master_bus_handle_t bus;
               i2c_master_get_bus_handle(0, &bus);
               esp_io_expander_new_i2c_tca9554(bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander);
               esp_io_expander_set_dir(io_expander, IO_EXPANDER_PIN_NUM_7, IO_EXPANDER_OUTPUT);
               esp_io_expander_set_level(io_expander, IO_EXPANDER_PIN_NUM_7, 1);
 
-              // 2. Audio Codec
               set_codec_board_type((char*)"S3_LCD_3_49");
               codec_init_cfg_t cfg = {{
                   .in_mode = CODEC_I2S_MODE_TDM,
@@ -131,69 +177,132 @@ jobs:
               esp_codec_dev_open(playback, &fs);
               esp_codec_dev_open(record, &fs);
 
-              // 3. SD Card (SPI)
-              SPI.begin(40, 39, 41, 42); // Configurare generică pini SPI ESP32-S3 (Ajustează conform schemei V2)
-              if(SD.begin(42)) {{
-                  sd_mounted = true;
-              }}
-
-              // 4. LVGL
               lvgl_port_init();
           }}
 
-          // ==========================================
-          // MODUL UI (Coordonate Absolute 172x640)
-          // ==========================================
-          static void kb_event_cb(lv_event_t * e) {{
-              if(lv_event_get_code(e) == LV_EVENT_READY) {{
-                  lv_textarea_set_text(ta_input, ""); // Clear after "Send"
-              }}
-          }}
-
-          void os_ui_build() {{
+          void ui_init() {{
               example_lvgl_lock(1000);
               
-              // Tabview stânga - lățime 100px. Lasă 540x172 pentru conținut.
-              tv_main = lv_tabview_create(lv_scr_act(), LV_DIR_LEFT, 100);
+              // Base Tabview
+              tv_main = lv_tabview_create(lv_scr_act(), LV_DIR_LEFT, 110);
               lv_obj_set_style_bg_color(tv_main, lv_color_hex(0x0F172A), 0);
-              
               lv_obj_t * tab_chat = lv_tabview_add_tab(tv_main, "Chat AI");
-              lv_obj_t * tab_mp3  = lv_tabview_add_tab(tv_main, "Media");
-              lv_obj_t * tab_sys  = lv_tabview_add_tab(tv_main, "Sistem");
+              lv_obj_t * tab_voice = lv_tabview_add_tab(tv_main, "Voce AI");
+              lv_obj_t * tab_sys = lv_tabview_add_tab(tv_main, "Sistem");
 
-              // --- TAB CHAT (Fără Flexbox, Coordonate Absolute) ---
-              // Căsuța de text: X=0, Y=2, W=530, H=46
-              ta_input = lv_textarea_create(tab_chat);
-              lv_obj_set_size(ta_input, 530, 46);
-              lv_obj_set_pos(ta_input, 0, 2);
-              lv_textarea_set_placeholder_text(ta_input, "Tastează aici...");
-              lv_textarea_set_one_line(ta_input, false);
-              lv_obj_set_style_text_font(ta_input, &lv_font_montserrat_12, 0);
+              // --- TAB CHAT (Strict Geometry 530x172) ---
+              // History Output
+              ta_chat_out = lv_textarea_create(tab_chat);
+              lv_obj_set_size(ta_chat_out, 520, 60);
+              lv_obj_set_pos(ta_chat_out, 5, 2);
+              lv_textarea_set_text(ta_chat_out, "Gemini OS Ready.\\n");
 
-              // Tastatura: X=0, Y=50, W=530, H=120
+              // Input Box (Visible above keyboard)
+              ta_chat_in = lv_textarea_create(tab_chat);
+              lv_obj_set_size(ta_chat_in, 520, 45);
+              lv_obj_set_pos(ta_chat_in, 5, 65);
+              lv_textarea_set_placeholder_text(ta_chat_in, "Tasteaza aici...");
+              lv_textarea_set_one_line(ta_chat_in, true);
+              
+              // Keyboard
               kb_main = lv_keyboard_create(tab_chat);
-              lv_obj_set_size(kb_main, 530, 120);
-              lv_obj_set_pos(kb_main, 0, 50);
-              lv_keyboard_set_textarea(kb_main, ta_input);
+              lv_obj_set_size(kb_main, 520, 115);
+              lv_obj_set_pos(kb_main, 5, 115); // Hidden initially or managed by focus
+              lv_keyboard_set_textarea(kb_main, ta_chat_in);
               lv_obj_add_event_cb(kb_main, kb_event_cb, LV_EVENT_ALL, NULL);
               
+              // Layout fix for keyboard visibility - bring input to front
+              lv_obj_move_foreground(ta_chat_in);
+
+              // --- TAB VOCE ---
+              btn_ptt = lv_btn_create(tab_voice);
+              lv_obj_set_size(btn_ptt, 200, 80);
+              lv_obj_align(btn_ptt, LV_ALIGN_CENTER, 0, 0);
+              lv_obj_add_event_cb(btn_ptt, ptt_btn_cb, LV_EVENT_ALL, NULL);
+              lbl_ptt = lv_label_create(btn_ptt);
+              lv_label_set_text(lbl_ptt, "APASA & VORBESTE");
+              lv_obj_center(lbl_ptt);
+
               // --- TAB SISTEM ---
               lbl_status = lv_label_create(tab_sys);
               lv_obj_set_pos(lbl_status, 10, 10);
-              lv_label_set_text_fmt(lbl_status, "SD Card: %s\\nOS Baseline Initialized.", sd_mounted ? "Mounted" : "Not Found");
+              lv_label_set_text(lbl_status, "Initializare sistem...");
 
               example_lvgl_unlock();
           }}
 
+          // --- Tasks ---
+          void network_task(void *pvParameters) {{
+              WiFi.mode(WIFI_STA);
+              WiFi.begin(SECRET_WIFI_SSID, SECRET_WIFI_PASS);
+              
+              while (WiFi.status() != WL_CONNECTED) {{
+                  vTaskDelay(pdMS_TO_TICKS(500));
+              }}
+
+              example_lvgl_lock(500);
+              if(lbl_status) lv_label_set_text(lbl_status, "WiFi Conectat. Testare API...");
+              example_lvgl_unlock();
+
+              // Auto API Test
+              HTTPClient http;
+              String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + String(SECRET_GEMINI_API_KEY);
+              http.begin(url);
+              http.addHeader("Content-Type", "application/json");
+              int httpCode = http.POST("{{\"contents\":[{{\"parts\":[{{\"text\":\"Test conexiune\"}}]}}]}}");
+              
+              example_lvgl_lock(500);
+              if (httpCode == 200) {{
+                  api_key_valid = true;
+                  if(lbl_status) lv_label_set_text(lbl_status, "Gemini API: VALID. OS Pregatit.");
+              }} else {{
+                  if(lbl_status) lv_label_set_text_fmt(lbl_status, "Gemini API Eroare: HTTP %d", httpCode);
+              }}
+              example_lvgl_unlock();
+              http.end();
+
+              vTaskDelete(NULL); // Network test task complete
+          }}
+
           void setup() {{
               Serial.begin(115200);
+              pinMode(BOOT_BTN, INPUT_PULLUP);
+              
               hw_init();
-              os_ui_build();
+              ui_init();
+
+              // Spawn network task non-blocking
+              xTaskCreate(network_task, "net_task", 8192, NULL, 5, NULL);
           }}
 
           void loop() {{
-              // Bucla principală rămâne goală, LVGL este gestionat de task-ul FreeRTOS din lvgl_port.c
-              delay(100);
+              // Watchdog safe loop. LVGL is handled by its own port task.
+              
+              // Hardware PTT Override
+              bool hw_boot = (digitalRead(BOOT_BTN) == LOW);
+              if (hw_boot && !is_recording) {{
+                  is_recording = true;
+                  example_lvgl_lock(100);
+                  if(btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0xEF4444), 0);
+                  if(lbl_ptt) lv_label_set_text(lbl_ptt, "MIC ON");
+                  example_lvgl_unlock();
+              }} else if (!hw_boot && is_recording && lv_obj_get_state(btn_ptt) != LV_STATE_PRESSED) {{
+                  is_recording = false;
+                  example_lvgl_lock(100);
+                  if(btn_ptt) lv_obj_set_style_bg_color(btn_ptt, lv_color_hex(0x3B82F6), 0);
+                  if(lbl_ptt) lv_label_set_text(lbl_ptt, "APASA & VORBESTE");
+                  // TODO: Trigger REST Audio Send Task here
+                  example_lvgl_unlock();
+              }}
+
+              // I2S Audio Capture Dummy Loop (Prepare for REST)
+              if (is_recording) {{
+                  if (esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo)) == ESP_OK) {{
+                      // Buffer active, ready for Base64 accumulation in next phase
+                  }}
+              }}
+
+              delay(50);
           }}
           """
           with open("sketch/sketch.ino", "w", encoding="utf-8") as f:
@@ -201,24 +310,27 @@ jobs:
           PYEOF
           python3 generator.py "$I2C_FUNC"
 
-      - name: Compile OS Baseline
+      - name: Compile OS Core Firmware
         run: |
           SKETCH_PATH="sketch/sketch.ino"
           FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
           arduino-cli compile --fqbn "$FQBN" --output-dir build_output "$SKETCH_PATH"
 
-      - name: Create Flash Artifacts
+      - name: Merge Partitions
         shell: bash
         run: |
           mkdir -p package_bin
-          cp build_output/*.bootloader.bin package_bin/bootloader.bin
-          cp build_output/*.partitions.bin package_bin/partition-table.bin
-          cp build_output/*.bin package_bin/
-          rm package_bin/*.bootloader.bin package_bin/*.partitions.bin || true
+          BOOTLOADER=$(ls build_output/*.bootloader.bin | head -n 1)
+          PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
+          APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
+          python -m esptool --chip esp32s3 merge_bin \
+            -o package_bin/gemini-os-core-v42.bin \
+            --flash_mode keep --flash_size 16MB --flash_freq 80m \
+            0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-os-phase1
-          path: package_bin/
+          name: gemini-os-core
+          path: package_bin/gemini-os-core-v42.bin
           if-no-files-found: error
