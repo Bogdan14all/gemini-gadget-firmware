@@ -1,11 +1,11 @@
-name: Build Gemini OS - v35 Gemini Live (PTT + SystemInstruction Fix)
+name: Build Gemini OS - v36 Gemini Live (Final Stable PTT)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v35 Gemini Live PTT
+    name: Build v36 Gemini Live PTT
     runs-on: ubuntu-latest
 
     steps:
@@ -154,7 +154,7 @@ jobs:
           echo "#pragma once" > sketch/secrets.h
           echo "#define SECRET_GEMINI_API_KEY \"${{ secrets.GEMINI_API_KEY }}\"" >> sketch/secrets.h
 
-      - name: Write sketch.ino (Push-to-Talk, string systemInstruction)
+      - name: Write sketch.ino (Push-to-Talk, mbedtls, String SI)
         shell: bash
         run: |
           I2C_FUNC=$(cat sketch/i2c_func.txt)
@@ -433,7 +433,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v35-gemini-live-ptt-string-si");
+              Serial.println("\n[BOOT] v36-gemini-live-final-ptt");
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
               I2C_INIT_CALL
@@ -566,14 +566,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v35-ptt-0x0.bin \
+            -o package_bin/gemini-v36-ptt-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v35-ptt-0x0.bin
+          ls -lh package_bin/gemini-v36-ptt-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v35-ptt
-          path: package_bin/gemini-v35-ptt-0x0.bin
+          name: gemini-v36-ptt
+          path: package_bin/gemini-v36-ptt-0x0.bin
           if-no-files-found: error
