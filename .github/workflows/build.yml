@@ -1,11 +1,11 @@
-name: Build Gemini OS - v59 Raw Audio PTT
+name: Build Gemini OS - v60 Audio Debug
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v59 Raw Audio PTT
+    name: Build v60 Audio Debug
     runs-on: ubuntu-latest
 
     steps:
@@ -225,30 +225,26 @@ jobs:
 
           void record_audio() {
               lvgl_port_lock(100);
-              lv_label_set_text(lbl_status, "Ascult... Vorbeste!");
+              lv_label_set_text(lbl_status, "Ascult...");
               lvgl_port_unlock();
 
               int samples_recorded = 0;
               unsigned long start_time = millis();
 
-              // Înregistrăm timp de maxim 4 secunde
               while (samples_recorded < RECORD_SAMPLES && (millis() - start_time < 4000)) {
                   int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
                   if (r == ESP_OK) {
                       int frames = (sizeof(buf_in_stereo)/sizeof(int16_t)) / 2;
                       for (int i = 0; i < frames && samples_recorded < RECORD_SAMPLES; i++) {
-                          if (i % 3 != 2) { // Downsample 24k -> 16k
+                          if (i % 3 != 2) { 
                               rec_buffer[samples_recorded++] = buf_in_stereo[i*2];
                           }
                       }
                   }
               }
-              
-              // Umplem restul cu 0 dacă s-a terminat timpul
               while (samples_recorded < RECORD_SAMPLES) {
                   rec_buffer[samples_recorded++] = 0;
               }
-              
               Serial.printf("[REC] Inregistrate %d samples\n", samples_recorded);
           }
 
@@ -262,8 +258,6 @@ jobs:
               HTTPClient http;
               http.begin(client, CLOUD_URL);
               http.setTimeout(60000); 
-              
-              // TRIMITEM DATE BRUTE (Octet Stream)
               http.addHeader("Content-Type", "application/octet-stream");
 
               Serial.printf("[HTTP] Se trimit %d bytes...\n", RECORD_SAMPLES * 2);
@@ -271,45 +265,56 @@ jobs:
 
               if (httpResponseCode == 200) {
                   int len = http.getSize();
-                  Serial.printf("[HTTP] Primit %d bytes audio de la server.\n", len);
+                  Serial.printf("[HTTP] Primit %d bytes (Content-Length).\n", len);
                   
-                  lvgl_port_lock(100);
-                  lv_label_set_text(lbl_status, "Redare voce...");
-                  lvgl_port_unlock();
+                  if (len == -1 || len == 0) {
+                      // Serverul a returnat o eroare text (nu audio)
+                      String errorMsg = http.getString();
+                      Serial.printf("[HTTP] Eroare server: %s\n", errorMsg.c_str());
+                      lvgl_port_lock(100);
+                      lv_label_set_text(lbl_status, "Eroare Server");
+                      lv_label_set_text(lbl_rx, errorMsg.c_str());
+                      lvgl_port_unlock();
+                  } else {
+                      // Serverul a returnat audio
+                      lvgl_port_lock(100);
+                      lv_label_set_text(lbl_status, "Redare voce...");
+                      lvgl_port_unlock();
 
-                  WiFiClient *stream = http.getStreamPtr();
-                  uint8_t buffer[512];
-                  size_t total_read = 0;
+                      WiFiClient *stream = http.getStreamPtr();
+                      uint8_t buffer[512];
+                      size_t total_read = 0;
 
-                  while (http.connected() && total_read < len) {
-                      size_t size_available = stream->available();
-                      if (size_available) {
-                          int c = stream->readBytes(buffer, min(size_available, sizeof(buffer)));
-                          if (c > 0) {
-                              int16_t* pcm = (int16_t*)buffer;
-                              int samples = c / sizeof(int16_t);
-                              for (int off = 0; off < samples; off += 128) {
-                                  int n = samples - off;
-                                  if (n > 128) n = 128;
-                                  int16_t* src = pcm + off;
-                                  for (int i = 0; i < n; i++) {
-                                      buf_out_stereo[i*2]   = src[i];
-                                      buf_out_stereo[i*2+1] = src[i];
+                      while (http.connected() && total_read < len) {
+                          size_t size_available = stream->available();
+                          if (size_available) {
+                              int c = stream->readBytes(buffer, min(size_available, sizeof(buffer)));
+                              if (c > 0) {
+                                  int16_t* pcm = (int16_t*)buffer;
+                                  int samples = c / sizeof(int16_t);
+                                  for (int off = 0; off < samples; off += 128) {
+                                      int n = samples - off;
+                                      if (n > 128) n = 128;
+                                      int16_t* src = pcm + off;
+                                      for (int i = 0; i < n; i++) {
+                                          buf_out_stereo[i*2]   = src[i];
+                                          buf_out_stereo[i*2+1] = src[i];
+                                      }
+                                      esp_codec_dev_write(playback, buf_out_stereo, n * 4);
                                   }
-                                  esp_codec_dev_write(playback, buf_out_stereo, n * 4);
+                                  total_read += c;
                               }
-                              total_read += c;
                           }
+                          delay(1);
                       }
-                      delay(1);
+                      Serial.println("[HTTP] Redare terminata.");
                   }
-                  Serial.println("[HTTP] Redare terminata.");
               } else {
-                  String response = http.getString();
-                  Serial.printf("[HTTP] Eroare %d: %s\n", httpResponseCode, response.c_str());
+                  String errorMsg = http.getString();
+                  Serial.printf("[HTTP] Eroare %d: %s\n", httpResponseCode, errorMsg.c_str());
                   lvgl_port_lock(100);
-                  lv_label_set_text(lbl_status, "Eroare server.");
-                  lv_label_set_text(lbl_rx, "Vezi log Serial.");
+                  lv_label_set_text(lbl_status, "Eroare Retea");
+                  lv_label_set_text(lbl_rx, ("Cod: " + String(httpResponseCode)).c_str());
                   lvgl_port_unlock();
               }
               http.end();
@@ -343,7 +348,9 @@ jobs:
               lbl_rx = lv_label_create(scr);
               lv_label_set_text(lbl_rx, "");
               lv_obj_set_style_text_color(lbl_rx, lv_color_hex(0xEF4444), 0);
-              lv_obj_set_style_text_font(lbl_rx, &lv_font_montserrat_14, 0);
+              lv_obj_set_style_text_font(lbl_rx, &lv_font_montserrat_12, 0);
+              lv_obj_set_width(lbl_rx, 150);
+              lv_label_set_long_mode(lbl_rx, LV_LABEL_LONG_WRAP);
               lv_obj_align(lbl_rx, LV_ALIGN_CENTER, 0, 40);
 
               lvgl_port_unlock();
@@ -353,7 +360,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v59-Raw-Audio-PTT");
+              Serial.println("\n[BOOT] v60-Audio-Debug");
 
               rec_buffer = (int16_t*)heap_caps_malloc(RECORD_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
               
@@ -401,7 +408,6 @@ jobs:
                       lv_label_set_text(lbl_status, "Gata. Apasa din nou.");
                       lvgl_port_unlock();
                       
-                      // Așteptăm să eliberezi butonul
                       while(digitalRead(BOOT_BTN) == LOW) delay(10);
                       delay(500);
                   }
@@ -431,14 +437,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v59-audio-0x0.bin \
+            -o package_bin/gemini-v60-audio-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v59-audio-0x0.bin
+          ls -lh package_bin/gemini-v60-audio-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v59-audio
-          path: package_bin/gemini-v59-audio-0x0.bin
+          name: gemini-v60-audio
+          path: package_bin/gemini-v60-audio-0x0.bin
           if-no-files-found: error
