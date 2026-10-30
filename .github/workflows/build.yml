@@ -1,11 +1,11 @@
-name: Build Gemini OS - v65 Debug HTTP
+name: Build Gemini OS - v66 Long Timeout
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v65 Debug HTTP
+    name: Build v66 Long Timeout
     runs-on: ubuntu-latest
 
     steps:
@@ -248,7 +248,8 @@ jobs:
               client.setInsecure(); 
               HTTPClient http;
               http.begin(client, CLOUD_URL);
-              http.setTimeout(45000); 
+              // TIMEOUT MARIT LA 90 SECUNDE
+              http.setTimeout(90000); 
               http.addHeader("Content-Type", "application/octet-stream");
 
               int httpResponseCode = http.POST((uint8_t*)rec_buffer, RECORD_SAMPLES * 2);
@@ -333,7 +334,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v65-Debug-HTTP");
+              Serial.println("\n[BOOT] v66-Long-Timeout");
 
               rec_buffer = (int16_t*)heap_caps_malloc(RECORD_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
               
@@ -403,14 +404,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v65-http-0x0.bin \
+            -o package_bin/gemini-v66-long-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v65-http-0x0.bin
+          ls -lh package_bin/gemini-v66-long-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v65-http
-          path: package_bin/gemini-v65-http-0x0.bin
+          name: gemini-v66-long
+          path: package_bin/gemini-v66-long-0x0.bin
           if-no-files-found: error
