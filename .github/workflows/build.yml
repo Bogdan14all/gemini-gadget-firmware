@@ -1,11 +1,11 @@
-name: Build Gemini OS - v61 Audio to Text
+name: Build Gemini OS - v62 Live WebSocket
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v61 Audio to Text
+    name: Build v62 Live WebSocket
     runs-on: ubuntu-latest
 
     steps:
@@ -35,7 +35,7 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
-      - name: Install libraries (LVGL 8.3.11 + ArduinoJson)
+      - name: Install libraries (LVGL 8.3.11 + WebSockets + ArduinoJson)
         shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
@@ -43,6 +43,7 @@ jobs:
             cp -r Arduino_Libraries/* ~/Arduino/libraries/ 2>/dev/null || true
           fi
           arduino-cli lib install "lvgl"@8.3.11
+          arduino-cli lib install "WebSockets"@2.5.2
           arduino-cli lib install "ArduinoJson"@7.0.4
 
           cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
@@ -53,18 +54,12 @@ jobs:
           #define LV_MEM_CUSTOM 0
           #define LV_MEM_SIZE (128U * 1024U)
           #define LV_TICK_CUSTOM 0
-          #define LV_FONT_MONTSERRAT_12 1
           #define LV_FONT_MONTSERRAT_14 1
           #define LV_FONT_MONTSERRAT_16 1
-          #define LV_FONT_MONTSERRAT_18 1
           #define LV_FONT_MONTSERRAT_20 1
-          #define LV_FONT_MONTSERRAT_28 1
           #define LV_FONT_DEFAULT &lv_font_montserrat_20
-          #define LV_USE_DEMO_WIDGETS 0
-          #define LV_USE_DEMO_MUSIC 0
-          #define LV_USE_DEMO_BENCHMARK 0
-          #define LV_USE_DEMO_STRESS 0
-          #define LV_USE_LOG 0
+          #define LV_USE_LABEL 1
+          #define LV_USE_BAR 1
           #endif
           EOF
           sed -i 's/^[ \t]*//' ~/Arduino/libraries/lv_conf.h
@@ -159,9 +154,7 @@ jobs:
           code = textwrap.dedent(r'''
           #include <Arduino.h>
           #include <WiFi.h>
-          #include <HTTPClient.h>
-          #include <WiFiClientSecure.h>
-          #include <esp_heap_caps.h>
+          #include <WebSocketsClient.h>
 
           extern "C" {
           #include "lvgl_port.h"
@@ -174,21 +167,24 @@ jobs:
           #define BOOT_BTN 0
           const char* WIFI_SSID = "TP-Link_2.4G_9318_Guest";
           const char* WIFI_PASS = "revelion";
-          const char* CLOUD_URL = "https://gemini-esp32-proxy-1m42.onrender.com/audio";
+          
+          // Adresa WebSocket a serverului Render
+          const char* WS_HOST = "gemini-esp32-proxy-1m42.onrender.com";
+          const int WS_PORT = 443;
+          const char* WS_PATH = "/audio_ws";
 
           esp_codec_dev_handle_t playback = NULL;
           esp_codec_dev_handle_t record = NULL;
           esp_io_expander_handle_t io_expander = NULL;
+          WebSocketsClient ws;
 
           lv_obj_t *lbl_status = NULL;
-          lv_obj_t *lbl_text   = NULL;
 
-          #define RECORD_SECONDS 3
-          #define SAMPLE_RATE 16000
-          #define RECORD_SAMPLES (RECORD_SECONDS * SAMPLE_RATE)
-
-          int16_t* rec_buffer = NULL;
           static int16_t buf_in_stereo[1024];
+          static int16_t buf_out_stereo[256];
+          static int16_t buf_mono_16k[682];
+
+          bool is_connected = false;
 
           void tca9554_init_local() {
               i2c_master_bus_handle_t bus;
@@ -222,58 +218,41 @@ jobs:
               esp_codec_dev_open(record, &fs);
           }
 
-          void record_audio() {
-              lvgl_port_lock(100);
-              lv_label_set_text(lbl_status, "Ascult...");
-              lv_label_set_text(lbl_text, "");
-              lvgl_port_unlock();
-
-              int samples_recorded = 0;
-              unsigned long start_time = millis();
-
-              while (samples_recorded < RECORD_SAMPLES && (millis() - start_time < 4000)) {
-                  int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
-                  if (r == ESP_OK) {
-                      int frames = (sizeof(buf_in_stereo)/sizeof(int16_t)) / 2;
-                      for (int i = 0; i < frames && samples_recorded < RECORD_SAMPLES; i++) {
-                          if (i % 3 != 2) { 
-                              rec_buffer[samples_recorded++] = buf_in_stereo[i*2];
+          void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
+              switch(type) {
+                  case WStype_CONNECTED:
+                      Serial.println("[WS] Conectat la Render!");
+                      is_connected = true;
+                      lvgl_port_lock(100);
+                      lv_label_set_text(lbl_status, "Conectat. Apasa BOOT.");
+                      lvgl_port_unlock();
+                      break;
+                  case WStype_DISCONNECTED:
+                      Serial.println("[WS] Deconectat.");
+                      is_connected = false;
+                      lvgl_port_lock(100);
+                      lv_label_set_text(lbl_status, "Deconectat...");
+                      lvgl_port_unlock();
+                      break;
+                  case WStype_BIN:
+                      // Redăm audio-ul primit direct de la Google prin Render
+                      if (length > 0) {
+                          int16_t* pcm = (int16_t*)payload;
+                          int samples = length / sizeof(int16_t);
+                          for (int off = 0; off < samples; off += 128) {
+                              int n = samples - off;
+                              if (n > 128) n = 128;
+                              int16_t* src = pcm + off;
+                              for (int i = 0; i < n; i++) {
+                                  buf_out_stereo[i*2]   = src[i];
+                                  buf_out_stereo[i*2+1] = src[i];
+                              }
+                              esp_codec_dev_write(playback, buf_out_stereo, n * 4);
                           }
                       }
-                  }
+                      break;
+                  default: break;
               }
-              while (samples_recorded < RECORD_SAMPLES) {
-                  rec_buffer[samples_recorded++] = 0;
-              }
-          }
-
-          void send_audio_request() {
-              lvgl_port_lock(100);
-              lv_label_set_text(lbl_status, "Se trimite...");
-              lvgl_port_unlock();
-
-              WiFiClientSecure client;
-              client.setInsecure(); 
-              HTTPClient http;
-              http.begin(client, CLOUD_URL);
-              http.setTimeout(45000); 
-              http.addHeader("Content-Type", "application/octet-stream");
-
-              int httpResponseCode = http.POST((uint8_t*)rec_buffer, RECORD_SAMPLES * 2);
-
-              lvgl_port_lock(100);
-              if (httpResponseCode == 200) {
-                  String response = http.getString();
-                  Serial.printf("[HTTP] Primit: %s\n", response.c_str());
-                  
-                  lv_label_set_text(lbl_status, "Rezultat:");
-                  lv_label_set_text(lbl_text, response.c_str());
-              } else {
-                  lv_label_set_text(lbl_status, "Eroare Retea");
-                  lv_label_set_text(lbl_text, ("Cod: " + String(httpResponseCode)).c_str());
-              }
-              lvgl_port_unlock();
-              http.end();
           }
 
           void build_ui() {
@@ -284,30 +263,16 @@ jobs:
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Speech to Text");
+              lv_label_set_text(title, "Live Voice");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
-              lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
-
-              lv_obj_t *hint = lv_label_create(scr);
-              lv_label_set_text(hint, "Apasa BOOT si vorbeste");
-              lv_obj_set_style_text_color(hint, lv_color_hex(0x94A3B8), 0);
-              lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
-              lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 60);
+              lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
 
               lbl_status = lv_label_create(scr);
-              lv_label_set_text(lbl_status, "Gata. Apasa BOOT.");
+              lv_label_set_text(lbl_status, "Se conecteaza...");
               lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_20, 0);
-              lv_obj_align(lbl_status, LV_ALIGN_CENTER, 0, -40);
-
-              lbl_text = lv_label_create(scr);
-              lv_label_set_text(lbl_text, "");
-              lv_obj_set_style_text_color(lbl_text, lv_color_hex(0x22C55E), 0);
-              lv_obj_set_style_text_font(lbl_text, &lv_font_montserrat_16, 0);
-              lv_obj_set_width(lbl_text, 150);
-              lv_label_set_long_mode(lbl_text, LV_LABEL_LONG_WRAP);
-              lv_obj_align(lbl_text, LV_ALIGN_CENTER, 0, 40);
+              lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_16, 0);
+              lv_obj_align(lbl_status, LV_ALIGN_CENTER, 0, -20);
 
               lvgl_port_unlock();
               Serial.println("[UI] Built");
@@ -316,10 +281,8 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v61-Audio-To-Text");
+              Serial.println("\n[BOOT] v62-Live-WebSocket");
 
-              rec_buffer = (int16_t*)heap_caps_malloc(RECORD_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-              
               pinMode(BOOT_BTN, INPUT_PULLUP);
               I2C_INIT_CALL
               delay(50);
@@ -348,17 +311,52 @@ jobs:
               Serial.println();
               if (WiFi.status() == WL_CONNECTED) {
                   Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
+                  
+                  // Conexiune WebSocket securizata
+                  ws.beginSSL(WS_HOST, WS_PORT, WS_PATH);
+                  ws.onEvent(wsEvent);
+                  ws.setReconnectInterval(5000);
               }
           }
 
           void loop() {
-              if (WiFi.status() == WL_CONNECTED && rec_buffer != NULL) {
+              ws.loop();
+
+              if (is_connected) {
                   if (digitalRead(BOOT_BTN) == LOW) {
-                      record_audio();
-                      send_audio_request();
-                      
-                      while(digitalRead(BOOT_BTN) == LOW) delay(10);
-                      delay(500);
+                      lvgl_port_lock(100);
+                      lv_label_set_text(lbl_status, "Vorbeste...");
+                      lvgl_port_unlock();
+
+                      // Trimitem audio continuu cat timp butonul e apasat
+                      int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
+                      if (r == ESP_OK) {
+                          int frames = (sizeof(buf_in_stereo)/sizeof(int16_t)) / 2;
+                          int out_count = 0;
+                          
+                          // Downsample 24k -> 16k
+                          for (int i = 0; i < frames; i++) {
+                              if (i % 3 != 2) {
+                                  buf_mono_16k[out_count++] = buf_in_stereo[i*2];
+                              }
+                          }
+                          // Trimitem datele brute prin WebSocket
+                          ws.sendBIN((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
+                      }
+                  } else {
+                      static bool was_pressed = false;
+                      if (was_pressed) {
+                          was_pressed = false;
+                          lvgl_port_lock(100);
+                          lv_label_set_text(lbl_status, "Astept raspuns...");
+                          lvgl_port_unlock();
+                          
+                          // Trimitem un pachet gol (sau de liniste) ca sa spunem ca am terminat
+                          // In Google Live API, oprirea trimiterii de audio este suficienta
+                      }
+                      if (digitalRead(BOOT_BTN) == LOW) {
+                          was_pressed = true;
+                      }
                   }
               }
               delay(20);
@@ -386,14 +384,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v61-stt-0x0.bin \
+            -o package_bin/gemini-v62-live-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v61-stt-0x0.bin
+          ls -lh package_bin/gemini-v62-live-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v61-stt
-          path: package_bin/gemini-v61-stt-0x0.bin
+          name: gemini-v62-live
+          path: package_bin/gemini-v62-live-0x0.bin
           if-no-files-found: error
