@@ -1,11 +1,11 @@
-name: Build Gemini OS - v56 Extreme Debug
+name: Build Gemini OS - v57 Safe Parse
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v56 Debug
+    name: Build v57 Safe Parse
     runs-on: ubuntu-latest
 
     steps:
@@ -179,7 +179,7 @@ jobs:
 
           void send_request() {
               lvgl_port_lock(100);
-              lv_label_set_text(lbl_status, "Se trimite la Cloud...");
+              lv_label_set_text(lbl_status, "Se trimite...");
               lvgl_port_unlock();
 
               String prompt = "Salut! Spune-mi o gluma scurta.";
@@ -192,7 +192,7 @@ jobs:
 
               HTTPClient http;
               http.begin(client, CLOUD_URL);
-              http.setTimeout(60000); // 60 secunde
+              http.setTimeout(60000); 
               http.addHeader("Content-Type", "application/json");
 
               JsonDocument doc;
@@ -201,9 +201,6 @@ jobs:
               serializeJson(doc, json_payload);
 
               Serial.println("\n--- [HTTP DEBUG] ---");
-              Serial.print("[HTTP] Payload trimis: "); Serial.println(json_payload);
-              Serial.println("[HTTP] Asteptam raspunsul...");
-
               int httpResponseCode = http.POST(json_payload);
               
               Serial.print("[HTTP] Cod raspuns: "); Serial.println(httpResponseCode);
@@ -211,33 +208,32 @@ jobs:
               lvgl_port_lock(100);
               if (httpResponseCode > 0) {
                   String response = http.getString();
-                  
-                  Serial.print("[HTTP] Lungime raspuns: "); Serial.print(response.length()); Serial.println(" bytes");
-                  Serial.print("[HTTP] RAW: "); Serial.println(response); // DEBUG EXTREM
+                  Serial.print("[HTTP] RAW: "); Serial.println(response);
 
-                  JsonDocument respDoc;
-                  DeserializationError err = deserializeJson(respDoc, response);
-                  
-                  if (err) {
-                      Serial.print("[JSON] Eroare parsare: "); Serial.println(err.c_str());
-                      lv_label_set_text(lbl_status, "Parse Error");
-                      lv_label_set_text(lbl_received, err.c_str()); 
+                  // Dacă primim HTML (erori 500), tăiem direct
+                  if (response.startsWith("<")) {
+                      lv_label_set_text(lbl_status, "Eroare Server");
+                      lv_label_set_text(lbl_received, "Serverul a returnat HTML. Verifica log-urile Render.");
                   } else {
-                      const char* text = respDoc["text"];
-                      if (text) {
-                          Serial.print("[JSON] Text extras: "); Serial.println(text);
-                          lv_label_set_text(lbl_status, "Succes!");
-                          lv_label_set_text(lbl_received, text);
+                      JsonDocument respDoc;
+                      DeserializationError err = deserializeJson(respDoc, response);
+                      if (err) {
+                          lv_label_set_text(lbl_status, "Parse Error");
+                          lv_label_set_text(lbl_received, err.c_str()); 
                       } else {
-                          Serial.println("[JSON] Nu am gasit cheia 'text' in raspuns.");
-                          lv_label_set_text(lbl_status, "Fara text");
-                          lv_label_set_text(lbl_received, "Cheie lipsa.");
+                          const char* text = respDoc["text"];
+                          if (text) {
+                              lv_label_set_text(lbl_status, "Succes!");
+                              lv_label_set_text(lbl_received, text);
+                          } else {
+                              lv_label_set_text(lbl_status, "Fara text");
+                              lv_label_set_text(lbl_received, "Raspuns invalid.");
+                          }
                       }
                   }
               } else {
-                  Serial.print("[HTTP] Eroare retea. Cod: "); Serial.println(httpResponseCode);
-                  lv_label_set_text(lbl_status, "Eroare Cloud");
-                  String err = "Cod: " + String(httpResponseCode);
+                  lv_label_set_text(lbl_status, "Eroare retea");
+                  String err = "Cod HTTP: " + String(httpResponseCode);
                   lv_label_set_text(lbl_received, err.c_str());
               }
               lvgl_port_unlock();
@@ -299,7 +295,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v56-Extreme-Debug");
+              Serial.println("\n[BOOT] v57-Safe-Parse");
 
               I2C_INIT_CALL
               delay(50);
@@ -351,14 +347,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v56-debug-0x0.bin \
+            -o package_bin/gemini-v57-safe-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v56-debug-0x0.bin
+          ls -lh package_bin/gemini-v57-safe-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v56-debug
-          path: package_bin/gemini-v56-debug-0x0.bin
+          name: gemini-v57-safe
+          path: package_bin/gemini-v57-safe-0x0.bin
           if-no-files-found: error
