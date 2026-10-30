@@ -1,11 +1,11 @@
-name: Build Gemini OS - v63 Live Debug Text
+name: Build Gemini OS - v64 Hybrid Voice
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v63 Live Debug Text
+    name: Build v64 Hybrid Voice
     runs-on: ubuntu-latest
 
     steps:
@@ -35,7 +35,7 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
-      - name: Install libraries (LVGL 8.3.11 + WebSockets + ArduinoJson)
+      - name: Install libraries (LVGL 8.3.11 + WebSockets)
         shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
@@ -43,8 +43,6 @@ jobs:
             cp -r Arduino_Libraries/* ~/Arduino/libraries/ 2>/dev/null || true
           fi
           arduino-cli lib install "lvgl"@8.3.11
-          arduino-cli lib install "WebSockets"@2.5.2
-          arduino-cli lib install "ArduinoJson"@7.0.4
 
           cat << 'EOF' > ~/Arduino/libraries/lv_conf.h
           #ifndef LV_CONF_H
@@ -154,7 +152,9 @@ jobs:
           code = textwrap.dedent(r'''
           #include <Arduino.h>
           #include <WiFi.h>
-          #include <WebSocketsClient.h>
+          #include <HTTPClient.h>
+          #include <WiFiClientSecure.h>
+          #include <esp_heap_caps.h>
 
           extern "C" {
           #include "lvgl_port.h"
@@ -167,22 +167,23 @@ jobs:
           #define BOOT_BTN 0
           const char* WIFI_SSID = "TP-Link_2.4G_9318_Guest";
           const char* WIFI_PASS = "revelion";
-          const char* WS_HOST = "gemini-esp32-proxy-1m42.onrender.com";
-          const int WS_PORT = 443;
-          const char* WS_PATH = "/audio_ws";
+          
+          // Endpoint-ul de voce hibrid
+          const char* CLOUD_URL = "https://gemini-esp32-proxy-1m42.onrender.com/voice";
 
           esp_codec_dev_handle_t playback = NULL;
           esp_codec_dev_handle_t record = NULL;
           esp_io_expander_handle_t io_expander = NULL;
-          WebSocketsClient ws;
 
           lv_obj_t *lbl_status = NULL;
 
+          #define RECORD_SECONDS 3
+          #define SAMPLE_RATE 16000
+          #define RECORD_SAMPLES (RECORD_SECONDS * SAMPLE_RATE)
+
+          int16_t* rec_buffer = NULL;
           static int16_t buf_in_stereo[1024];
           static int16_t buf_out_stereo[256];
-          static int16_t buf_mono_16k[682];
-
-          bool is_connected = false;
 
           void tca9554_init_local() {
               i2c_master_bus_handle_t bus;
@@ -216,41 +217,88 @@ jobs:
               esp_codec_dev_open(record, &fs);
           }
 
-          void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
-              switch(type) {
-                  case WStype_CONNECTED:
-                      Serial.println("[WS] Conectat la Render!");
-                      is_connected = true;
-                      break;
-                  case WStype_DISCONNECTED:
-                      Serial.println("[WS] Deconectat.");
-                      is_connected = false;
-                      break;
-                  case WStype_TEXT:
-                      // AICI CITIM EROAREA DE LA SERVER
-                      Serial.printf("[WS] EROARE SERVER: %s\n", payload);
-                      lvgl_port_lock(100);
-                      lv_label_set_text(lbl_status, (char*)payload);
-                      lvgl_port_unlock();
-                      break;
-                  case WStype_BIN:
-                      if (length > 0) {
-                          int16_t* pcm = (int16_t*)payload;
-                          int samples = length / sizeof(int16_t);
-                          for (int off = 0; off < samples; off += 128) {
-                              int n = samples - off;
-                              if (n > 128) n = 128;
-                              int16_t* src = pcm + off;
-                              for (int i = 0; i < n; i++) {
-                                  buf_out_stereo[i*2]   = src[i];
-                                  buf_out_stereo[i*2+1] = src[i];
-                              }
-                              esp_codec_dev_write(playback, buf_out_stereo, n * 4);
+          void record_audio() {
+              lvgl_port_lock(100);
+              lv_label_set_text(lbl_status, "Ascult...");
+              lvgl_port_unlock();
+
+              int samples_recorded = 0;
+              unsigned long start_time = millis();
+
+              while (samples_recorded < RECORD_SAMPLES && (millis() - start_time < 4000)) {
+                  int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
+                  if (r == ESP_OK) {
+                      int frames = (sizeof(buf_in_stereo)/sizeof(int16_t)) / 2;
+                      for (int i = 0; i < frames && samples_recorded < RECORD_SAMPLES; i++) {
+                          if (i % 3 != 2) { 
+                              rec_buffer[samples_recorded++] = buf_in_stereo[i*2];
                           }
                       }
-                      break;
-                  default: break;
+                  }
               }
+              while (samples_recorded < RECORD_SAMPLES) {
+                  rec_buffer[samples_recorded++] = 0;
+              }
+          }
+
+          void send_audio_request() {
+              lvgl_port_lock(100);
+              lv_label_set_text(lbl_status, "Se trimite...");
+              lvgl_port_unlock();
+
+              WiFiClientSecure client;
+              client.setInsecure(); 
+              HTTPClient http;
+              http.begin(client, CLOUD_URL);
+              http.setTimeout(45000); 
+              http.addHeader("Content-Type", "application/octet-stream");
+
+              int httpResponseCode = http.POST((uint8_t*)rec_buffer, RECORD_SAMPLES * 2);
+
+              lvgl_port_lock(100);
+              if (httpResponseCode == 200) {
+                  int len = http.getSize();
+                  if (len == -1 || len == 0) {
+                      String errorMsg = http.getString();
+                      lv_label_set_text(lbl_status, "Eroare Server");
+                      lv_label_set_text(lbl_status, errorMsg.c_str());
+                  } else {
+                      lv_label_set_text(lbl_status, "Redare voce...");
+                      lvgl_port_unlock();
+
+                      WiFiClient *stream = http.getStreamPtr();
+                      uint8_t buffer[512];
+                      size_t total_read = 0;
+
+                      while (http.connected() && total_read < len) {
+                          size_t size_available = stream->available();
+                          if (size_available) {
+                              int c = stream->readBytes(buffer, min(size_available, sizeof(buffer)));
+                              if (c > 0) {
+                                  int16_t* pcm = (int16_t*)buffer;
+                                  int samples = c / sizeof(int16_t);
+                                  for (int off = 0; off < samples; off += 128) {
+                                      int n = samples - off;
+                                      if (n > 128) n = 128;
+                                      int16_t* src = pcm + off;
+                                      for (int i = 0; i < n; i++) {
+                                          buf_out_stereo[i*2]   = src[i];
+                                          buf_out_stereo[i*2+1] = src[i];
+                                      }
+                                      esp_codec_dev_write(playback, buf_out_stereo, n * 4);
+                                  }
+                                  total_read += c;
+                              }
+                          }
+                          delay(1);
+                      }
+                  }
+              } else {
+                  String errorMsg = http.getString();
+                  lv_label_set_text(lbl_status, "Eroare Retea");
+              }
+              lvgl_port_unlock();
+              http.end();
           }
 
           void build_ui() {
@@ -261,17 +309,15 @@ jobs:
               lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
               lv_obj_t *title = lv_label_create(scr);
-              lv_label_set_text(title, "Live Voice");
+              lv_label_set_text(title, "Hybrid Voice");
               lv_obj_set_style_text_color(title, lv_color_hex(0x38BDF8), 0);
               lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
               lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
 
               lbl_status = lv_label_create(scr);
-              lv_label_set_text(lbl_status, "Se conecteaza...");
+              lv_label_set_text(lbl_status, "Apasa BOOT si vorbeste");
               lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_14, 0);
-              lv_obj_set_width(lbl_status, 150);
-              lv_label_set_long_mode(lbl_status, LV_LABEL_LONG_WRAP);
+              lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_16, 0);
               lv_obj_align(lbl_status, LV_ALIGN_CENTER, 0, 0);
 
               lvgl_port_unlock();
@@ -281,8 +327,10 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v63-Live-Debug");
+              Serial.println("\n[BOOT] v64-Hybrid-Voice");
 
+              rec_buffer = (int16_t*)heap_caps_malloc(RECORD_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+              
               pinMode(BOOT_BTN, INPUT_PULLUP);
               I2C_INIT_CALL
               delay(50);
@@ -311,32 +359,21 @@ jobs:
               Serial.println();
               if (WiFi.status() == WL_CONNECTED) {
                   Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
-                  ws.beginSSL(WS_HOST, WS_PORT, WS_PATH);
-                  ws.onEvent(wsEvent);
-                  ws.setReconnectInterval(5000);
               }
           }
 
           void loop() {
-              ws.loop();
-
-              if (is_connected) {
+              if (WiFi.status() == WL_CONNECTED && rec_buffer != NULL) {
                   if (digitalRead(BOOT_BTN) == LOW) {
+                      record_audio();
+                      send_audio_request();
+                      
                       lvgl_port_lock(100);
-                      lv_label_set_text(lbl_status, "Vorbeste...");
+                      lv_label_set_text(lbl_status, "Gata. Apasa din nou.");
                       lvgl_port_unlock();
-
-                      int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
-                      if (r == ESP_OK) {
-                          int frames = (sizeof(buf_in_stereo)/sizeof(int16_t)) / 2;
-                          int out_count = 0;
-                          for (int i = 0; i < frames; i++) {
-                              if (i % 3 != 2) {
-                                  buf_mono_16k[out_count++] = buf_in_stereo[i*2];
-                              }
-                          }
-                          ws.sendBIN((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
-                      }
+                      
+                      while(digitalRead(BOOT_BTN) == LOW) delay(10);
+                      delay(500);
                   }
               }
               delay(20);
@@ -364,14 +401,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v63-live-debug-0x0.bin \
+            -o package_bin/gemini-v64-hybrid-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v63-live-debug-0x0.bin
+          ls -lh package_bin/gemini-v64-hybrid-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v63-live-debug
-          path: package_bin/gemini-v63-live-debug-0x0.bin
+          name: gemini-v64-hybrid
+          path: package_bin/gemini-v64-hybrid-0x0.bin
           if-no-files-found: error
