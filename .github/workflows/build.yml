@@ -1,11 +1,11 @@
-name: Build Gemini OS - v64 Hybrid Voice
+name: Build Gemini OS - v65 Debug HTTP
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v64 Hybrid Voice
+    name: Build v65 Debug HTTP
     runs-on: ubuntu-latest
 
     steps:
@@ -35,7 +35,7 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
-      - name: Install libraries (LVGL 8.3.11 + WebSockets)
+      - name: Install libraries (LVGL 8.3.11)
         shell: bash
         run: |
           mkdir -p ~/Arduino/libraries
@@ -167,8 +167,6 @@ jobs:
           #define BOOT_BTN 0
           const char* WIFI_SSID = "TP-Link_2.4G_9318_Guest";
           const char* WIFI_PASS = "revelion";
-          
-          // Endpoint-ul de voce hibrid
           const char* CLOUD_URL = "https://gemini-esp32-proxy-1m42.onrender.com/voice";
 
           esp_codec_dev_handle_t playback = NULL;
@@ -255,12 +253,16 @@ jobs:
 
               int httpResponseCode = http.POST((uint8_t*)rec_buffer, RECORD_SAMPLES * 2);
 
+              Serial.printf("\n[HTTP] Cod raspuns: %d\n", httpResponseCode);
+
               lvgl_port_lock(100);
               if (httpResponseCode == 200) {
                   int len = http.getSize();
+                  Serial.printf("[HTTP] Content-Length: %d\n", len);
+                  
                   if (len == -1 || len == 0) {
                       String errorMsg = http.getString();
-                      lv_label_set_text(lbl_status, "Eroare Server");
+                      Serial.printf("[HTTP] Eroare text de la server: %s\n", errorMsg.c_str());
                       lv_label_set_text(lbl_status, errorMsg.c_str());
                   } else {
                       lv_label_set_text(lbl_status, "Redare voce...");
@@ -292,9 +294,11 @@ jobs:
                           }
                           delay(1);
                       }
+                      Serial.println("[HTTP] Redare terminata.");
                   }
               } else {
                   String errorMsg = http.getString();
+                  Serial.printf("[HTTP] Eroare cod %d. Mesaj: %s\n", httpResponseCode, errorMsg.c_str());
                   lv_label_set_text(lbl_status, "Eroare Retea");
               }
               lvgl_port_unlock();
@@ -318,6 +322,8 @@ jobs:
               lv_label_set_text(lbl_status, "Apasa BOOT si vorbeste");
               lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xFFFFFF), 0);
               lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_16, 0);
+              lv_obj_set_width(lbl_status, 150);
+              lv_label_set_long_mode(lbl_status, LV_LABEL_LONG_WRAP);
               lv_obj_align(lbl_status, LV_ALIGN_CENTER, 0, 0);
 
               lvgl_port_unlock();
@@ -327,7 +333,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v64-Hybrid-Voice");
+              Serial.println("\n[BOOT] v65-Debug-HTTP");
 
               rec_buffer = (int16_t*)heap_caps_malloc(RECORD_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
               
@@ -368,10 +374,6 @@ jobs:
                       record_audio();
                       send_audio_request();
                       
-                      lvgl_port_lock(100);
-                      lv_label_set_text(lbl_status, "Gata. Apasa din nou.");
-                      lvgl_port_unlock();
-                      
                       while(digitalRead(BOOT_BTN) == LOW) delay(10);
                       delay(500);
                   }
@@ -401,14 +403,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v64-hybrid-0x0.bin \
+            -o package_bin/gemini-v65-http-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v64-hybrid-0x0.bin
+          ls -lh package_bin/gemini-v65-http-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v64-hybrid
-          path: package_bin/gemini-v64-hybrid-0x0.bin
+          name: gemini-v65-http
+          path: package_bin/gemini-v65-http-0x0.bin
           if-no-files-found: error
