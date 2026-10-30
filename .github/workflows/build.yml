@@ -1,11 +1,11 @@
-name: Build Gemini OS - v62 Live WebSocket
+name: Build Gemini OS - v63 Live Debug Text
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build v62 Live WebSocket
+    name: Build v63 Live Debug Text
     runs-on: ubuntu-latest
 
     steps:
@@ -167,8 +167,6 @@ jobs:
           #define BOOT_BTN 0
           const char* WIFI_SSID = "TP-Link_2.4G_9318_Guest";
           const char* WIFI_PASS = "revelion";
-          
-          // Adresa WebSocket a serverului Render
           const char* WS_HOST = "gemini-esp32-proxy-1m42.onrender.com";
           const int WS_PORT = 443;
           const char* WS_PATH = "/audio_ws";
@@ -223,19 +221,19 @@ jobs:
                   case WStype_CONNECTED:
                       Serial.println("[WS] Conectat la Render!");
                       is_connected = true;
-                      lvgl_port_lock(100);
-                      lv_label_set_text(lbl_status, "Conectat. Apasa BOOT.");
-                      lvgl_port_unlock();
                       break;
                   case WStype_DISCONNECTED:
                       Serial.println("[WS] Deconectat.");
                       is_connected = false;
+                      break;
+                  case WStype_TEXT:
+                      // AICI CITIM EROAREA DE LA SERVER
+                      Serial.printf("[WS] EROARE SERVER: %s\n", payload);
                       lvgl_port_lock(100);
-                      lv_label_set_text(lbl_status, "Deconectat...");
+                      lv_label_set_text(lbl_status, (char*)payload);
                       lvgl_port_unlock();
                       break;
                   case WStype_BIN:
-                      // Redăm audio-ul primit direct de la Google prin Render
                       if (length > 0) {
                           int16_t* pcm = (int16_t*)payload;
                           int samples = length / sizeof(int16_t);
@@ -271,8 +269,10 @@ jobs:
               lbl_status = lv_label_create(scr);
               lv_label_set_text(lbl_status, "Se conecteaza...");
               lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xFFFFFF), 0);
-              lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_16, 0);
-              lv_obj_align(lbl_status, LV_ALIGN_CENTER, 0, -20);
+              lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_14, 0);
+              lv_obj_set_width(lbl_status, 150);
+              lv_label_set_long_mode(lbl_status, LV_LABEL_LONG_WRAP);
+              lv_obj_align(lbl_status, LV_ALIGN_CENTER, 0, 0);
 
               lvgl_port_unlock();
               Serial.println("[UI] Built");
@@ -281,7 +281,7 @@ jobs:
           void setup() {
               Serial.begin(115200);
               delay(500);
-              Serial.println("\n[BOOT] v62-Live-WebSocket");
+              Serial.println("\n[BOOT] v63-Live-Debug");
 
               pinMode(BOOT_BTN, INPUT_PULLUP);
               I2C_INIT_CALL
@@ -311,8 +311,6 @@ jobs:
               Serial.println();
               if (WiFi.status() == WL_CONNECTED) {
                   Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
-                  
-                  // Conexiune WebSocket securizata
                   ws.beginSSL(WS_HOST, WS_PORT, WS_PATH);
                   ws.onEvent(wsEvent);
                   ws.setReconnectInterval(5000);
@@ -328,34 +326,16 @@ jobs:
                       lv_label_set_text(lbl_status, "Vorbeste...");
                       lvgl_port_unlock();
 
-                      // Trimitem audio continuu cat timp butonul e apasat
                       int r = esp_codec_dev_read(record, buf_in_stereo, sizeof(buf_in_stereo));
                       if (r == ESP_OK) {
                           int frames = (sizeof(buf_in_stereo)/sizeof(int16_t)) / 2;
                           int out_count = 0;
-                          
-                          // Downsample 24k -> 16k
                           for (int i = 0; i < frames; i++) {
                               if (i % 3 != 2) {
                                   buf_mono_16k[out_count++] = buf_in_stereo[i*2];
                               }
                           }
-                          // Trimitem datele brute prin WebSocket
                           ws.sendBIN((uint8_t*)buf_mono_16k, out_count * sizeof(int16_t));
-                      }
-                  } else {
-                      static bool was_pressed = false;
-                      if (was_pressed) {
-                          was_pressed = false;
-                          lvgl_port_lock(100);
-                          lv_label_set_text(lbl_status, "Astept raspuns...");
-                          lvgl_port_unlock();
-                          
-                          // Trimitem un pachet gol (sau de liniste) ca sa spunem ca am terminat
-                          // In Google Live API, oprirea trimiterii de audio este suficienta
-                      }
-                      if (digitalRead(BOOT_BTN) == LOW) {
-                          was_pressed = true;
                       }
                   }
               }
@@ -384,14 +364,14 @@ jobs:
           PARTITIONS=$(ls build_output/*.partitions.bin | head -n 1)
           APP_BIN=$(ls build_output/*.bin | grep -v "bootloader" | grep -v "partitions" | head -n 1)
           python -m esptool --chip esp32s3 merge_bin \
-            -o package_bin/gemini-v62-live-0x0.bin \
+            -o package_bin/gemini-v63-live-debug-0x0.bin \
             --flash_mode keep --flash_size 16MB --flash_freq 80m \
             0x0 "$BOOTLOADER" 0x8000 "$PARTITIONS" 0x10000 "$APP_BIN"
-          ls -lh package_bin/gemini-v62-live-0x0.bin
+          ls -lh package_bin/gemini-v63-live-debug-0x0.bin
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-v62-live
-          path: package_bin/gemini-v62-live-0x0.bin
+          name: gemini-v63-live-debug
+          path: package_bin/gemini-v63-live-debug-0x0.bin
           if-no-files-found: error
